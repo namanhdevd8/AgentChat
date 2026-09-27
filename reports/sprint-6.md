@@ -92,3 +92,8 @@ Push lên remote, tạo PR, giải xung đột tự động bằng AI.
 - Sau ~100 tin mới, `.chat/summary.md` được PM cập nhật.
 - Bật worktree: dev-fe và dev-be cùng sửa `index.html` ở hai vùng khác nhau thì merge tự động và check xanh. Nếu cố tình sửa cùng dòng thì agent sau nhận tin xung đột. Thư mục chính chưa commit thì merge dừng và báo.
 - `npm run check` xanh.
+
+## Nghiệm thu (PM, 2026-09-27)
+- QA T19 đạt: `npm run check` xanh (9,1 giây), có thêm ca test Sprint 6, không phát hiện lỗi. Đã test trên repo Git mẫu: log 10.000 tin, tìm có dấu/không dấu, tóm tắt log cũ, phiên chết thì mở phiên mới, chuỗi 12 lượt, phanh khi hai agent chat qua lại, nút Tiếp tục, thư mục chính bẩn rồi thử lại, check đỏ, merge song song, xung đột, ô Token & Chi phí ở cột phải.
+- T15–T23 chuyển sang Xong. Sprint 6 đóng.
+- **Còn chờ End-User thử tay:** (1) ô tìm kiếm; (2) bấm kết quả thì nhảy tới tin; (3) nút Tiếp tục trên giao diện; (4) trần chi phí (CLI giả không báo chi phí nên chưa có ca test tự động). Có lỗi thì mở task mới.
