@@ -29,3 +29,11 @@ Nén phiên bên trong CLI, tự đổi model.
 - Prompt PM không còn task đã xong.
 - Popup avatar hiện cỡ phiên / ngưỡng.
 - `npm run check` xanh.
+
+## Nghiệm thu (PM, 2026-09-27)
+- QA T28 đạt: `npm run check` xanh (10,4 giây), không phát hiện lỗi.
+  - Xoay phiên: đúng 150.000 không xoay, 150.001 thì lượt sau là phiên mới; ngưỡng 0 hoặc token không rõ thì không xoay.
+  - Handoff: file được lưu, block bị gỡ khỏi tin chat, chặn symlink. Prompt chỉ gồm task chưa xong + "Đã xong N task".
+- T25, T26, T28 → Xong.
+- dev-fe không gửi tin bàn giao T27 (lượt rỗng); code có trong commit 68d0c4c. QA mới đọc code T27, chưa có check tự động cho ⚙ hai bên (T24).
+- **T24, T27 giữ Chờ duyệt đến khi End-User thử tay** ⚙ hai bên và popup cỡ phiên.
