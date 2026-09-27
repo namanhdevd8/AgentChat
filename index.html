@@ -1046,6 +1046,7 @@
     logError = null
     currentTotals = null
     worktreeState = null
+    sess = {}
 
     let res
     try {
@@ -1063,8 +1064,15 @@
       if (!Array.isArray(a.allowedCommands)) {
         a.allowedCommands = ['npm run check']
       }
+      if (a.sessionTokenLimit == null) {
+        a.sessionTokenLimit = 150000
+      }
       return a
     })
+
+    if (res.sessions && typeof res.sessions === 'object') {
+      sess = res.sessions
+    }
 
     if (res.history && Array.isArray(res.history.messages)) {
       boxLog = [...res.history.messages]
@@ -1130,6 +1138,8 @@
       } else if (ev.type === 'locks') {
         orphanLocks = ev.locks || []
         renderOrphanLocks()
+      } else if (ev.type === 'sessions-changed') {
+        sess = ev.sessions || {}
       }
     }
     pendingEvents = []
@@ -1259,7 +1269,7 @@
   function field(tag, value, onInput, attrs = {}) {
     const f = el(tag, 'f')
     Object.assign(f, attrs)
-    f.value = value || ''
+    f.value = (value != null && value !== '') ? value : ''
     f.oninput = () => onInput(f.value)
     return f
   }
@@ -1434,6 +1444,10 @@
       if (a.commandConfigError) {
         cmdErr = el('div', 'task-error-banner', `⚠️ Lỗi cấu hình lệnh: ${a.commandConfigError}`)
       }
+      let sessErr = null
+      if (a.sessionConfigError) {
+        sessErr = el('div', 'task-error-banner', `⚠️ Lỗi cấu hình xoay phiên: ${a.sessionConfigError}`)
+      }
 
       const m = modelsOf[a.cli], models = m?.models || []
       const efforts = models.find(x => x.id === a.model)?.efforts || m?.efforts || models[0]?.efforts || []
@@ -1450,15 +1464,14 @@
       const toInp = field('input', toVal, v => { a.timeoutMinutes = v }, { type: 'number', min: '1', max: '1440', step: '1', className: 'f', style: 'width: 100px;' })
       to.append(toInp)
 
-      // Chừa chỗ cho ô Ngưỡng xoay phiên (T27)
-      const rotLab = el('label', '', 'Ngưỡng xoay phiên (token)')
-      const rotVal = a.rotateThreshold != null ? a.rotateThreshold : (a.tokenThreshold != null ? a.tokenThreshold : '')
-      const rotInp = field('input', rotVal, v => { a.rotateThreshold = v ? Number(v) : null }, {
-        type: 'number', min: '0', step: '1000', placeholder: '150.000 (0: tắt)', className: 'f', style: 'width: 140px;',
-        title: 'Tự mở phiên mới khi token vào vượt ngưỡng (mặc định 150k, 0 = tắt)'
+      const rotLab = el('label', '', 'Ngưỡng xoay phiên (token vào)')
+      const rotVal = (a.sessionTokenLimit != null && a.sessionTokenLimit !== '') ? a.sessionTokenLimit : 150000
+      const rotInp = field('input', rotVal, v => { a.sessionTokenLimit = v }, {
+        type: 'number', min: '0', step: '1', placeholder: '150000', className: 'f', style: 'width: 140px;',
+        title: 'Tự mở phiên mới khi token vào vượt ngưỡng. 0 = tắt.'
       })
-      const rotNote = el('small', '', 'Mặc định 150k, 0 = tắt (Sprint 7)')
-      rotNote.style.color = 'var(--muted)'
+      const rotNote = el('small', '', '0 = tắt. Áp dụng cho lượt kế tiếp.')
+      if (rotNote.style) rotNote.style.color = 'var(--muted)'
       rotLab.append(rotInp, rotNote)
       limitsRow.append(to, rotLab)
 
@@ -1485,21 +1498,25 @@
       const line = el('div', 'sess')
       if (a.resume === false) line.append(el('span', '', 'Tắt nhớ phiên: mỗi lượt gửi lại 30 tin gần nhất'))
       else {
-        const cur = sess[a.name]?.cli === a.cli ? sess[a.name] : null
+        const cur = (sess[a.name]?.cli === a.cli && sess[a.name]?.id) ? sess[a.name] : null
         const sKey = sessionCacheKey(dir, a.name, a.cli, workspaceId)
         const list = sessionsOf[sKey]
         const lab = el('label', 'grow', `Phiên ${a.cli} trong dự án này`)
         lab.append(select([['', list ? 'Phiên mới (tự mở ở lượt tới)' : 'Đang tải…'], ...(list || []).map(s => [s.id, `${when(s.at)} · ${(s.title || s.id).slice(0, 70)}`])],
           cur?.id || '', async v => {
             try {
-              if (v) await api.useSession(dir, a.name, a.cli, v, workspaceId); else await api.resetSession(dir, a.name)
-              sess = await api.sessions(dir); renderEditors()
+              const targetDir = dir
+              if (v) await api.useSession(targetDir, a.name, a.cli, v, workspaceId); else await api.resetSession(targetDir, a.name)
+              if (dir === targetDir) {
+                sess = await api.sessions(targetDir)
+                renderEditors()
+              }
             } catch (e) { $('#err').textContent = e.message.replace(/^.*?Error: /, '') }
           }))
         line.append(lab)
         if (cur) line.append(el('small', '', cur.adopted ? 'Lượt tới gửi kèm bối cảnh nhóm' : `Đã đọc ${cur.seen} tin · ${when(cur.at)}`))
       }
-      card.append(top, avRow, tune, limitsRow, role, ownsLab, cmdLab, ...(cmdErr ? [cmdErr] : []), ...(reviewCard ? [reviewCard] : []), line)
+      card.append(top, avRow, tune, limitsRow, role, ownsLab, cmdLab, ...(cmdErr ? [cmdErr] : []), ...(sessErr ? [sessErr] : []), ...(reviewCard ? [reviewCard] : []), line)
       return card
     }))
 
@@ -1515,6 +1532,9 @@
       }
       if (!Array.isArray(a.allowedCommands)) {
         a.allowedCommands = ['npm run check']
+      }
+      if (a.sessionTokenLimit == null) {
+        a.sessionTokenLimit = 150000
       }
       return a
     })
@@ -1667,6 +1687,7 @@
       readOnly: false,
       resume: true,
       timeoutMinutes: 30,
+      sessionTokenLimit: 150000,
       allowedCommands: ['npm run check'],
       avatar: nextAvatar
     })
@@ -1681,7 +1702,12 @@
   }
   $('#resetAll').onclick = async () => {
     try {
-      await api.resetSession(dir, null); sess = {}; renderEditors()
+      const targetDir = dir
+      await api.resetSession(targetDir, null)
+      if (dir === targetDir) {
+        sess = await api.sessions(targetDir)
+        renderEditors()
+      }
     } catch (e) { $('#err').textContent = e.message.replace(/^.*?Error: /, '') }
   }
   $('#cancel').onclick = () => $('#settings').close()
@@ -1697,6 +1723,20 @@
         return
       }
       a.timeoutMinutes = val
+
+      const rawLim = a.sessionTokenLimit
+      let tokenLim = 150000
+      if (rawLim !== '' && rawLim != null) {
+        tokenLim = typeof rawLim === 'number' ? rawLim : Number(rawLim)
+      }
+      if (!Number.isSafeInteger(tokenLim) || tokenLim < 0) {
+        $('#err').textContent = `Ngưỡng xoay phiên của @${a.name || 'agent'} phải là số nguyên không âm (>= 0)`
+        currentSettingTab = 'agent:' + idx
+        updateSettingsViews()
+        return
+      }
+      a.sessionTokenLimit = tokenLim
+      delete a.sessionConfigError
 
       if (!a.avatar || !['male', 'female'].includes(a.avatar.gender) || !AVATAR_PALETTE.includes(a.avatar.color)) {
         $('#err').textContent = `Avatar của @${a.name || 'agent'} không hợp lệ`
@@ -3009,6 +3049,19 @@
     const pop = $('#member-popover')
     pop.hidden = false
     updateMemberPopoverContent(agent)
+
+    if (dir && typeof api.sessions === 'function') {
+      const reqDir = dir, reqSeq = openSeq
+      api.sessions(reqDir).then(s => {
+        if (dir === reqDir && openSeq === reqSeq && s) {
+          sess = s
+          if (currentPopoverAgent === agentName) {
+            const ag = team.find(a => a.name === agentName)
+            if (ag) updateMemberPopoverContent(ag)
+          }
+        }
+      }).catch(() => {})
+    }
   }
 
   function updateMemberPopoverContent(agent) {
@@ -3062,6 +3115,39 @@
       const warn = el('div', 'task-error-banner', '⚠️ Cần xác nhận phạm vi trong Cài đặt')
       pop.append(warn)
     }
+
+    const sRecord = sess[agent.name]
+    const s = (sRecord && sRecord.cli && sRecord.cli !== agent.cli) ? null : sRecord
+    const lastTurn = s?.lastTurn
+    const rawTokens = lastTurn?.inputTokens
+    const hasTokens = typeof rawTokens === 'number'
+    const limit = s?.sessionTokenLimit != null ? s.sessionTokenLimit : (agent.sessionTokenLimit != null ? Number(agent.sessionTokenLimit) : 150000)
+    const isPending = (s?.rotationPending != null) ? !!s.rotationPending : (
+      agent.resume !== false &&
+      !!s?.id &&
+      limit > 0 &&
+      hasTokens &&
+      rawTokens > limit
+    )
+
+    let sessionText = ''
+    if (agent.resume === false) {
+      sessionText = (hasTokens ? `${rawTokens.toLocaleString('vi-VN')} · ` : '') + 'Không nhớ phiên'
+    } else if (!hasTokens) {
+      sessionText = 'Chưa có số đo' + (limit === 0 ? ' · Tự xoay: tắt' : '')
+    } else if (limit === 0) {
+      sessionText = `${rawTokens.toLocaleString('vi-VN')} · Tự xoay: tắt`
+    } else {
+      sessionText = `${rawTokens.toLocaleString('vi-VN')} / ${limit.toLocaleString('vi-VN')}`
+      if (isPending) {
+        sessionText += ' · Sẽ mở phiên mới ở lượt kế tiếp'
+      }
+    }
+
+    const sessDiv = el('div', 'mp-status')
+    sessDiv.textContent = `Token vào lượt gần nhất: ${sessionText}`
+    sessDiv.title = 'Số token vào CLI báo cho lượt gần nhất, có thể gồm nhiều bước gọi model.' + (lastTurn?.partial ? ' (Chưa đủ dữ liệu)' : '')
+    pop.append(sessDiv)
 
     const stDiv = el('div', 'mp-status')
     if (!run) {
@@ -3718,6 +3804,20 @@
   api.on('log-reset', (d) => {
     if (d === dir) {
       openProject(dir)
+    }
+  })
+
+  api.on('sessions-changed', (d, sessions) => {
+    if (openingDir === d) {
+      pendingEvents.push({ type: 'sessions-changed', sessions })
+      return
+    }
+    if (d === dir) {
+      sess = sessions || {}
+      if (currentPopoverAgent) {
+        const agent = team.find(a => a.name === currentPopoverAgent)
+        if (agent) updateMemberPopoverContent(agent)
+      }
     }
   })
 
