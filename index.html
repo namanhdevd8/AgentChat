@@ -1241,6 +1241,7 @@
       const line = el('div', 'sess')
       if (a.resume === false) line.append(el('span', '', 'Tắt nhớ phiên: mỗi lượt gửi lại 30 tin gần nhất'))
       else {
+        const cur = sess[a.name]?.cli === a.cli ? sess[a.name] : null
         const sKey = sessionCacheKey(dir, a.name, a.cli, workspaceId)
         const list = sessionsOf[sKey]
         const lab = el('label', 'grow', `Phiên ${a.cli} trong dự án này`)
@@ -1826,20 +1827,11 @@
       const card = el('div', 'sys')
       const hdr = el('div', '', m.text)
       card.append(hdr)
-      if (m.queueId && m.owner) {
+      if (m.queueId && m.owner && ['CONFLICT', 'CHECK_FAILED', 'CHECK_MUTATED_TREE'].includes(m.error?.code)) {
         const repBtn = el('button', 'box press btn sm primary', `Gọi @${m.owner} sửa`)
         repBtn.type = 'button'
         repBtn.style.marginTop = '6px'
-        repBtn.onclick = async () => {
-          repBtn.disabled = true
-          try {
-            await api.requestMergeRepair(dir, { queueId: m.queueId })
-            showToast(`Đã yêu cầu @${m.owner} sửa xung đột`)
-          } catch (e) {
-            showToast(e.message.replace(/^.*?Error: /, ''))
-            repBtn.disabled = false
-          }
-        }
+        repBtn.onclick = () => runMergeAction('requestMergeRepair', m.queueId, repBtn, `Đã yêu cầu @${m.owner} sửa xung đột`)
         card.append(repBtn)
       }
       node = card
@@ -2338,9 +2330,10 @@
 
   async function loadWorktreeState(targetDir = dir) {
     if (!targetDir || typeof api.worktreeState !== 'function') return
+    const thisSeq = openSeq
     try {
       const res = await api.worktreeState(targetDir)
-      if (res && res.ok && targetDir === dir) {
+      if (res && res.ok && targetDir === dir && thisSeq === openSeq) {
         worktreeState = res.state
         renderWorktreeUI()
       }
@@ -2362,7 +2355,24 @@
     }
   }
 
+  async function runMergeAction(action, queueId, button, successMessage = '') {
+    const targetDir = dir, thisSeq = openSeq
+    button.disabled = true
+    try {
+      const res = await api[action](targetDir, { queueId })
+      if (targetDir !== dir || thisSeq !== openSeq) return
+      if (!res?.ok) throw new Error(res?.error?.message || 'Không thực hiện được thao tác gộp')
+      if (successMessage) showToast(successMessage)
+      await loadWorktreeState(targetDir)
+    } catch (e) {
+      if (targetDir === dir && thisSeq === openSeq) showToast(e.message.replace(/^.*?Error: /, ''))
+    } finally {
+      button.disabled = false
+    }
+  }
+
   function renderMergeQueue(queue) {
+    queue = queue.filter(item => item.state !== 'merged')
     const listEl = $('#merge-queue')
     const emptyEl = $('#merge-empty')
     const countEl = $('#merge-count')
@@ -2415,49 +2425,21 @@
       if (item.canRetry) {
         const retryBtn = el('button', 'box press btn sm', 'Thử gộp lại')
         retryBtn.type = 'button'
-        retryBtn.onclick = async () => {
-          retryBtn.disabled = true
-          try {
-            await api.retryMerge(dir, { queueId: item.id })
-            loadWorktreeState()
-          } catch (e) {
-            showToast(e.message.replace(/^.*?Error: /, ''))
-            retryBtn.disabled = false
-          }
-        }
+        retryBtn.onclick = () => runMergeAction('retryMerge', item.id, retryBtn)
         actions.append(retryBtn)
       }
 
       if (item.canRepair) {
         const repairBtn = el('button', 'box press btn sm primary', 'Gọi agent sửa')
         repairBtn.type = 'button'
-        repairBtn.onclick = async () => {
-          repairBtn.disabled = true
-          try {
-            await api.requestMergeRepair(dir, { queueId: item.id })
-            showToast(`Đã yêu cầu @${item.agent} sửa xung đột`)
-            loadWorktreeState()
-          } catch (e) {
-            showToast(e.message.replace(/^.*?Error: /, ''))
-            repairBtn.disabled = false
-          }
-        }
+        repairBtn.onclick = () => runMergeAction('requestMergeRepair', item.id, repairBtn, `Đã yêu cầu @${item.agent} sửa xung đột`)
         actions.append(repairBtn)
       }
 
       if (item.canStop) {
         const stopBtn = el('button', 'btn-stop box press', 'Dừng')
         stopBtn.type = 'button'
-        stopBtn.onclick = async () => {
-          stopBtn.disabled = true
-          try {
-            await api.stopMerge(dir, { queueId: item.id })
-            loadWorktreeState()
-          } catch (e) {
-            showToast(e.message.replace(/^.*?Error: /, ''))
-            stopBtn.disabled = false
-          }
-        }
+        stopBtn.onclick = () => runMergeAction('stopMerge', item.id, stopBtn)
         actions.append(stopBtn)
       }
 
