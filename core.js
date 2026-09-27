@@ -92,7 +92,8 @@ function agyLabel(update, dir) {
 // Each event mutates one turn-local state. parse() uses the same reducer for QA fixtures.
 const CLI = {
   claude: {
-    args: (p, id, a = {}) => ['-p', '--output-format', 'stream-json', '--verbose', '--permission-mode', 'acceptEdits', ...opt('--add-dir', a.sharedChat), ...opt('--model', a.model), ...opt('--effort', a.effort), ...opt('--resume', id), p],
+    // prompt right after -p: --add-dir is variadic and would swallow a trailing prompt ("Input must be provided…")
+    args: (p, id, a = {}) => ['-p', p, '--output-format', 'stream-json', '--verbose', '--permission-mode', 'acceptEdits', ...opt('--add-dir', a.sharedChat), ...opt('--model', a.model), ...opt('--effort', a.effort), ...opt('--resume', id)],
     state: () => ({ id: null, text: null, usage: null, rawCostUsd: null, error: null, terminal: false }),
     event(e, s, { dir }) {
       s.id ||= e.session_id
