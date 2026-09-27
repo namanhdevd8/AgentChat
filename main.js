@@ -676,7 +676,7 @@ function recordChainTurn(job, result, changed, metadataChanged, auditComplete) {
 }
 
 async function executeJob(job) {
-  let before, metadataBefore, result, paths = [], changed = [], metadataChanged = [], auditComplete = true, workspaceError
+  let before, metadataBefore, result, paths = [], changed = [], metadataChanged = [], auditComplete = true, workspaceError, handoffError
   try {
     before = await core.snapshot(job.cwd || job.root, { signal: job.controller.signal, excludeChat: job.worktree })
     if (job.worktree) metadataBefore = await core.snapshot(job.root, { signal: job.controller.signal, onlyChat: true })
@@ -687,11 +687,16 @@ async function executeJob(job) {
     else auditComplete = false
   }
   if (!result) {
-    result = await core.run(job.root, job.agent, {
+    const latest = core.team(job.root).find(agent => agent.name === job.name), runAgent = latest
+      ? { ...job.agent, sessionTokenLimit: latest.sessionTokenLimit, sessionConfigError: latest.sessionConfigError } : job.agent
+    if (job.kind !== 'summary' && runAgent.sessionConfigError) result = { outcome: 'error', text: runAgent.sessionConfigError, usage: zeroUsage() }
+    else result = await core.run(job.root, runAgent, {
       cwd: job.cwd || job.root, workspaceId: job.workspaceId,
+      runId: job.runId, trackSession: job.kind !== 'summary', sessionTokenLimit: runAgent.sessionTokenLimit,
       signal: job.controller.signal,
       onProgress: label => { if (!job.stopping) progress(job, label) },
       onSpawn: pid => { job.spawned = true; job.pgid = pid; persistRegistry(job.root) },
+      onSessionChanged: () => { try { emitSessions(job.root) } catch (e) { console.error('Không gửi được trạng thái phiên:', e) } },
       ...(job.initialPrompt ? { initialPrompt: job.initialPrompt } : {}),
     })
   }
@@ -754,6 +759,11 @@ async function executeJob(job) {
     if (parsed.error || parsed.changes) result.text = parsed.text || '(không có phản hồi)'
     if (parsed.error) taskError = parsed.error
     else if (parsed.changes) result.taskChanges = parsed.changes
+    const handoff = core.parseHandoffBlock(result.text)
+    if (handoff.requested) result.text = handoff.text || '(không có phản hồi)'
+    if (handoff.error) handoffError = handoff.error
+    else if (handoff.handoff) try { core.writeHandoff(job.root, job.name, job.workspaceId || null, job.runId, handoff.handoff) }
+      catch (e) { handoffError = e.message }
   }
   try {
     msg = await terminal(job, result)
@@ -764,6 +774,13 @@ async function executeJob(job) {
       notifyProjectChanged(job.root, { tasks: true })
     }
     if (taskError) await post(job.dir, 'system', `Không cập nhật được task: ${taskError}`, { kind: 'task-status-error', relatedRunId: job.runId })
+    if (handoffError) await post(job.dir, 'system', `Không lưu được bàn giao: ${handoffError}`, { kind: 'handoff-error', relatedRunId: job.runId })
+    if (result.sessionRotation) {
+      const handoff = result.sessionRotation.handoffStatus === 'missing' ? ' Không có bàn giao hợp lệ từ lượt trước.'
+        : result.sessionRotation.handoffStatus === 'older' ? ' Dùng bàn giao từ lượt cũ hơn.' : ''
+      await post(job.dir, 'system', `${job.name} mở phiên mới: lượt trước ${result.sessionRotation.inputTokens.toLocaleString('vi-VN')} token vào, vượt ngưỡng ${result.sessionRotation.limit.toLocaleString('vi-VN')}.${handoff}`,
+        { kind: 'session-rotated', relatedRunId: job.runId })
+    }
     if (workspaceError) await post(job.dir, 'system', `Không thể tạo commit cho @${job.name}: ${workspaceError.message}`,
       { kind: 'merge', owner: job.name, relatedRunId: job.runId, error: { code: workspaceError.code || 'GIT_ERROR', message: workspaceError.message,
         files: workspaceError.files || [], log: '' } })
@@ -986,6 +1003,23 @@ function agentSessionContext(root, name) {
   if (!record) return { cwd: null, workspaceId: null }
   return { cwd: managedPath(root, 'agents', record.id), workspaceId: record.id }
 }
+function sessionMap(root) {
+  const out = {}
+  for (const agent of core.team(root)) {
+    if (agent.sessionConfigError) continue
+    const context = agentSessionContext(root, agent.name)
+    if (!context.cwd) continue
+    const session = core.sessions(root, context.workspaceId)[agent.name]
+    if (session?.cli === agent.cli) out[agent.name] = { ...session, workspaceId: context.workspaceId,
+      sessionTokenLimit: agent.sessionTokenLimit, rotationPending: core.sessionRotationPending(agent, session) }
+  }
+  return out
+}
+function emitSessions(root) {
+  const current = sessionMap(root)
+  win?.webContents.send('sessions-changed', root, current)
+  return current
+}
 function resolveFile(dir, input, workspaceId = null) {
   const root = knownProject(dir)
   if (typeof input !== 'string' || !input || /[\0-\x1f\x7f]/.test(input) || input.includes('\\')) throw new Error('Đường dẫn không hợp lệ')
@@ -1029,7 +1063,7 @@ ipcMain.handle('open', async (event, dir) => {
   scheduleSummary(root).catch(e => console.error(e))
   if (config.settings.worktreesEnabled) pumpMerge(root).catch(e => console.error(e))
   return { history, totals: core.logTotals(index), settings: config.settings, settingsRevision: config.revision,
-    team: core.team(root), active: activeFor(root), orphanLocks: orphanFor(root) }
+    team: core.team(root), sessions: sessionMap(root), active: activeFor(root), orphanLocks: orphanFor(root) }
 })
 ipcMain.handle('logPage', (event, dir, options) => { validSender(event); return apiCall(async () => ({ page: await core.logPage(knownProject(dir), options) })) })
 ipcMain.handle('searchLog', (event, dir, options) => { validSender(event); return apiCall(() => core.searchLog(knownProject(dir), options)) })
@@ -1055,6 +1089,7 @@ ipcMain.handle('saveProjectSettings', (event, dir, request) => {
     if (!saved.settings.autoSummary) for (const job of jobs.filter(item => item.root === root && item.kind === 'summary')) stopJob(job, 'stopped')
     win?.webContents.send('project-settings', root, saved)
     await emitWorktreeState(root).catch(() => {})
+    emitSessions(root)
     if (saved.settings.autoSummary) scheduleSummary(root).catch(e => console.error(e))
     if (saved.settings.worktreesEnabled) pumpMerge(root).catch(e => console.error(e))
     return saved
@@ -1199,17 +1234,14 @@ ipcMain.handle('saveTeam', (event, dir, members) => {
     const next = members.find(agent => agent.name === workspace.agent)
     if (!next) throw new Error(`Không thể đổi tên hoặc xoá @${workspace.agent} khi agent còn workspace`)
   }
-  return core.saveTeam(root, members)
+  const saved = core.saveTeam(root, members)
+  emitSessions(root)
+  return saved
 })
 ipcMain.handle('accounts', event => { validSender(event); return core.accounts() })
 ipcMain.handle('sessions', (event, dir) => {
   validSender(event)
-  const root = knownProject(dir), out = {}
-  for (const agent of core.team(root)) {
-    const context = agentSessionContext(root, agent.name), session = core.sessions(root, context.workspaceId)[agent.name]
-    if (session) out[agent.name] = { ...session, workspaceId: context.workspaceId }
-  }
-  return out
+  return sessionMap(knownProject(dir))
 })
 ipcMain.handle('cliSessions', (event, cli, dir, agentName) => {
   validSender(event)
@@ -1227,15 +1259,19 @@ ipcMain.handle('useSession', async (event, dir, name, cli, id, workspaceId = nul
   const context = agentSessionContext(root, name)
   if (context.workspaceId !== workspaceId) throw gitError('INVALID_ARGUMENT', 'Workspace của phiên không còn đúng')
   const index = await core.getLogIndex(root)
-  return core.setSession(dir, name, { id, cli, seen: index.records.length, seenHash: index.prefixHashes[index.records.length], at: new Date().toISOString(), adopted: true }, context.workspaceId)
+  core.setSession(dir, name, { id, cli, seen: index.records.length, seenHash: index.prefixHashes[index.records.length], at: new Date().toISOString(), adopted: true }, context.workspaceId)
+  emitSessions(root)
 })
 ipcMain.handle('resetSession', (event, dir, name) => {
   validSender(event)
   const root = knownProject(dir), busy = [...jobs, ...orphans].some(x => x.root === root && (!name || x.name === name))
   if (busy) throw new Error(name ? `@${name} còn lượt hoặc khóa cũ` : 'Box đang có lượt hoặc khóa cũ')
-  if (name) return core.setSession(dir, name, null, agentSessionContext(root, name).workspaceId)
-  core.setSession(dir, null, null)
-  for (const workspace of readWorktrees(root).agents) core.setSession(root, null, null, workspace.id)
+  if (name) core.setSession(dir, name, null, agentSessionContext(root, name).workspaceId)
+  else {
+    core.setSession(dir, null, null)
+    for (const workspace of readWorktrees(root).agents) core.setSession(root, null, null, workspace.id)
+  }
+  emitSessions(root)
 }) // name null → reset all
 ipcMain.handle('stop', (event, dir, name, runId) => {
   validSender(event)
