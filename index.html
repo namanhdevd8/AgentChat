@@ -515,6 +515,10 @@
     <div id="tasks-tree" class="task-tree"></div>
     <div id="tasks-empty" class="none" hidden>Nhờ PM tạo task khi giao việc.</div>
   </section>
+  <section class="box" id="stats-sec" hidden>
+    <div class="sec-head"><h3>Token &amp; Chi phí</h3></div>
+    <div id="stats" class="stats-panel" title="Theo bộ đếm của CLI; cách tính cache có thể khác nhau"></div>
+  </section>
   <section class="box" id="merge-sec" hidden>
     <details id="merge-details" open>
       <summary class="sec-head merge-summary">
@@ -524,10 +528,6 @@
       <div id="merge-queue" class="merge-queue"></div>
       <div id="merge-empty" class="none" hidden>Không có nhánh đang chờ gộp.</div>
     </details>
-  </section>
-  <section class="box" id="stats-sec" hidden>
-    <div class="sec-head"><h3>Token &amp; Chi phí</h3></div>
-    <div id="stats" class="stats-panel" title="Theo bộ đếm của CLI; cách tính cache có thể khác nhau"></div>
   </section>
   <section class="box"><h3>File chung</h3><div id="files"><div class="none">—</div></div></section>
 </aside>
@@ -1052,13 +1052,28 @@
   let draft = [], sess = {}, accounts = [], modelsOf = {}, sessionsOf = {}
   const when = iso => new Date(iso).toLocaleString('vi-VN', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
 
+  const sessionCacheKey = (d, agentName, cli, wsId) => `${d || ''}\0${agentName || ''}\0${cli || ''}\0${wsId || ''}`
+
   // lazy per-account lookups; models stay cached (agy is slow), session lists refresh each time settings open
   function need(cli, agentName = null, workspaceId = null) {
-    if (!(cli in modelsOf)) { modelsOf[cli] = null; api.models(cli).catch(() => ({ models: [] })).then(m => { modelsOf[cli] = m; renderEditors() }) }
-    const sKey = agentName ? `${agentName}:${cli}:${workspaceId || ''}` : cli
+    if (!cli) return
+    if (!(cli in modelsOf)) {
+      modelsOf[cli] = null
+      api.models(cli).catch(() => ({ models: [] })).then(m => {
+        modelsOf[cli] = m
+        renderEditors()
+      })
+    }
+    const sKey = sessionCacheKey(dir, agentName, cli, workspaceId)
     if (!(sKey in sessionsOf)) {
       sessionsOf[sKey] = null
-      api.cliSessions(cli, dir, agentName).catch(() => []).then(s => { sessionsOf[sKey] = s; renderEditors() })
+      api.cliSessions(cli, dir, agentName).then(s => {
+        sessionsOf[sKey] = Array.isArray(s) ? s : []
+        renderEditors()
+      }).catch(() => {
+        sessionsOf[sKey] = []
+        renderEditors()
+      })
     }
   }
 
@@ -1088,8 +1103,9 @@
         a.allowedCommands = ['npm run check']
       }
 
-      const wtAgent = worktreeState?.agents?.find(x => x.name === a.name)
-      const workspaceId = sess[a.name]?.workspaceId ?? (worktreeState?.enabled ? (wtAgent?.workspaceId ?? null) : null)
+      const isWorktrees = !!(worktreeState?.enabled)
+      const wtAgent = worktreeState?.agents?.find(x => x.name.toLowerCase() === a.name.toLowerCase())
+      const workspaceId = (!isWorktrees || a.readOnly) ? null : (wtAgent?.workspaceId || sess[a.name]?.workspaceId || null)
       const card = el('div', 'agent box')
       const top = el('div', 'atop')
       need(a.cli, a.name, workspaceId)
@@ -1225,9 +1241,8 @@
       const line = el('div', 'sess')
       if (a.resume === false) line.append(el('span', '', 'Tắt nhớ phiên: mỗi lượt gửi lại 30 tin gần nhất'))
       else {
-        const cur = sess[a.name]?.cli === a.cli ? sess[a.name] : null
-        const sKey = a.name ? `${a.name}:${a.cli}:${workspaceId || ''}` : a.cli
-        const list = sessionsOf[sKey] || sessionsOf[a.cli]
+        const sKey = sessionCacheKey(dir, a.name, a.cli, workspaceId)
+        const list = sessionsOf[sKey]
         const lab = el('label', 'grow', `Phiên ${a.cli} trong dự án này`)
         lab.append(select([['', list ? 'Phiên mới (tự mở ở lượt tới)' : 'Đang tải…'], ...(list || []).map(s => [s.id, `${when(s.at)} · ${(s.title || s.id).slice(0, 70)}`])],
           cur?.id || '', async v => {
@@ -1311,7 +1326,11 @@
   async function openGitInitModal() {
     const modal = $('#git-init-modal')
     const errBanner = $('#git-init-error')
+    const confirmBtn = $('#git-init-confirm')
     errBanner.hidden = true
+    confirmBtn.disabled = true
+    gitInitToken = null
+    gitInitFiles = []
     $('#git-init-path').textContent = dir
     $('#git-init-branch').textContent = 'main'
     $('#git-init-files').replaceChildren(el('div', 'none', 'Đang chuẩn bị danh sách file…'))
@@ -1327,20 +1346,25 @@
         throw new Error(res?.error?.message || 'Không thể chuẩn bị Git init')
       }
       gitInitToken = res.token
-      gitInitFiles = Array.isArray(res.files) ? res.files : []
+      gitInitFiles = Array.isArray(res.files) ? [...res.files] : []
       $('#git-init-branch').textContent = res.branch || 'main'
       $('#git-init-ignore').textContent = res.ignoreText || ''
 
       const filesEl = $('#git-init-files')
       filesEl.replaceChildren()
-      if (!res.files || res.files.length === 0) {
+      if (!gitInitFiles || gitInitFiles.length === 0) {
         filesEl.append(el('div', 'none', 'Không có file nào để commit'))
+        confirmBtn.disabled = true
       } else {
-        res.files.forEach(f => {
+        gitInitFiles.forEach(f => {
           filesEl.append(el('div', '', f))
         })
+        confirmBtn.disabled = false
       }
     } catch (e) {
+      gitInitToken = null
+      gitInitFiles = []
+      confirmBtn.disabled = true
       errBanner.textContent = e.message.replace(/^.*?Error: /, '')
       errBanner.hidden = false
     }
@@ -1351,6 +1375,11 @@
   $('#git-init-confirm').onclick = async () => {
     const btn = $('#git-init-confirm')
     const errBanner = $('#git-init-error')
+    if (!gitInitToken || !Array.isArray(gitInitFiles) || gitInitFiles.length === 0) {
+      errBanner.textContent = 'Danh sách file commit đầu không hợp lệ'
+      errBanner.hidden = false
+      return
+    }
     btn.disabled = true
     errBanner.hidden = true
     try {
@@ -1482,6 +1511,13 @@
         })
         if (!pRes || !pRes.ok) {
           $('#err').textContent = pRes?.error?.message || 'Không lưu được cấu hình dự án'
+          try {
+            const pGet = await api.projectSettings(saveDir)
+            if (pGet && pGet.ok) {
+              currentSettings = pGet.settings || currentSettings
+              currentSettingsRevision = pGet.revision || null
+            }
+          } catch (_) {}
           return
         }
         currentSettings = pRes.settings || currentSettings
