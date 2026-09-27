@@ -13,6 +13,7 @@ try {
 } catch {}
 
 const TASK_STATUS_LABELS = { todo: 'Cần làm', doing: 'Đang làm', review: 'Chờ duyệt', done: 'Xong' }
+const RETRYABLE_MERGE_STATES = ['conflict', 'check-failed', 'blocked-dirty', 'blocked-config', 'needs-deps', 'error', 'paused']
 const jobs = [], orphans = [], loadedRoots = new Set(), rootDirs = new Map()
 const summaryUnavailable = new Set()
 const logGenerations = new Map(), appLogWrites = new Map()
@@ -188,11 +189,18 @@ async function worktreeState(root) {
     agents.push({ name: record.agent, workspaceId: record.id, branch: record.branch, ahead,
       busy: jobs.some(job => job.root === root && job.workspaceId === record.id && !job.finished) })
   }
+  const queue = await Promise.all(registry.queue.filter(entry => !entry.supersededBy).map(async entry => {
+    // Old registries keep failed attempts even after a retry (or a later commit) was merged.
+    if (probe?.branch === registry.targetRef && RETRYABLE_MERGE_STATES.includes(entry.state)
+      && await git(root, ['merge-base', '--is-ancestor', entry.headSha, probe.sha]).then(() => true).catch(() => false))
+      entry = { ...entry, state: 'merged', error: null }
+    return { id: entry.id, agent: entry.agent, headSha: entry.headSha, state: entry.state, label: queueLabel(entry),
+      error: entry.error || null, canRetry: RETRYABLE_MERGE_STATES.includes(entry.state),
+      canRepair: ['conflict', 'check-failed'].includes(entry.state), canStop: ['queued', 'checking'].includes(entry.state) }
+  }))
   return { revision: worktreeRevisions.get(root) || 0, enabled: settings.worktreesEnabled, available: !!probe, reason,
     targetBranch: registry.targetRef || probe?.branch || null, targetSha: probe?.sha || registry.targetSha || null, dirty: probe?.dirty || false, agents,
-    queue: registry.queue.map(entry => ({ id: entry.id, agent: entry.agent, headSha: entry.headSha, state: entry.state, label: queueLabel(entry),
-      error: entry.error || null, canRetry: ['conflict', 'check-failed', 'blocked-dirty', 'blocked-config', 'needs-deps', 'error', 'paused'].includes(entry.state),
-      canRepair: ['conflict', 'check-failed'].includes(entry.state), canStop: ['queued', 'checking'].includes(entry.state) })) }
+    queue }
 }
 
 async function emitWorktreeState(root) {
@@ -327,7 +335,7 @@ async function removeIntegration(root, entry) {
 
 async function processMerge(root, queued) {
   const registry = readWorktrees(root), entry = registry.queue.find(item => item.id === queued.id), settings = core.projectSettings(root).settings
-  if (!entry) return
+  if (!entry || entry.state !== 'queued' || entry.supersededBy) return
   if (!settings.worktreesEnabled) return
   const owner = core.team(root).find(agent => agent.name === entry.agent)
   if (!owner) { mergeError(entry, 'CHECK_NOT_ALLOWED', 'Agent sở hữu nhánh không còn trong nhóm'); writeWorktrees(root, registry); return }
@@ -1061,16 +1069,24 @@ ipcMain.handle('initGit', (event, dir, request) => {
 ipcMain.handle('retryMerge', (event, dir, request) => {
   validSender(event)
   return apiCall(async () => {
-    const root = knownProject(dir), registry = readWorktrees(root), old = registry.queue.find(entry => entry.id === request?.queueId)
-    if (!old || !['conflict', 'check-failed', 'blocked-dirty', 'blocked-config', 'needs-deps', 'error', 'paused'].includes(old.state))
-      throw gitError('INVALID_ARGUMENT', 'Mục gộp không thể thử lại')
-    const workspace = registry.agents.find(item => item.id === old.workspaceId)
-    if (!workspace) throw gitError('CONFIG_ERROR', 'Workspace không còn tồn tại')
-    const headSha = await git(workspace.path, ['rev-parse', 'HEAD']).then(result => result.stdout.trim())
-    const settings = core.projectSettings(root).settings
-    registry.queue.push({ ...old, id: randomUUID(), runId: randomUUID(), headSha, checks: [...settings.mergeChecks], state: 'queued',
-      baseSha: await gitHead(root), candidateSha: null, error: null, pgid: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() })
-    writeWorktrees(root, registry); pumpMerge(root).catch(e => console.error(e))
+    const root = knownProject(dir)
+    await withGitLock(root, async () => {
+      const registry = readWorktrees(root), old = registry.queue.find(entry => entry.id === request?.queueId)
+      if (old?.supersededBy) return
+      if (!old || !RETRYABLE_MERGE_STATES.includes(old.state)) throw gitError('INVALID_ARGUMENT', 'Mục gộp không thể thử lại')
+      const probe = await repoProbe(root)
+      if (probe.branch === registry.targetRef
+        && await git(root, ['merge-base', '--is-ancestor', old.headSha, probe.sha]).then(() => true).catch(() => false)) return
+      const workspace = registry.agents.find(item => item.id === old.workspaceId)
+      if (!workspace) throw gitError('CONFIG_ERROR', 'Workspace không còn tồn tại')
+      const headSha = await gitHead(await verifyWorkspace(root, workspace)), settings = core.projectSettings(root).settings
+      const id = randomUUID()
+      registry.queue.push({ ...old, id, runId: randomUUID(), headSha, checks: [...settings.mergeChecks], state: 'queued',
+        baseSha: probe.sha, candidateSha: null, error: null, pgid: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() })
+      old.supersededBy = id
+      writeWorktrees(root, registry)
+    })
+    pumpMerge(root).catch(e => console.error(e))
     return { state: await emitWorktreeState(root) }
   })
 })
@@ -1079,7 +1095,11 @@ ipcMain.handle('stopMerge', (event, dir, request) => {
   return apiCall(async () => {
     const root = knownProject(dir), registry = readWorktrees(root), entry = registry.queue.find(item => item.id === request?.queueId)
     if (!entry) throw gitError('INVALID_ARGUMENT', 'Không tìm thấy mục gộp')
-    if (entry.state === 'queued') { mergeError(entry, 'PAUSED', 'Đã dừng trước khi kiểm tra'); writeWorktrees(root, registry) }
+    if (entry.state === 'queued') await withGitLock(root, async () => {
+      const latest = readWorktrees(root), pending = latest.queue.find(item => item.id === entry.id)
+      if (pending?.state !== 'queued') throw gitError('BUSY', 'Mục gộp không còn ở trạng thái chờ')
+      mergeError(pending, 'PAUSED', 'Đã dừng trước khi kiểm tra'); writeWorktrees(root, latest)
+    })
     else if (entry.state === 'checking' && mergeControllers.get(root)?.entry.id === entry.id) mergeControllers.get(root).controller.abort('stopped')
     else throw gitError('BUSY', 'Không thể dừng trong bước Git hiện tại')
     return { state: await emitWorktreeState(root) }
@@ -1089,7 +1109,8 @@ ipcMain.handle('requestMergeRepair', (event, dir, request) => {
   validSender(event)
   return apiCall(async () => {
     const root = knownProject(dir), registry = readWorktrees(root), entry = registry.queue.find(item => item.id === request?.queueId)
-    if (!entry || !['conflict', 'check-failed'].includes(entry.state)) throw gitError('INVALID_ARGUMENT', 'Mục gộp chưa cần agent sửa')
+    if (!entry || !(await worktreeState(root)).queue.some(item => item.id === entry.id && item.canRepair))
+      throw gitError('INVALID_ARGUMENT', 'Mục gộp không còn cần agent sửa')
     const existing = jobs.find(job => job.root === root && job.repairQueueId === entry.id && !job.finished)
     if (existing) return { runId: existing.runId }
     const owner = core.team(root).find(agent => agent.name === entry.agent)

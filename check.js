@@ -501,6 +501,54 @@ async function sprint6Checks() {
   assert.strictEqual(ui.split('id="stats"').length, 2)
 }
 
+// Run the real settings/merge handlers with a minimal DOM; no Electron/CLI lookup needed.
+async function rendererChecks() {
+  const ui = fs.readFileSync(path.join(__dirname, 'index.html'), 'utf8'), vm = require('vm'), nodes = new Map(), notices = []
+  const el = (tag, className = '', textContent = '') => ({ tag, className, textContent, style: {}, children: [],
+    append(...children) { this.children.push(...children) }, replaceChildren(...children) { this.children = children },
+    setAttribute() {}, showModal() { this.open = true } })
+  const $ = id => { if (!nodes.has(id)) nodes.set(id, el('div')); return nodes.get(id) }
+  const session = { id: 'saved-session', cli: 'codex', workspaceId: 'workspace', seen: 42, at: '2026-09-27T00:00:00Z' }
+  const context = vm.createContext({ $, el, structuredClone, dir: '/box', openSeq: 1, notices,
+    team: [{ name: 'dev', cli: 'codex', avatar: { gender: 'male', color: '#abc' } }],
+    currentSettings: { worktreesEnabled: true }, currentSettingsRevision: null,
+    worktreeState: { enabled: true, agents: [{ name: 'dev', workspaceId: 'workspace' }] }, currentPopoverAgent: null,
+    AVATAR_PALETTE: ['#abc'], PALETTE_NAMES: {}, createAvatarSvg: () => el('svg'), avatar: () => el('svg'),
+    Option: function (label, value, defaultSelected, selected) { return { label, value, selected } },
+    showToast: message => notices.push(message),
+    api: { sessions: async () => ({ dev: session }), accounts: async () => ['codex'],
+      models: async () => ({ models: [] }), cliSessions: async () => [],
+      retryMerge: async () => ({ ok: false, error: { code: 'BUSY', message: 'merge busy' } }),
+      requestMergeRepair: async () => ({ ok: false, error: { code: 'INVALID_ARGUMENT', message: 'repair rejected' } }),
+      stopMerge: async () => ({ ok: false, error: { code: 'BUSY', message: 'stop busy' } }) } })
+  vm.runInContext(ui.slice(ui.indexOf('  // ---- settings:'), ui.indexOf('  let gitInitToken')), context)
+  await $('#gear').onclick()
+  assert.strictEqual($('#settings').open, true, 'gear must open settings for agents that remember sessions')
+  const all = node => [node, ...(node.children || []).flatMap(all)]
+  let options = all($('#editors')).filter(node => node.value === 'saved-session')
+  assert.ok(options.some(node => node.selected), 'current workspace session must be selected')
+  vm.runInContext("draft[0].cli = 'claude'; renderEditors()", context)
+  options = all($('#editors')).filter(node => node.value === 'saved-session')
+  assert.strictEqual(options.length, 0, 'switching CLI must not reuse the previous CLI session')
+
+  vm.runInContext(ui.slice(ui.indexOf('  // --- Sprint 6: Worktree & Merge Queue UI'), ui.indexOf('  function resizeInput()')), context)
+  vm.runInContext("renderMergeQueue([{id:'done',agent:'dev',state:'merged'}, {id:'blocked',agent:'dev',state:'blocked-dirty',canRetry:true,canRepair:true,canStop:true}])", context)
+  assert.strictEqual(Number($('#merge-count').textContent), 1, 'merged history is not pending work')
+  assert.strictEqual($('#merge-queue').children.length, 1)
+  const buttons = all($('#merge-queue')).filter(node => node.tag === 'button')
+  for (const [button, message] of buttons.map((button, i) => [button, ['merge busy', 'repair rejected', 'stop busy'][i]])) {
+    notices.length = 0; await button.onclick()
+    assert.deepStrictEqual(notices, [message], 'IPC ok:false must show the error instead of success')
+    assert.strictEqual(button.disabled, false)
+  }
+  let finish
+  context.api.retryMerge = () => new Promise(resolve => { finish = resolve })
+  const pending = buttons[0].onclick(); notices.length = 0
+  context.dir = '/other-box'; context.openSeq++
+  finish({ ok: false, error: { message: 'stale error' } }); await pending
+  assert.deepStrictEqual(notices, [], 'merge response from the previous box must be ignored')
+}
+
 // ---- Sprint 6 H + J through the real main.js: Electron stubbed, a sample git repo, a fake codex. Own process: main.js registers IPC globally ----
 function mainChecks() {
   const r = require('child_process').spawnSync(process.execPath, [__filename, '--main'], { encoding: 'utf8', timeout: 300000,
@@ -597,15 +645,39 @@ out({ type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } })
   assert.ok(log().some(m => m.from === 'system' && m.text.startsWith('@dev-a chưa gộp được nhánh')))
   assert.strictEqual(lines()[0], 'l0')
   fs.rmSync(at('dirty.tmp'))
-  assert.ok((await call('retryMerge', root, { queueId: entries[0].id })).ok)
+  const blockedId = entries[0].id
+  assert.ok((await call('retryMerge', root, { queueId: blockedId })).ok)
+  assert.ok((await call('retryMerge', root, { queueId: blockedId })).ok)
   entries = await settle(1, 'thử lại merge dev-a')
+  assert.strictEqual(queue().length, 2, 'repeated retry must enqueue only once')
   assert.deepStrictEqual(entries.map(e => e.state), ['merged']); assert.strictEqual(lines()[0], 'A0'); clean()
+  let visible = (await call('worktreeState', root)).state.queue
+  assert.strictEqual(visible.filter(e => e.canRetry || e.canRepair).length, 0, 'successful retry must retire the old error')
+  // Registry from the previous app version: old error + successful retry for the same SHA.
+  const legacy = JSON.parse(fs.readFileSync(at('.chat/worktrees.json'), 'utf8'))
+  delete legacy.queue[0].supersededBy
+  fs.writeFileSync(at('.chat/worktrees.json'), JSON.stringify(legacy))
+  visible = (await call('worktreeState', root)).state.queue
+  const old = visible.find(e => e.id === blockedId)
+  assert.strictEqual(old.state, 'merged'); assert.strictEqual(old.error, null); assert.strictEqual(old.canRetry, false)
+  // Historical check-failure messages must not schedule paid repair turns once resolved.
+  legacy.queue[0].state = 'check-failed'; legacy.queue[0].error = { code: 'CHECK_FAILED', message: 'old check failure' }
+  for (const supersededBy of [legacy.queue[1].id, undefined]) {
+    legacy.queue[0].supersededBy = supersededBy
+    fs.writeFileSync(at('.chat/worktrees.json'), JSON.stringify(legacy))
+    const beforeRepair = log().length
+    const repair = await call('requestMergeRepair', root, { queueId: blockedId })
+    assert.strictEqual(repair.ok, false, 'superseded/already-merged failures must reject repair')
+    assert.strictEqual(log().length, beforeRepair, 'rejected repair must not post a new agent request')
+  }
 
   // red check → not merged, the owner is called with the log
   await edit({ 'dev-c': [['a.txt', 5, 'RED']] }, '@dev-c sửa dòng 5')
   entries = await settle(1, 'merge dev-c (check đỏ)')
   assert.deepStrictEqual(entries.map(e => [e.agent, e.state]), [['dev-c', 'check-failed']])
   assert.ok(entries[0].error.log.includes('check đỏ')); assert.strictEqual(lines()[5], 'l5'); clean()
+  visible = (await call('worktreeState', root)).state.queue
+  assert.ok(visible.find(e => e.id === entries[0].id).canRepair, 'unmerged check failure must remain actionable')
   assert.ok(log().some(m => m.from === 'system' && m.text.startsWith('@dev-c chưa gộp được nhánh')))
 
   // two devs edit different lines of the same file in parallel → both merged automatically
@@ -620,5 +692,15 @@ out({ type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } })
   assert.ok(lost && won, JSON.stringify(entries.map(e => [e.agent, e.state])))
   assert.deepStrictEqual(lost.error.files, ['a.txt']); assert.strictEqual(lines()[4], won.agent === 'dev-a' ? 'A4' : 'B4'); clean()
   assert.ok(log().some(m => m.from === 'system' && m.text.startsWith(`@${lost.agent} chưa gộp được nhánh`)))
+
+  // A stopped pending retry stays paused, without overwriting other queue entries.
+  const stoppedConfig = core.projectSettings(root)
+  core.writeProjectSettings(root, { ...stoppedConfig.settings, worktreesEnabled: false }, stoppedConfig.revision)
+  assert.ok((await call('retryMerge', root, { queueId: lost.id })).ok)
+  const pending = queue().at(-1), otherEntries = queue().slice(0, -1)
+  assert.strictEqual(pending.state, 'queued')
+  assert.ok((await call('stopMerge', root, { queueId: pending.id })).ok)
+  assert.strictEqual(queue().at(-1).state, 'paused')
+  assert.deepStrictEqual(queue().slice(0, -1), otherEntries)
 }
-auditChecks().then(viewerChecks).then(runChecks).then(sprint6Checks).then(mainChecks).then(() => console.log('ok'), e => { console.error(e); process.exit(1) })
+auditChecks().then(viewerChecks).then(runChecks).then(sprint6Checks).then(rendererChecks).then(mainChecks).then(() => console.log('ok'), e => { console.error(e); process.exit(1) })
