@@ -61,6 +61,19 @@ Người viết: @pm · 2026-09-27. End-User đã chọn F + H, làm sau Sprint 
   - 5 lần UNAVAILABLE trong log, chỉ xảy ra với dev-fe.
   - Kết luận **có khả năng cao** (chưa chứng minh được) là phiên quá lớn làm dịch vụ từ chối. PM không chạy được agy để thử phiên mới vì lệnh bị chặn.
   - Cách xử lý đề xuất: End-User vào ⚙ → dev-fe → chọn "Phiên mới". Nhờ đã có `.chat/summary.md`, phiên mới vẫn đủ bối cảnh. Nếu vẫn 503 thì đổi tài khoản CLI của dev-fe sang codex.
+- **Hotfix "Invalid package … default_app.asar" (2026-09-27, sửa ngoài app):** sau khi End-User `git init` và bật worktree, mọi lượt lỗi ngay khi bắt đầu.
+  - Nguyên nhân: `bootstrapDependencies` (main.js) chép `node_modules` vào worktree bằng `fs` đã bị Electron vá, nên gặp lỗi `.asar` giống sự cố Sprint 2. Bản chép dở (123/412 MB) còn nằm lại và bị dùng lại ở các lượt sau.
+  - Đã sửa: chép bằng `original-fs` vào thư mục tạm rồi đổi tên; `gitInitPreview` cũng chuyển sang `original-fs`. Đã xoá bản chép dở. Kiểm tra trong Electron: `fs` thường tái hiện đúng lỗi, `original-fs` chép 454 MB trong 2,5 giây. `npm run check` xanh.
+  - **Bài học cho dev-be:** trong main process, mọi thao tác đi qua `node_modules`/`dist` phải dùng `rawFs`. QA nên thêm ca này vào check chạy bằng Electron.
+- **Sự cố 04:29–04:31, pm không chạy được (sửa ngoài app):**
+  - Lượt pm đầu tiên trong worktree lấy được mã phiên mới `102a1825` rồi CLI thoát khi chưa ghi phiên, nên app báo "Thiếu kết quả cuối". Chưa rõ vì sao thoát: stderr bị bỏ qua, và chạy tay lại cùng prompt trong worktree thì thành công.
+  - Từ lượt sau, app resume phiên không tồn tại. Claude báo "No conversation found with session ID", nhưng app chỉ hiện "Claude báo lỗi". Cơ chế "phiên hỏng thì mở phiên mới" của Sprint 1 đã bị mất khi refactor, nên pm lỗi mãi.
+  - Đã sửa trong `core.js`:
+    1. Khi lỗi "thiếu kết quả cuối", nối stderr vào thông báo lỗi.
+    2. Bộ đọc Claude hiện đúng nội dung trong trường `errors`.
+    3. Chỉ khi CLI báo không mở được phiên (claude "No conversation found", codex "no rollout found") thì app bỏ phiên và mở phiên mới 1 lần. Lỗi thật như 503 vẫn giữ phiên.
+  - Đã kiểm tra: `npm run check` xanh; thử bằng claude giả thì phiên chết được thay bằng phiên mới. **QA nên thêm ca này vào check.js.**
+- **Merge của dev-fe bị chặn DIRTY_ROOT:** thư mục chính có thay đổi chưa commit (các hotfix `main.js`, `core.js`, `reports/sprint-6.md`). End-User cần commit để hàng chờ merge chạy tiếp.
 - **Yêu cầu thêm của End-User (T23):** header của box đang quá nhiều thứ, bị tràn. Chuyển khối token và chi phí khỏi header sang **cột phải, nằm giữa bảng task và File chung**, hiển thị gọn, giữ nguyên số liệu hiện có.
 - Gọi QA nghiệm thu T19 ngay khi dev-fe báo xong T22 và T23.
 - Chờ End-User: khởi tạo git cho ai-chat; đưa J (nới giới hạn chuỗi) vào sprint này hay để sau.

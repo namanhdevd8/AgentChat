@@ -131,7 +131,14 @@ async function bootstrapDependencies(root, cwd) {
   }
   const source = path.join(root, 'node_modules'), target = path.join(cwd, 'node_modules')
   if (!fs.existsSync(source)) return false
-  if (!fs.existsSync(target)) await fs.promises.cp(source, target, { recursive: true, verbatimSymlinks: true, mode: fs.constants.COPYFILE_FICLONE })
+  if (!fs.existsSync(target)) {
+    // original-fs: Electron's fs treats *.asar (electron/dist/…/default_app.asar) as folders and the copy fails.
+    // Copy to a temp name and rename, so a failed copy never leaves a half-filled node_modules that later turns get reused.
+    const partial = `${target}.partial-${process.pid}`
+    await rawFs.promises.rm(partial, { recursive: true, force: true })
+    await rawFs.promises.cp(source, partial, { recursive: true, verbatimSymlinks: true, mode: rawFs.constants.COPYFILE_FICLONE })
+    await rawFs.promises.rename(partial, target)
+  }
   return true
 }
 
@@ -204,16 +211,16 @@ async function gitInitPreview(root) {
   if (fs.existsSync(path.join(root, '.git'))) throw gitError('UNSUPPORTED_REPO', 'Thư mục đã có .git')
   const files = [], fingerprints = []
   async function walk(folder, prefix = '') {
-    for (const entry of await fs.promises.readdir(folder, { withFileTypes: true })) {
+    for (const entry of await rawFs.promises.readdir(folder, { withFileTypes: true })) {
       if ((!prefix && ['.git', '.chat', 'node_modules', 'dist'].includes(entry.name)) || entry.name === '.DS_Store'
         || entry.name.startsWith('.env') || /\.(?:pem|key|p12)$/i.test(entry.name)) continue
       const relative = prefix ? `${prefix}/${entry.name}` : entry.name, absolute = path.join(folder, entry.name)
       if (entry.isDirectory()) await walk(absolute, relative)
       else if (entry.isFile()) {
-        const stat = await fs.promises.stat(absolute), hash = createHash('sha256').update(await fs.promises.readFile(absolute)).digest('hex')
+        const stat = await rawFs.promises.stat(absolute), hash = createHash('sha256').update(await rawFs.promises.readFile(absolute)).digest('hex')
         files.push(relative); fingerprints.push(`${relative}\0${stat.size}\0${hash}`)
       } else if (entry.isSymbolicLink()) {
-        const target = await fs.promises.readlink(absolute)
+        const target = await rawFs.promises.readlink(absolute)
         files.push(relative); fingerprints.push(`${relative}\0link\0${target}`)
       }
     }

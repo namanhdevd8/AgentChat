@@ -115,7 +115,7 @@ const CLI = {
         s.id = e.session_id || s.id
         s.usage = rawUsage(e.usage || e.result?.usage)
         s.rawCostUsd = value(e.total_cost_usd ?? e.result?.total_cost_usd)
-        if (e.is_error || (e.subtype && e.subtype !== 'success')) s.error = errorText(e.result) || 'Claude báo lỗi'
+        if (e.is_error || (e.subtype && e.subtype !== 'success')) s.error = errorText(e.result) || (Array.isArray(e.errors) && e.errors.filter(x => typeof x === 'string').join('; ')) || 'Claude báo lỗi'
       }
     },
     result: (s, context) => claudeResult(s, context.costBaseline),
@@ -1364,6 +1364,8 @@ function exec(dir, agent, session, { signal, onProgress, onSession, onSpawn, cos
       try { result = cli.result(state, context) }
       catch (e) { childError ||= e; result = { id: state.id, text: null, usage: emptyUsage(true), error: e.message } }
       if (!signal?.aborted && code && !result.error) result.error = se.trim().slice(-500) || `exit ${code}`
+      // parser-level errors ("no final result") hide why the CLI died; stderr usually says
+      else if (!signal?.aborted && result.error && se.trim() && !result.error.includes(se.trim().slice(-200))) result.error += ` — ${se.trim().slice(-300)}`
       if (childError && !result.error) result.error = childError.message
       if (orphanState && !result.error) result.error = 'Tiến trình con vẫn còn chạy sau khi CLI kết thúc'
       resolve({ ...result, id: result.id || session?.id, seen, rawCostUsd: state.rawCostUsd, killError, orphanState, pgid: c.pid })
@@ -1436,6 +1438,10 @@ ${JSON.stringify(publicCommandResult(result))}
 Báo kết quả thật cho nhóm; không tự lặp lại yêu cầu vừa hoàn thành. Nếu cần lệnh khác, chỉ yêu cầu đúng một lệnh được phép.${commandContext(agent)}`
 const emptyReply = agent => `Bạn chưa gửi tin trả lời. Hãy gửi tin trả lời cho nhóm; không thực hiện lại phần việc đã hoàn tất.${commandContext(agent)}`
 
+// What each CLI says when a --resume id it cannot open: claude "No conversation found with session ID",
+// codex "no rollout found for thread id". agy silently starts a new conversation instead.
+const MISSING_SESSION = /no conversation found|no rollout found|conversation not found|session not found/i
+
 async function run(dir, agent, options = {}) {
   const started = performance.now(), { signal, onProgress, onSpawn } = options
   const cwd = options.cwd || dir, workspaceId = options.workspaceId || null
@@ -1456,6 +1462,8 @@ async function run(dir, agent, options = {}) {
   }
   let r = { text: null, id: session?.id, seen: initial.total, usage: emptyUsage(true), error: null, rawCostUsd: null }
   let promptText = initial.text, emptyRetried = false, commandRequests = 0, jobSeen = initial.total, pgid, orphanState
+  const resumedFrom = session?.id
+  let freshRetried = false
   let allowedCommands
   try { allowedCommands = normalizeAllowedCommands(agent.allowedCommands ?? DEFAULT_COMMANDS) } catch { allowedCommands = [] }
   const usages = [], commandResults = []
@@ -1479,7 +1487,19 @@ async function run(dir, agent, options = {}) {
       if (agent.resume !== false && session?.id) setSession(dir, agent.name, { ...sessions(dir, workspaceId)[agent.name], ...session,
         costCheckpoint: { totalUsd: baseline } }, workspaceId)
     }
-    if (r.killError || r.orphanState || r.error || signal?.aborted) break
+    if (r.killError || r.orphanState || signal?.aborted) break
+    // A resumed session the CLI can no longer open (never persisted, deleted, expired) must not fail every later turn:
+    // drop it and start one fresh session with the full briefing. Only on the job's first attempt, never twice.
+    if (r.error && resumedFrom && !freshRetried && usages.length === 1 && MISSING_SESSION.test(r.error)) {
+      freshRetried = true
+      setSession(dir, agent.name, null, workspaceId); session = null
+      if (acc?.bin === 'claude') baseline = 0
+      try { initial = await promptIndexed(dir, agent, null) } catch { break }
+      promptText = initial.text; jobSeen = initial.total
+      onProgress?.('phiên cũ lỗi, mở phiên mới…')
+      continue
+    }
+    if (r.error) break
 
     const request = parseRunCommandBlock(r.text)
     if (request.requested) {
