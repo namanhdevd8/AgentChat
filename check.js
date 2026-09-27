@@ -1,6 +1,7 @@
 // node check.js — sanity check for @mention routing, project files, stream parsers, usage and Stop
 const assert = require('assert'), fs = require('fs'), os = require('os'), path = require('path')
 const core = require('./core')
+if (process.argv[2] === '--main') return void mainHarness().then(() => process.exit(0), e => { console.error(e); process.exit(1) })
 
 const t = [{ name: 'dev' }, { name: 'dev-fe' }, { name: 'pm' }]
 assert.deepStrictEqual(core.mentions('@dev-fe làm UI', t, 'pm').map(a => a.name), ['dev-fe'])
@@ -344,6 +345,7 @@ const bin = fs.mkdtempSync(path.join(os.tmpdir(), 'fake-cli-')), argsLog = path.
 fs.writeFileSync(path.join(bin, 'codex'), `#!${process.execPath}
 const fs = require('fs'), out = s => process.stdout.write(s)
 fs.appendFileSync(${JSON.stringify(argsLog)}, JSON.stringify(process.argv.slice(2)) + '\\n')
+if (process.env.FAKE_MODE === 'gone' && process.argv.includes('resume')) { process.stderr.write('Error: no rollout found for thread id T1\\n'); process.exit(1) }
 out(JSON.stringify({ type: 'thread.started', thread_id: 'T1' }) + '\\n')
 if (process.env.FAKE_MODE === 'slow') {
   fs.writeFileSync(${JSON.stringify(pidFile)}, String(require('child_process').spawn('sleep', ['30']).pid))
@@ -358,6 +360,7 @@ if (process.env.FAKE_MODE === 'slow') {
   else if (p.includes('Bạn chưa gửi tin trả lời')) reply(mode === 'empty' ? 'đã trả lời' : '')
   else if (mode.startsWith('cmd:')) reply(ask(mode.slice(4)))
   else if (mode === 'loop') reply(ask('node ok.js'))
+  else if (mode === 'gone') reply('phiên mới')
   else if (mode === 'task') reply(F + 'task-status\\n[{"id":"T1","status":"done","expectedRevision":"r"}]\\n' + F)
   else reply('')
 } else {
@@ -446,5 +449,176 @@ async function runChecks() {
   assert.ok(lastArgs().includes('T1')); assert.strictEqual(JSON.stringify(core.sessions(dir)), saved5) // RAM-only id for resume:false
   const stopped5 = new AbortController(); stopped5.abort('stopped')
   j = await job('empty', dev5, { signal: stopped5.signal }); assert.deepStrictEqual([j.outcome, j.calls], ['stopped', 0])
+
+  // ---- Sprint 6 hotfix: resume id the CLI cannot open → drop it, one fresh session; a real error keeps the session ----
+  assert.strictEqual(core.sessions(dir).dev.id, 'T1')
+  j = await job('gone'); assert.deepStrictEqual([j.outcome, j.text, j.calls], ['success', 'phiên mới', 2])
+  assert.ok(!lastArgs().includes('resume'), 'phiên chết vẫn bị resume: ' + lastArgs().join(' '))
+  j = await job('broken'); assert.deepStrictEqual([j.outcome, j.calls, core.sessions(dir).dev.id], ['error', 1, 'T1'])
 }
-auditChecks().then(viewerChecks).then(runChecks).then(() => console.log('ok'), e => { console.error(e); process.exit(1) })
+
+// ---- Sprint 6 F: indexed log, accent-insensitive search, 10k messages, J settings, summary checkpoint ----
+async function sprint6Checks() {
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-chat-s6-')); core.init(d)
+  const at = new Date().toISOString(), log = path.join(d, '.chat', 'log.jsonl')
+  fs.writeFileSync(log, Array.from({ length: 10000 }, (_, i) => JSON.stringify({ from: i % 3 ? 'dev' : 'user', at,
+    text: i === 42 ? 'Sprint 2: làm KHÓA FILE thật' : i === 43 ? 'khoa file không dấu' : `tin ${i}` })).join('\n') + '\n')
+  let t0 = performance.now(), page = await core.logPage(d)
+  assert.ok(performance.now() - t0 < 2000, `mở log 10k mất ${performance.now() - t0}ms`)
+  assert.deepStrictEqual([page.total, page.messages.length, page.messages[99].seq, page.hasBefore], [10000, 100, 9999, true])
+  t0 = performance.now(); const s = await core.searchLog(d, { query: 'khóa file' })
+  assert.ok(performance.now() - t0 < 500, `tìm mất ${performance.now() - t0}ms`)
+  assert.deepStrictEqual(s.results.map(r => r.seq), [43, 42]) // có dấu/không dấu, hoa/thường, mới nhất trước
+  const hit = s.results[1]; assert.strictEqual(hit.excerpt.slice(...hit.matches[0]), 'KHÓA FILE') // highlight on the original text
+  assert.deepStrictEqual((await core.searchLog(d, { query: 'KHOA FILE', from: 'user' })).results.map(r => r.seq), [42])
+  assert.deepStrictEqual((await core.searchLog(d, { query: 'khoa file', from: 'dev' })).results.map(r => r.seq), [43])
+  assert.deepStrictEqual((await core.logPage(d, { around: 42, limit: 5 })).messages.map(m => m.seq), [40, 41, 42, 43, 44]) // jump to hit
+  t0 = performance.now(); const appended = await core.appendLogIndexed(d, { from: 'user', text: 'mới', at })
+  assert.ok(performance.now() - t0 < 200, `ghi 1 tin vào log 10k mất ${performance.now() - t0}ms`)
+  assert.deepStrictEqual([appended.message.seq, appended.generation], [10000, page.generation]) // append keeps generation
+  // J settings: default 12, range 1–50, cost ceiling optional and > 0
+  const st = core.projectSettings(d).settings
+  assert.deepStrictEqual([st.chainLimit, st.costCeiling, st.autoSummary, st.worktreesEnabled], [12, null, true, false])
+  for (const bad of [{ chainLimit: 0 }, { chainLimit: 51 }, { chainLimit: 1.5 }, { costCeiling: 0 }, { costCeiling: -1 }, { costCeiling: '1' }])
+    assert.throws(() => core.normalizeProjectSettings(bad), undefined, JSON.stringify(bad))
+  assert.strictEqual(core.normalizeProjectSettings({ chainLimit: 50, costCeiling: 0.5 }).chainLimit, 50)
+  // F3: ≥100 old messages → PM batch; the accepted summary is a checkpoint record, the log itself is kept
+  const batch = await core.summaryBatch(d); assert.deepStrictEqual([batch.through, batch.end], [0, 100])
+  assert.ok(batch.prompt.includes('[42] [user] Sprint 2: làm KHÓA FILE thật'))
+  const summary = await core.acceptSummary(d, batch, '# Tóm tắt\n- khóa file ở Sprint 2', 'run-s')
+  core.materializeSummary(d, summary); await core.appendLogIndexed(d, { from: 'pm', at, kind: 'summary', summary, runId: 'run-s', text: 'tóm tắt' })
+  assert.ok(fs.readFileSync(path.join(d, '.chat', 'summary.md'), 'utf8').includes('khóa file ở Sprint 2'))
+  assert.deepStrictEqual([(await core.summaryBatch(d)).through, (await core.logPage(d)).total], [100, 10002])
+  assert.ok((await core.promptIndexed(d, core.team(d)[0], null)).text.includes('khóa file ở Sprint 2')) // new session gets the summary
+  await assert.rejects(core.acceptSummary(d, batch, 'x', 'r2')) // stale checkpoint refused
+  core.writeProjectSettings(d, { ...st, autoSummary: false }, core.projectSettings(d).revision)
+  assert.strictEqual(await core.summaryBatch(d), null) // turned off in ⚙
+
+  // T23: token & cost panel lives in the right column between the task board and File chung, not in the header
+  const ui = fs.readFileSync(path.join(__dirname, 'index.html'), 'utf8'), aside = ui.indexOf('<aside>')
+  const [tasksAt, statsAt, filesAt] = ['id="tasks-sec"', 'id="stats-sec"', '<h3>File chung</h3>'].map(x => ui.indexOf(x, aside))
+  assert.ok(aside > 0 && aside < tasksAt && tasksAt < statsAt && statsAt < filesAt, 'panel token không nằm giữa Bảng task và File chung')
+  assert.strictEqual(ui.split('id="stats"').length, 2)
+}
+
+// ---- Sprint 6 H + J through the real main.js: Electron stubbed, a sample git repo, a fake codex. Own process: main.js registers IPC globally ----
+function mainChecks() {
+  const r = require('child_process').spawnSync(process.execPath, [__filename, '--main'], { encoding: 'utf8', timeout: 300000,
+    env: { ...process.env, SHELL: '/nonexistent' } }) // SHELL: main.js must not replace PATH (fake CLI) with the login shell's
+  assert.strictEqual(r.status, 0, 'main.js (chuỗi agent / worktree / merge) lỗi:\n' + String(r.stdout + r.stderr).slice(-4000))
+}
+
+async function mainHarness() {
+  const Module = require('module'), { execFileSync } = require('child_process')
+  const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-chat-ud-')), handlers = {}
+  const webContents = { send() {}, setWindowOpenHandler() {}, on() {} }
+  const electron = { app: { getPath: () => userData, requestSingleInstanceLock: () => true, whenReady: () => Promise.resolve(), on() {}, quit() {} },
+    BrowserWindow: function () { return { webContents, loadFile: () => Promise.resolve(), isMinimized: () => false } },
+    ipcMain: { handle: (name, fn) => { handlers[name] = fn } }, dialog: {}, shell: {} }
+  const load = Module._load
+  Module._load = function (request, ...rest) { return request === 'electron' ? electron : load.call(this, request, ...rest) }
+
+  // fake codex: agent name from the prompt; FAKE_EDITS {agent: [[file, line, text]]}, FAKE_REPLY {agent: text}, FAKE_PROGRESS → touch a file
+  const mbin = fs.mkdtempSync(path.join(os.tmpdir(), 'fake-main-'))
+  fs.writeFileSync(path.join(mbin, 'codex'), `#!${process.execPath}
+const fs = require('fs'), p = process.argv[process.argv.length - 1], me = (/Bạn là @([\\w-]+)/.exec(p) || [])[1] || '?'
+const out = o => process.stdout.write(JSON.stringify(o) + '\\n')
+for (const [file, line, text] of JSON.parse(process.env.FAKE_EDITS || '{}')[me] || []) {
+  const lines = fs.readFileSync(file, 'utf8').split('\\n'); lines[line] = text; fs.writeFileSync(file, lines.join('\\n'))
+}
+if (process.env.FAKE_PROGRESS) fs.appendFileSync('progress-' + me + '.txt', 'x')
+out({ type: 'thread.started', thread_id: 'M' + process.pid })
+out({ type: 'item.completed', item: { type: 'agent_message', text: JSON.parse(process.env.FAKE_REPLY || '{}')[me] || 'xong' } })
+out({ type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } })
+`, { mode: 0o755 })
+  process.env.PATH = mbin + path.delimiter + process.env.PATH
+
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'agent-chat-git-'))), at = f => path.join(root, f)
+  core.init(root)
+  fs.writeFileSync(at('.chat/agents.json'), JSON.stringify(['dev-a', 'dev-b', 'dev-c'].map(name =>
+    ({ name, cli: 'codex', role: 'Dev', owns: ['*.txt'], resume: false, allowedCommands: ['npm run check'] }))))
+  fs.writeFileSync(at('a.txt'), Array.from({ length: 10 }, (_, i) => `l${i}`).join('\n'))
+  fs.writeFileSync(at('package.json'), JSON.stringify({ name: 'fixture', private: true, scripts: { check: 'node chk.js' } }))
+  fs.writeFileSync(at('chk.js'), 'if (require("fs").readFileSync("a.txt", "utf8").includes("RED")) { console.error("check đỏ"); process.exit(1) }')
+  fs.writeFileSync(at('.gitignore'), '.chat/\nnode_modules/\n'); fs.mkdirSync(at('node_modules')); fs.writeFileSync(at('node_modules/.keep'), '')
+  const git = (...args) => execFileSync('git', ['-C', root, '-c', 'user.name=QA', '-c', 'user.email=qa@local', ...args], { encoding: 'utf8' })
+  git('init', '-q', '-b', 'main'); git('add', 'a.txt', 'package.json', 'chk.js', '.gitignore'); git('commit', '-q', '-m', 'init')
+  fs.writeFileSync(path.join(userData, 'projects.json'), JSON.stringify([root]))
+
+  require('./main'); await new Promise(r => setImmediate(r))
+  const ev = { sender: webContents }, call = (name, ...args) => handlers[name](ev, ...args)
+  await call('open', root)
+  const log = () => core.readLog(root), queue = () => { try { return JSON.parse(fs.readFileSync(at('.chat/worktrees.json'), 'utf8')).queue } catch { return [] } }
+  const waitFor = async (what, test, ms = 60000) => {
+    for (const end = Date.now() + ms; Date.now() < end; await new Promise(r => setTimeout(r, 50))) { const v = test(); if (v) return v }
+    throw new Error(`Hết giờ chờ: ${what}\n` + log().slice(-8).map(m => `[${m.from}] ${m.text}`).join('\n'))
+  }
+  const turns = from => log().slice(from).filter(m => /^dev-/.test(m.from)).length
+  const stops = () => log().map((m, seq) => ({ ...m, seq })).filter(m => m.kind === 'chain-stop')
+  const pingPong = JSON.stringify({ 'dev-a': '@dev-b tiếp', 'dev-b': '@dev-a tiếp' })
+
+  // J3: two agents ping-pong without file/task changes → stopped after 3 rounds; "Tiếp tục" starts a fresh chain
+  process.env.FAKE_REPLY = pingPong
+  let mark = log().length; await call('send', root, '@dev-a bắt đầu')
+  let stop = await waitFor('phanh chat qua lại', () => stops()[0])
+  assert.ok(stop.canContinue && stop.text.includes('qua lại'), stop.text); assert.strictEqual(turns(mark), 6)
+  mark = log().length; assert.ok((await call('continueChain', root, { messageId: stop.seq })).ok)
+  stop = await waitFor('phanh lần 2 sau Tiếp tục', () => stops()[1]); assert.strictEqual(turns(mark), 6)
+  assert.strictEqual((await call('continueChain', root, { messageId: stops()[0].seq })).ok, false) // one continue per stop
+
+  // J1/J2: a chain that makes progress runs all 12 (default) turns — 8 valid turns are never cut
+  process.env.FAKE_PROGRESS = '1'; mark = log().length; await call('send', root, '@dev-a làm')
+  stop = await waitFor('giới hạn 12 lượt', () => stops()[2])
+  assert.ok(stop.text.includes('12 lượt'), stop.text); assert.strictEqual(turns(mark), 12)
+  delete process.env.FAKE_PROGRESS; delete process.env.FAKE_REPLY
+  for (const f of fs.readdirSync(root)) if (f.startsWith('progress-')) fs.rmSync(at(f))
+
+  // H: enable worktrees (repo clean), every agent works in its own branch; merges go through `npm run check`
+  const cfg = await call('projectSettings', root)
+  let on // the last chain turn may still be releasing its job → BUSY for a moment
+  for (let i = 0; i < 100 && (!on || on.error?.code === 'BUSY'); i++) {
+    if (on) await new Promise(r => setTimeout(r, 50))
+    on = await call('saveProjectSettings', root, { settings: { ...cfg.settings, worktreesEnabled: true }, expectedRevision: cfg.revision })
+  }
+  assert.ok(on.ok, JSON.stringify(on.error))
+  const lines = () => fs.readFileSync(at('a.txt'), 'utf8').split('\n'), clean = () => assert.strictEqual(git('status', '--porcelain'), '')
+  const done = e => !['queued', 'merging', 'checking', 'publishing'].includes(e.state)
+  let q0 = 0, entries
+  const settle = async (count, what) => {
+    const from = q0; await waitFor(what, () => queue().length >= from + count && queue().every(done)); q0 += count; return queue().slice(from)
+  }
+  const edit = (edits, text) => { process.env.FAKE_EDITS = JSON.stringify(edits); return call('send', root, text) }
+
+  // dirty main folder → merge stops and tells the agent; after cleaning, "retry" merges
+  fs.writeFileSync(at('dirty.tmp'), 'x')
+  await edit({ 'dev-a': [['a.txt', 0, 'A0']] }, '@dev-a sửa dòng 0')
+  entries = await settle(1, 'merge dev-a (thư mục bẩn)')
+  assert.deepStrictEqual(entries.map(e => [e.agent, e.state]), [['dev-a', 'blocked-dirty']])
+  assert.ok(log().some(m => m.from === 'system' && m.text.startsWith('@dev-a chưa gộp được nhánh')))
+  assert.strictEqual(lines()[0], 'l0')
+  fs.rmSync(at('dirty.tmp'))
+  assert.ok((await call('retryMerge', root, { queueId: entries[0].id })).ok)
+  entries = await settle(1, 'thử lại merge dev-a')
+  assert.deepStrictEqual(entries.map(e => e.state), ['merged']); assert.strictEqual(lines()[0], 'A0'); clean()
+
+  // red check → not merged, the owner is called with the log
+  await edit({ 'dev-c': [['a.txt', 5, 'RED']] }, '@dev-c sửa dòng 5')
+  entries = await settle(1, 'merge dev-c (check đỏ)')
+  assert.deepStrictEqual(entries.map(e => [e.agent, e.state]), [['dev-c', 'check-failed']])
+  assert.ok(entries[0].error.log.includes('check đỏ')); assert.strictEqual(lines()[5], 'l5'); clean()
+  assert.ok(log().some(m => m.from === 'system' && m.text.startsWith('@dev-c chưa gộp được nhánh')))
+
+  // two devs edit different lines of the same file in parallel → both merged automatically
+  await edit({ 'dev-a': [['a.txt', 2, 'A2']], 'dev-b': [['a.txt', 8, 'B8']] }, '@dev-a @dev-b sửa a.txt')
+  entries = await settle(2, 'merge song song khác dòng')
+  assert.deepStrictEqual(entries.map(e => e.state), ['merged', 'merged']); assert.deepStrictEqual([lines()[2], lines()[8]], ['A2', 'B8']); clean()
+
+  // same line → the first merges, the second gets a conflict message naming the file
+  await edit({ 'dev-a': [['a.txt', 4, 'A4']], 'dev-b': [['a.txt', 4, 'B4']] }, '@dev-a @dev-b cùng sửa dòng 4')
+  entries = await settle(2, 'merge cùng dòng')
+  const lost = entries.find(e => e.state === 'conflict'), won = entries.find(e => e.state === 'merged')
+  assert.ok(lost && won, JSON.stringify(entries.map(e => [e.agent, e.state])))
+  assert.deepStrictEqual(lost.error.files, ['a.txt']); assert.strictEqual(lines()[4], won.agent === 'dev-a' ? 'A4' : 'B4'); clean()
+  assert.ok(log().some(m => m.from === 'system' && m.text.startsWith(`@${lost.agent} chưa gộp được nhánh`)))
+}
+auditChecks().then(viewerChecks).then(runChecks).then(sprint6Checks).then(mainChecks).then(() => console.log('ok'), e => { console.error(e); process.exit(1) })
