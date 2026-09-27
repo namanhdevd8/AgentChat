@@ -1,0 +1,31 @@
+{
+  "name": "agent-chat",
+  "productName": "Agent Chat",
+  "version": "0.1.0",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "check": "node check.js",
+    "dist": "electron-builder --mac"
+  },
+  "build": {
+    "appId": "dev.namanh.agentchat",
+    "files": [
+      "main.js",
+      "preload.js",
+      "core.js",
+      "index.html"
+    ],
+    "mac": {
+      "target": "dmg",
+      "identity": null
+    }
+  },
+  "devDependencies": {
+    "electron": "^44.4.5",
+    "electron-builder": "^26.15.3"
+  },
+  "dependencies": {
+    "markdown-it": "15.0.2"
+  }
+}

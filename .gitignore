@@ -1,0 +1,9 @@
+.chat
+.chat/
+node_modules/
+dist/
+.DS_Store
+.env*
+*.pem
+*.key
+*.p12
