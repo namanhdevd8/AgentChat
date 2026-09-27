@@ -258,6 +258,15 @@ assert.ok(!core.prompt(box, { name: 'qa', role: 'x' }).includes(rev3))
 const pmPrompt = core.prompt(box, { name: 'pm', role: 'x' }, { id: 's', seen: 0 }) // S4: PM sees every task, with revision
 assert.ok(pmPrompt.includes(rev3) && pmPrompt.includes(task('T2').revision))
 for (const f of ['preload.js', 'main.js']) assert.ok(!fs.readFileSync(path.join(__dirname, f), 'utf8').includes('setTaskStatus'), `${f} còn setTaskStatus`)
+// S7 K3: prompt lists only unfinished tasks + "Đã xong N task." (per visible set); board/validator keep done tasks
+assert.ok(pmPrompt.includes('Đã xong 0 task.') && core.prompt(box, { name: 'qa', role: 'x' }).includes('Đã xong 0 task.'))
+commit('pm', change('T3', 'done'))
+const k3 = (name, s) => core.prompt(box, { name, role: 'x' }, s)
+assert.ok(!k3('pm').includes('"T3"') && k3('pm').includes('"T2"') && k3('pm').includes('Đã xong 1 task.'))
+assert.ok(!k3('dev', { id: 's', seen: 0 }).includes('"T3"') && k3('dev', { id: 's', seen: 0 }).includes('Đã xong 1 task.')) // resume too
+assert.ok(k3('qa').includes('"T2"') && k3('qa').includes('Đã xong 0 task.')) // T3 was dev's, not counted for qa
+assert.deepStrictEqual(statuses(), [['T2', 'doing'], ['T3', 'done']]) // full board still has it
+assert.strictEqual(change('T3', 'review')[0].status, 'review') // PM can still reopen via the full board revision
 
 // task-status block: only a closed ```task-status fence at the very end of the final answer
 const P = core.parseTaskStatusBlock, blk = j => '```task-status\n' + j + '\n```', one = '[{"id":"T1","status":"review","expectedRevision":"r"}]'
@@ -346,7 +355,7 @@ fs.writeFileSync(path.join(bin, 'codex'), `#!${process.execPath}
 const fs = require('fs'), out = s => process.stdout.write(s)
 fs.appendFileSync(${JSON.stringify(argsLog)}, JSON.stringify(process.argv.slice(2)) + '\\n')
 if (process.env.FAKE_MODE === 'gone' && process.argv.includes('resume')) { process.stderr.write('Error: no rollout found for thread id T1\\n'); process.exit(1) }
-out(JSON.stringify({ type: 'thread.started', thread_id: 'T1' }) + '\\n')
+out(JSON.stringify({ type: 'thread.started', thread_id: process.env.FAKE_TID || 'T1' }) + '\\n')
 if (process.env.FAKE_MODE === 'slow') {
   fs.writeFileSync(${JSON.stringify(pidFile)}, String(require('child_process').spawn('sleep', ['30']).pid))
   out(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: '@pm làm tiếp' } }) + '\\n')
@@ -354,13 +363,14 @@ if (process.env.FAKE_MODE === 'slow') {
 } else if (process.env.FAKE_MODE !== 'ok') { // Sprint 5 modes: cmd:<command>, loop, empty, empty2, task, broken
   const mode = process.env.FAKE_MODE, argv = process.argv.slice(2), p = argv[argv.length - 1], F = '\\x60'.repeat(3)
   const ask = command => 'Chạy\\n' + F + 'run-command\\n' + JSON.stringify({ command }) + '\\n' + F
-  const reply = text => { if (text) out(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text } }) + '\\n'); out(JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 3, output_tokens: 2 } }) + '\\n') }
+  const reply = text => { if (text) out(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text } }) + '\\n'); out(JSON.stringify({ type: 'turn.completed', usage: { input_tokens: process.env.FAKE_IN === 'null' ? null : Number(process.env.FAKE_IN || 3), output_tokens: 2 } }) + '\\n') }
   if (mode === 'broken') process.exit(1)
   else if (p.includes('DỮ LIỆU KHÔNG TIN CẬY')) reply(mode === 'loop' ? ask('node ok.js') : 'kết quả ' + (/"exitCode":(\\d+|null)/.exec(p) || [])[1] + (p.includes('"error"') ? ' lỗi' : ''))
   else if (p.includes('Bạn chưa gửi tin trả lời')) reply(mode === 'empty' ? 'đã trả lời' : '')
   else if (mode.startsWith('cmd:')) reply(ask(mode.slice(4)))
   else if (mode === 'loop') reply(ask('node ok.js'))
   else if (mode === 'gone') reply('phiên mới')
+  else if (mode === 'text') reply(process.env.FAKE_TEXT)
   else if (mode === 'task') reply(F + 'task-status\\n[{"id":"T1","status":"done","expectedRevision":"r"}]\\n' + F)
   else reply('')
 } else {
@@ -455,6 +465,85 @@ async function runChecks() {
   j = await job('gone'); assert.deepStrictEqual([j.outcome, j.text, j.calls], ['success', 'phiên mới', 2])
   assert.ok(!lastArgs().includes('resume'), 'phiên chết vẫn bị resume: ' + lastArgs().join(' '))
   j = await job('broken'); assert.deepStrictEqual([j.outcome, j.calls, core.sessions(dir).dev.id], ['error', 1, 'T1'])
+}
+
+// ---- Sprint 7 K1/K2/K4 core: per-agent token limit, rotate at the next turn, handoff block + file ----
+async function sprint7Checks() {
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-chat-s7-')); core.init(d)
+  const agentsFile = path.join(d, '.chat', 'agents.json')
+  fs.writeFileSync(agentsFile, JSON.stringify([{ name: 'pm', cli: 'claude', role: 'PM' }, { name: 'k', cli: 'codex', role: 'Dev' }]))
+  // config: missing → 150000, 0 kept, old payload keeps value, junk refused
+  assert.deepStrictEqual(core.team(d).map(a => a.sessionTokenLimit), [150000, 150000])
+  assert.strictEqual(fs.readFileSync(agentsFile, 'utf8').includes('sessionTokenLimit'), false) // opening doesn't rewrite
+  let tm = core.saveTeam(d, core.team(d).map(a => a.name === 'pm' ? { ...a, sessionTokenLimit: 0 } : a))
+  assert.deepStrictEqual(tm.map(a => a.sessionTokenLimit), [0, 150000]) // each agent independent, 0 is not "default"
+  tm = core.saveTeam(d, core.team(d).map(({ sessionTokenLimit, ...a }) => a)); assert.strictEqual(tm[0].sessionTokenLimit, 0)
+  for (const bad of [-1, 1.5, '1', null, NaN]) assert.throws(() => core.saveTeam(d, core.team(d).map((a, i) => i ? a : { ...a, sessionTokenLimit: bad })), undefined, String(bad))
+  const good = fs.readFileSync(agentsFile, 'utf8')
+  fs.writeFileSync(agentsFile, JSON.stringify([{ name: 'k', cli: 'codex', role: 'Dev', sessionTokenLimit: -5 }]))
+  assert.ok(core.team(d)[0].sessionConfigError)
+  const bad = await core.run(d, core.team(d)[0]); assert.strictEqual(bad.outcome, 'error') // no spawn with a broken limit
+  fs.writeFileSync(agentsFile, good)
+
+  const k = core.team(d).find(a => a.name === 'k'), calls = () => fs.readFileSync(argsLog, 'utf8').trim().split('\n').length
+  const go = async (env, a = k, runId) => {
+    Object.assign(process.env, { FAKE_MODE: 'text', FAKE_TEXT: 'ok', FAKE_TID: 'S1', FAKE_IN: '3' }, env)
+    const n = calls(), r = await core.run(d, a, { runId }); return { ...r, calls: calls() - n, args: lastArgs(), s: core.sessions(d).k }
+  }
+  let r = await go({ FAKE_IN: '150000' }, k, 'run-1')
+  assert.deepStrictEqual([r.s.id, r.s.lastTurn.inputTokens, r.s.lastTurn.runId, r.sessionRotation], ['S1', 150000, 'run-1', null])
+  assert.ok(!core.sessionRotationPending(k, r.s)) // = limit → no rotation
+  r = await go({ FAKE_IN: '150001' }, k, 'run-2'); assert.ok(r.args.includes('resume') && r.args.includes('S1'))
+  assert.ok(core.sessionRotationPending(k, r.s))
+  core.appendLog(d, { from: 'user', text: 'tin gần đây K2' }); fs.appendFileSync(path.join(d, '.chat', 'memory.md'), '- nhớ K1\n')
+  // K2 parser: 3–5 lines, may precede task-status, never with run-command
+  const F = '`'.repeat(3), ho = body => `Tin cho nhóm @pm.\n${F}handoff\n${body}\n${F}`
+  let p = core.parseHandoffBlock(ho('- a\n- b @dev\n- c'))
+  assert.deepStrictEqual([p.error, p.handoff, p.text.includes(F)], [null, '- a\n- b @dev\n- c', false])
+  assert.ok(core.parseHandoffBlock(ho('- a\n- b')).error && core.parseHandoffBlock(ho('1\n2\n3\n4\n5\n6')).error)
+  assert.ok(core.parseHandoffBlock(ho('- ' + 'x'.repeat(4096) + '\n- b\n- c')).error)
+  const ts = core.parseTaskStatusBlock(ho('- a\n- b\n- c') + `\n${F}task-status\n[{"id":"T1","status":"review","expectedRevision":"r"}]\n${F}`)
+  assert.ok(ts.changes && core.parseHandoffBlock(ts.text).handoff === '- a\n- b\n- c')
+  assert.ok(core.parseRunCommandBlock(`${F}handoff\n1\n2\n3\n${F}\n${F}run-command\n{"command":"npm run check"}\n${F}`).error)
+  core.writeHandoff(d, 'k', null, 'run-2', '- đang làm K1\n- đã sửa core\n- còn thử UI')
+  assert.strictEqual(core.readHandoff(d, 'k', null).text, '- đang làm K1\n- đã sửa core\n- còn thử UI')
+  assert.strictEqual(core.readHandoff(d, 'k', 'other-ws'), null) // workspace mismatch → ignored
+  // K1: > limit → next turn is fresh (no resume id), full briefing + current handoff, rotation reported once
+  r = await go({ FAKE_TID: 'S2' }, k, 'run-3')
+  assert.ok(!r.args.includes('resume') && !r.args.includes('S1'), r.args.join(' '))
+  const fresh = r.args[r.args.length - 1]
+  for (const want of ['- nhớ K1', 'tin gần đây K2', '- đang làm K1', 'Bàn giao từ lượt gần nhất', '```handoff']) assert.ok(fresh.includes(want), want)
+  assert.deepStrictEqual(r.sessionRotation, { previousSessionId: 'S1', previousRunId: 'run-2', inputTokens: 150001, limit: 150000, handoffStatus: 'current' })
+  assert.deepStrictEqual([r.s.id, r.s.lastTurn.inputTokens], ['S2', 3])
+  r = await go({ FAKE_TID: 'S2' }, k, 'run-4'); assert.ok(r.args.includes('resume') && r.args.includes('S2') && !r.sessionRotation)
+  // limit 0 = off; changing the limit applies to the next turn
+  await go({ FAKE_TID: 'S2', FAKE_IN: '200000' })
+  r = await go({ FAKE_TID: 'S2' }, { ...k, sessionTokenLimit: 0 }); assert.ok(r.args.includes('resume') && !r.sessionRotation)
+  await go({ FAKE_TID: 'S2', FAKE_IN: '200000' })
+  r = await go({ FAKE_TID: 'S2' }, { ...k, sessionTokenLimit: 300000 }); assert.ok(r.args.includes('resume'))
+  // null input → no guess; 80k + 80k in one turn (empty retry) keeps the id and only rotates the next turn
+  r = await go({ FAKE_TID: 'S2', FAKE_IN: 'null' }); assert.strictEqual(r.s.lastTurn.inputTokens, null)
+  r = await go({ FAKE_TID: 'S2' }); assert.ok(r.args.includes('resume'))
+  r = await go({ FAKE_MODE: 'empty', FAKE_TID: 'S2', FAKE_IN: '80000' })
+  assert.deepStrictEqual([r.calls, r.usage.inputTokens, r.s.lastTurn.inputTokens, r.s.id], [2, 160000, 160000, 'S2'])
+  assert.ok(r.args.includes('resume') && r.args.includes('S2')) // the retry stayed in S2
+  r = await go({ FAKE_TID: 'S3' }); assert.ok(!r.args.includes('resume') && r.sessionRotation?.previousSessionId === 'S2')
+  // resume:false → measurement record only (id null), never resumed or rotated
+  r = await go({ FAKE_TID: 'S9', FAKE_IN: '999999' }, { ...k, resume: false }, 'run-nr')
+  assert.deepStrictEqual([r.s.id, r.s.lastTurn.inputTokens], [null, 999999])
+  r = await go({ FAKE_TID: 'S9' }, { ...k, resume: false }, 'run-nr2'); assert.ok(!r.args.includes('resume') && !r.sessionRotation)
+  // summary job (trackSession:false) does not touch the session record
+  const before = JSON.stringify(core.sessions(d)); process.env.FAKE_TID = 'SX'
+  await core.run(d, k, { trackSession: false, initialPrompt: 'tóm tắt' }); assert.strictEqual(JSON.stringify(core.sessions(d)), before)
+  // handoff symlink is refused on read and write
+  const hf = path.join(d, '.chat', 'handoff', 'k.md'); fs.rmSync(hf); fs.symlinkSync('/etc/hosts', hf)
+  assert.strictEqual(core.readHandoff(d, 'k', null), null)
+  assert.throws(() => core.writeHandoff(d, 'k', null, 'r', '1\n2\n3')); assert.strictEqual(fs.readlinkSync(hf), '/etc/hosts')
+  for (const key of ['FAKE_TEXT', 'FAKE_TID', 'FAKE_IN']) delete process.env[key]
+  // T27 (static; the popup/⚙ still need a manual look): labels from the contract and the sessions event are wired
+  const ui = fs.readFileSync(path.join(__dirname, 'index.html'), 'utf8')
+  for (const s of ['Ngưỡng xoay phiên (token vào)', '0 = tắt. Áp dụng cho lượt kế tiếp.', 'Token vào lượt gần nhất', 'Chưa có số đo',
+    'Tự xoay: tắt', 'Sẽ mở phiên mới ở lượt kế tiếp', 'Không nhớ phiên', "'sessions-changed'"]) assert.ok(ui.includes(s), `index.html thiếu: ${s}`)
 }
 
 // ---- Sprint 6 F: indexed log, accent-insensitive search, 10k messages, J settings, summary checkpoint ----
@@ -577,14 +666,15 @@ for (const [file, line, text] of JSON.parse(process.env.FAKE_EDITS || '{}')[me] 
 if (process.env.FAKE_PROGRESS) fs.appendFileSync('progress-' + me + '.txt', 'x')
 out({ type: 'thread.started', thread_id: 'M' + process.pid })
 out({ type: 'item.completed', item: { type: 'agent_message', text: JSON.parse(process.env.FAKE_REPLY || '{}')[me] || 'xong' } })
-out({ type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } })
+out({ type: 'turn.completed', usage: { input_tokens: Number(process.env.FAKE_IN || 1), output_tokens: 1 } })
 `, { mode: 0o755 })
   process.env.PATH = mbin + path.delimiter + process.env.PATH
 
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'agent-chat-git-'))), at = f => path.join(root, f)
   core.init(root)
-  fs.writeFileSync(at('.chat/agents.json'), JSON.stringify(['dev-a', 'dev-b', 'dev-c'].map(name =>
-    ({ name, cli: 'codex', role: 'Dev', owns: ['*.txt'], resume: false, allowedCommands: ['npm run check'] }))))
+  fs.writeFileSync(at('.chat/agents.json'), JSON.stringify(['dev-a', 'dev-b', 'dev-c', 'dev-r'].map(name =>
+    ({ name, cli: 'codex', role: 'Dev', owns: ['*.txt'], resume: name === 'dev-r', allowedCommands: ['npm run check'],
+      ...(name === 'dev-r' ? { sessionTokenLimit: 100 } : {}) }))))
   fs.writeFileSync(at('a.txt'), Array.from({ length: 10 }, (_, i) => `l${i}`).join('\n'))
   fs.writeFileSync(at('package.json'), JSON.stringify({ name: 'fixture', private: true, scripts: { check: 'node chk.js' } }))
   fs.writeFileSync(at('chk.js'), 'if (require("fs").readFileSync("a.txt", "utf8").includes("RED")) { console.error("check đỏ"); process.exit(1) }')
@@ -605,9 +695,28 @@ out({ type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } })
   const stops = () => log().map((m, seq) => ({ ...m, seq })).filter(m => m.kind === 'chain-stop')
   const pingPong = JSON.stringify({ 'dev-a': '@dev-b tiếp', 'dev-b': '@dev-a tiếp' })
 
+  // S7 K1/K2/K4 through executeJob: handoff saved by the app and stripped from chat, @ inside it not routed,
+  // turn > limit → next turn opens a new session with one system note; sessions IPC shows the measurement
+  const F = '`'.repeat(3)
+  process.env.FAKE_REPLY = JSON.stringify({ 'dev-r': `Xong.\n${F}handoff\n- đang làm K\n- nhờ @dev-a sau\n- còn UI\n${F}` })
+  process.env.FAKE_IN = '500'
+  let mark = log().length; await call('send', root, '@dev-r làm')
+  const reply = await waitFor('trả lời dev-r', () => log().slice(mark).find(m => m.from === 'dev-r'))
+  assert.strictEqual(reply.text, 'Xong.')
+  assert.ok(fs.readFileSync(at('.chat/handoff/dev-r.md'), 'utf8').includes('- nhờ @dev-a sau'))
+  let sm = await call('sessions', root)
+  assert.deepStrictEqual([sm['dev-r'].lastTurn.inputTokens, sm['dev-r'].sessionTokenLimit, sm['dev-r'].rotationPending], [500, 100, true])
+  process.env.FAKE_IN = '1'; mark = log().length; await call('send', root, '@dev-r tiếp')
+  const rotated = await waitFor('tin xoay phiên', () => log().slice(mark).find(m => m.kind === 'session-rotated'))
+  assert.ok(rotated.text.includes('dev-r mở phiên mới') && rotated.text.includes('vượt ngưỡng 100'), rotated.text)
+  await waitFor('trả lời dev-r lần 2', () => log().slice(mark).some(m => m.from === 'dev-r'))
+  sm = await call('sessions', root); assert.deepStrictEqual([sm['dev-r'].lastTurn.inputTokens, sm['dev-r'].rotationPending], [1, false])
+  assert.ok(!log().some(m => m.from === 'dev-a')) // "@dev-a" inside the handoff never routed
+  delete process.env.FAKE_REPLY; delete process.env.FAKE_IN
+
   // J3: two agents ping-pong without file/task changes → stopped after 3 rounds; "Tiếp tục" starts a fresh chain
   process.env.FAKE_REPLY = pingPong
-  let mark = log().length; await call('send', root, '@dev-a bắt đầu')
+  mark = log().length; await call('send', root, '@dev-a bắt đầu')
   let stop = await waitFor('phanh chat qua lại', () => stops()[0])
   assert.ok(stop.canContinue && stop.text.includes('qua lại'), stop.text); assert.strictEqual(turns(mark), 6)
   mark = log().length; assert.ok((await call('continueChain', root, { messageId: stop.seq })).ok)
@@ -703,4 +812,4 @@ out({ type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } })
   assert.strictEqual(queue().at(-1).state, 'paused')
   assert.deepStrictEqual(queue().slice(0, -1), otherEntries)
 }
-auditChecks().then(viewerChecks).then(runChecks).then(sprint6Checks).then(rendererChecks).then(mainChecks).then(() => console.log('ok'), e => { console.error(e); process.exit(1) })
+auditChecks().then(viewerChecks).then(runChecks).then(sprint7Checks).then(sprint6Checks).then(rendererChecks).then(mainChecks).then(() => console.log('ok'), e => { console.error(e); process.exit(1) })
