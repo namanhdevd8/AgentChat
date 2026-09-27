@@ -255,17 +255,69 @@
     font-weight: 700; font-size: 13px;
   }
 
-  /* settings dialog */
+  /* settings dialog - 2-column Neubrutalism layout */
   dialog { width: min(780px, 92vw); max-height: 88vh; padding: 0; background: var(--bg); color: var(--ink); box-shadow: 8px 8px 0 var(--ink); }
   dialog[open] { display: flex; flex-direction: column; }
   dialog::backdrop { background: rgb(0 0 0 / .45); }
-  .dhead { padding: 14px 20px; border-bottom: var(--bw) solid var(--ink); background: var(--yellow); color: var(--on-color); }
+  #settings { width: min(940px, 94vw); height: min(680px, 90vh); max-height: 90vh; }
+  .dhead { padding: 14px 20px; border-bottom: var(--bw) solid var(--ink); background: var(--yellow); color: var(--on-color); flex: none; }
   .dhead h2 { margin: 0; font-size: 20px; }
   .dhead small { font-size: 12px; }
-  #editors { overflow-y: auto; padding: 20px; display: grid; gap: 18px; }
-  .agent { background: var(--surface); padding: 14px; display: grid; gap: 10px; }
-  .atop { display: flex; gap: 10px; align-items: center; }
-  .atop .name { flex: 1; font-weight: 700; }
+
+  .settings-body {
+    display: grid; grid-template-columns: 240px 1fr; flex: 1; min-height: 0; overflow: hidden; background: var(--bg);
+  }
+  @media (max-width: 720px) {
+    .settings-body { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
+    .settings-sidebar { border-right: none !important; border-bottom: var(--bw) solid var(--ink); max-height: 180px; }
+  }
+  .settings-sidebar {
+    border-right: var(--bw) solid var(--ink); background: var(--surface); overflow-y: auto; padding: 16px 12px; display: flex; flex-direction: column; gap: 16px;
+  }
+  .settings-nav-section { display: flex; flex-direction: column; gap: 4px; }
+  .settings-nav-title {
+    font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); padding: 2px 8px 6px;
+  }
+  .settings-nav-agent-head { display: flex; align-items: center; justify-content: space-between; }
+  .settings-add-btn {
+    font-size: 13px; font-weight: 700; width: 22px; height: 22px; border-radius: 6px; border: 1.5px solid var(--ink);
+    background: var(--green); color: var(--on-color); display: grid; place-items: center; cursor: pointer; padding: 0; line-height: 1;
+  }
+  .settings-nav-item {
+    display: flex; align-items: center; gap: 10px; width: 100%; padding: 8px 10px; background: none; border: 2px solid transparent;
+    border-radius: 8px; text-align: left; font-weight: 600; font-size: 13px; cursor: pointer; transition: transform .08s, background .08s; color: inherit;
+  }
+  .settings-nav-item:hover { background: var(--yellow); color: var(--on-color); border-color: var(--ink); }
+  .settings-nav-item.active {
+    background: var(--yellow); color: var(--on-color); border-color: var(--ink); box-shadow: 2px 2px 0 var(--ink); font-weight: 700;
+  }
+  .settings-nav-icon { font-size: 14px; width: 20px; height: 20px; display: grid; place-items: center; flex: none; }
+  .settings-nav-av {
+    width: 24px; height: 24px; border-radius: 50%; border: 2px solid var(--ink); overflow: hidden; flex: none; display: grid; place-items: center; font-size: 11px; font-weight: 700;
+  }
+  .settings-nav-av svg { width: 100%; height: 100%; display: block; }
+  .settings-nav-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+  .settings-nav-warn { font-size: 12px; flex: none; }
+  .settings-agent-nav { display: flex; flex-direction: column; gap: 4px; }
+
+  .settings-content {
+    overflow-y: auto; padding: 20px; display: flex; flex-direction: column; min-height: 0; background: var(--bg); gap: 16px;
+  }
+  .settings-pane { display: flex; flex-direction: column; gap: 16px; }
+  .settings-card {
+    background: var(--surface); border: 2px solid var(--ink); border-radius: 10px; padding: 16px; display: grid; gap: 14px; box-shadow: 2px 2px 0 var(--ink);
+  }
+  .settings-card-hdr { border-bottom: 2px solid var(--ink); padding-bottom: 10px; }
+  .settings-card-hdr h3 { margin: 0 0 4px; font-size: 15px; font-weight: 700; color: var(--ink); text-transform: none; letter-spacing: 0; }
+  .settings-card-hdr small { color: var(--muted); font-size: 12px; display: block; }
+
+  #editors { display: flex; flex-direction: column; gap: 16px; padding: 0; }
+  .agent {
+    background: var(--surface); padding: 16px; display: grid; gap: 12px;
+    border: 2px solid var(--ink); border-radius: 10px; box-shadow: 2px 2px 0 var(--ink);
+  }
+  .atop { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .atop .name { flex: 1; min-width: 140px; font-weight: 700; }
   .agent label { display: grid; gap: 4px; font-size: 12px; font-weight: 700; }
   .agent label.chk { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
   .f { font: inherit; color: inherit; background: var(--bg); border: 2.5px solid var(--ink); border-radius: 8px; padding: 6px 10px; font-weight: 500; }
@@ -305,7 +357,7 @@
     box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px var(--ink);
     transform: scale(1.18);
   }
-  .dfoot { display: flex; gap: 10px; align-items: center; padding: 14px 20px; border-top: var(--bw) solid var(--ink); background: var(--surface); }
+  .dfoot { display: flex; gap: 10px; align-items: center; padding: 14px 20px; border-top: var(--bw) solid var(--ink); background: var(--surface); flex: none; }
   #err { flex: 1; color: #e0284f; font-weight: 700; font-size: 13px; }
   .none { font-size: 13px; color: var(--muted); padding: 4px 6px; }
 
@@ -534,37 +586,91 @@
 
 <dialog id="settings" class="box">
   <div class="dhead"><h2>Cài đặt nhóm</h2><small id="spath"></small></div>
-  <div id="proj-settings" class="proj-settings-card box">
-    <h3>Cấu hình dự án</h3>
-    <div class="proj-settings-row">
-      <label><input type="checkbox" id="setting-auto-summary" checked> Tự động tóm tắt log cũ (PM) sau ~100 tin mới</label>
-    </div>
-    <div class="proj-settings-row">
-      <label><input type="checkbox" id="setting-worktrees"> Mỗi dev làm trong git worktree riêng (gộp qua hàng chờ)</label>
-      <button id="btn-init-git" class="box press btn sm" type="button" hidden>Khởi tạo Git</button>
-    </div>
-    <div id="merge-checks-wrap" class="proj-settings-sub" hidden>
-      <label><b>Lệnh kiểm tra khi gộp (mỗi dòng 1 lệnh):</b></label>
-      <textarea id="setting-merge-checks" class="f" rows="2" placeholder="npm run check"></textarea>
-      <small style="color:var(--muted)">Chạy tuần tự trong worktree kiểm tra trước khi gộp vào nhánh chính.</small>
-    </div>
-    <div id="git-status-msg" style="font-size:12px;color:var(--muted)"></div>
-    <div class="proj-settings-row">
-      <label for="setting-chain-limit"><b>Giới hạn chuỗi agent liên tiếp:</b></label>
-      <div style="display:flex;align-items:center;gap:6px;">
-        <input type="number" id="setting-chain-limit" class="f" min="1" max="50" step="1" value="12" style="width:70px;text-align:center;">
-        <small style="color:var(--muted)">lượt (1–50, mặc định 12)</small>
+  <div class="settings-body">
+    <aside class="settings-sidebar">
+      <div class="settings-nav-section">
+        <div class="settings-nav-title">Dự án</div>
+        <button type="button" id="tab-general" class="settings-nav-item active" data-tab="general">
+          <span class="settings-nav-icon">⚙</span>
+          <span class="settings-nav-label">Chung</span>
+        </button>
+        <button type="button" id="tab-worktree" class="settings-nav-item" data-tab="worktree">
+          <span class="settings-nav-icon">🌿</span>
+          <span class="settings-nav-label">Worktree &amp; Git</span>
+        </button>
+        <button type="button" id="tab-limits" class="settings-nav-item" data-tab="limits">
+          <span class="settings-nav-icon">⏱</span>
+          <span class="settings-nav-label">Giới hạn &amp; Chi phí</span>
+        </button>
       </div>
-    </div>
-    <div class="proj-settings-row">
-      <label for="setting-cost-ceiling"><b>Trần chi phí mỗi chuỗi (USD):</b></label>
-      <div style="display:flex;align-items:center;gap:6px;">
-        <input type="number" id="setting-cost-ceiling" class="f" min="0" step="0.01" placeholder="Không giới hạn" style="width:110px;">
-        <small style="color:var(--muted)">(để trống: không giới hạn)</small>
+
+      <div class="settings-nav-section">
+        <div class="settings-nav-title settings-nav-agent-head">
+          <span>Thành viên</span>
+          <button type="button" id="sidebar-add-btn" class="settings-add-btn press" title="Thêm agent mới">+</button>
+        </div>
+        <div id="settings-agent-nav" class="settings-agent-nav"></div>
       </div>
+    </aside>
+
+    <div class="settings-content" id="proj-settings">
+      <div id="pane-general" class="settings-pane">
+        <div class="settings-card box">
+          <div class="settings-card-hdr">
+            <h3>Cấu hình chung</h3>
+            <small>Cài đặt tiến trình tóm tắt và ghi nhớ của nhóm</small>
+          </div>
+          <div class="proj-settings-row">
+            <label><input type="checkbox" id="setting-auto-summary" checked> Tự động tóm tắt log cũ (PM) sau ~100 tin mới</label>
+          </div>
+        </div>
+      </div>
+
+      <div id="pane-worktree" class="settings-pane" hidden>
+        <div class="settings-card box">
+          <div class="settings-card-hdr">
+            <h3>Worktree &amp; Git</h3>
+            <small>Cô lập không gian làm việc của từng agent qua nhánh Git riêng</small>
+          </div>
+          <div class="proj-settings-row">
+            <label><input type="checkbox" id="setting-worktrees"> Mỗi dev làm trong git worktree riêng (gộp qua hàng chờ)</label>
+            <button id="btn-init-git" class="box press btn sm" type="button" hidden>Khởi tạo Git</button>
+          </div>
+          <div id="merge-checks-wrap" class="proj-settings-sub" hidden>
+            <label><b>Lệnh kiểm tra khi gộp (mỗi dòng 1 lệnh):</b></label>
+            <textarea id="setting-merge-checks" class="f" rows="2" placeholder="npm run check"></textarea>
+            <small style="color:var(--muted)">Chạy tuần tự trong worktree kiểm tra trước khi gộp vào nhánh chính.</small>
+          </div>
+          <div id="git-status-msg" style="font-size:12px;color:var(--muted)"></div>
+        </div>
+      </div>
+
+      <div id="pane-limits" class="settings-pane" hidden>
+        <div class="settings-card box">
+          <div class="settings-card-hdr">
+            <h3>Giới hạn &amp; Chi phí</h3>
+            <small>Kiểm soát độ dài chuỗi tương tác tự động và ngân sách mỗi chuỗi</small>
+          </div>
+          <div class="proj-settings-row">
+            <label for="setting-chain-limit"><b>Giới hạn chuỗi agent liên tiếp:</b></label>
+            <div style="display:flex;align-items:center;gap:6px;">
+              <input type="number" id="setting-chain-limit" class="f" min="1" max="50" step="1" value="12" style="width:70px;text-align:center;">
+              <small style="color:var(--muted)">lượt (1–50, mặc định 12)</small>
+            </div>
+          </div>
+          <div class="proj-settings-row">
+            <label for="setting-cost-ceiling"><b>Trần chi phí mỗi chuỗi (USD):</b></label>
+            <div style="display:flex;align-items:center;gap:6px;">
+              <input type="number" id="setting-cost-ceiling" class="f" min="0" step="0.01" placeholder="Không giới hạn" style="width:110px;">
+              <small style="color:var(--muted)">(để trống: không giới hạn)</small>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div id="editors" class="settings-editors"></div>
     </div>
   </div>
-  <div id="editors"></div>
   <div class="dfoot">
     <button id="add" class="box press btn">+ Thêm agent</button>
     <button id="resetAll" class="box press btn danger" title="Mọi agent bắt đầu phiên mới ở lượt tới">Làm mới mọi phiên</button>
@@ -1050,9 +1156,73 @@
 
   // ---- settings: team roles/scope + session resume, per box ----
   let draft = [], sess = {}, accounts = [], modelsOf = {}, sessionsOf = {}
+  let currentSettingTab = 'general'
   const when = iso => new Date(iso).toLocaleString('vi-VN', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
 
   const sessionCacheKey = (d, agentName, cli, wsId) => `${d || ''}\0${agentName || ''}\0${cli || ''}\0${wsId || ''}`
+
+  function initSettingsNav() {
+    const tabGen = $('#tab-general')
+    if (tabGen) tabGen.onclick = () => { currentSettingTab = 'general'; updateSettingsViews() }
+    const tabWt = $('#tab-worktree')
+    if (tabWt) tabWt.onclick = () => { currentSettingTab = 'worktree'; updateSettingsViews() }
+    const tabLim = $('#tab-limits')
+    if (tabLim) tabLim.onclick = () => { currentSettingTab = 'limits'; updateSettingsViews() }
+    const sAdd = $('#sidebar-add-btn')
+    if (sAdd) sAdd.onclick = () => $('#add')?.click()
+  }
+
+  function updateSettingsViews() {
+    const isAgentTab = typeof currentSettingTab === 'string' && currentSettingTab.startsWith('agent:')
+    let agentIdx = -1
+    if (isAgentTab) {
+      agentIdx = parseInt(currentSettingTab.slice(6), 10)
+      if (isNaN(agentIdx) || agentIdx < 0 || agentIdx >= draft.length) {
+        agentIdx = draft.length > 0 ? 0 : -1
+        currentSettingTab = agentIdx >= 0 ? 'agent:' + agentIdx : 'general'
+      }
+    }
+
+    const pGen = $('#pane-general')
+    const pWt = $('#pane-worktree')
+    const pLim = $('#pane-limits')
+    const ed = $('#editors')
+
+    if (pGen) pGen.hidden = currentSettingTab !== 'general'
+    if (pWt) pWt.hidden = currentSettingTab !== 'worktree'
+    if (pLim) pLim.hidden = currentSettingTab !== 'limits'
+    if (ed) ed.hidden = !isAgentTab
+
+    const tGen = $('#tab-general')
+    if (tGen && tGen.classList) tGen.classList.toggle('active', currentSettingTab === 'general')
+    const tWt = $('#tab-worktree')
+    if (tWt && tWt.classList) tWt.classList.toggle('active', currentSettingTab === 'worktree')
+    const tLim = $('#tab-limits')
+    if (tLim && tLim.classList) tLim.classList.toggle('active', currentSettingTab === 'limits')
+
+    const navList = $('#settings-agent-nav')
+    if (navList && navList.children) {
+      for (let i = 0; i < navList.children.length; i++) {
+        const item = navList.children[i]
+        if (item && item.classList) {
+          item.classList.toggle('active', currentSettingTab === 'agent:' + i)
+        }
+      }
+    }
+
+    if (ed && ed.children) {
+      for (let i = 0; i < ed.children.length; i++) {
+        const c = ed.children[i]
+        if (c) {
+          const isCurrent = (i === agentIdx)
+          c.hidden = !isCurrent
+          if (c.style) {
+            c.style.display = isCurrent ? 'grid' : 'none'
+          }
+        }
+      }
+    }
+  }
 
   // lazy per-account lookups; models stay cached (agy is slow), session lists refresh each time settings open
   function need(cli, agentName = null, workspaceId = null) {
@@ -1095,6 +1265,38 @@
   }
 
   function renderEditors() {
+    const navList = $('#settings-agent-nav')
+    if (navList) {
+      navList.replaceChildren(...draft.map((a, i) => {
+        const btn = el('button', 'settings-nav-item' + (currentSettingTab === 'agent:' + i ? ' active' : ''))
+        btn.type = 'button'
+        btn.setAttribute('role', 'tab')
+        btn.setAttribute('aria-selected', currentSettingTab === 'agent:' + i ? 'true' : 'false')
+
+        const navAv = el('span', 'settings-nav-av')
+        if (a.avatar && a.avatar.gender && a.avatar.color) {
+          navAv.append(createAvatarSvg(a.avatar.gender, a.avatar.color))
+        } else {
+          navAv.textContent = (a.name || '?').slice(0, 2)
+        }
+
+        const navLabel = el('span', 'settings-nav-label', a.name ? `@${a.name}` : '(chưa có tên)')
+        btn.append(navAv, navLabel)
+
+        if (a.scopeNeedsReview) {
+          const warn = el('span', 'settings-nav-warn', '⚠️')
+          warn.title = 'Phạm vi cũ cần xác nhận'
+          btn.append(warn)
+        }
+
+        btn.onclick = () => {
+          currentSettingTab = 'agent:' + i
+          updateSettingsViews()
+        }
+        return btn
+      }))
+    }
+
     $('#editors').replaceChildren(...draft.map((a, i) => {
       if (!a.avatar || !['male', 'female'].includes(a.avatar.gender) || !AVATAR_PALETTE.includes(a.avatar.color)) {
         a.avatar = getDefaultAvatar(draft.slice(0, i), i)
@@ -1122,11 +1324,28 @@
       roLabel.append(roCb, 'Chỉ đọc')
 
       const del = el('button', 'box press btn sm danger', 'Xoá')
-      del.onclick = () => { draft.splice(i, 1); renderEditors() }
+      del.onclick = () => {
+        draft.splice(i, 1)
+        if (currentSettingTab === 'agent:' + i) {
+          currentSettingTab = draft.length > 0 ? 'agent:' + Math.min(i, draft.length - 1) : 'general'
+        } else if (typeof currentSettingTab === 'string' && currentSettingTab.startsWith('agent:')) {
+          const curIdx = parseInt(currentSettingTab.slice(6), 10)
+          if (curIdx > i) {
+            currentSettingTab = 'agent:' + (curIdx - 1)
+          }
+        }
+        renderEditors()
+      }
 
       const topAv = el('div', 'av')
       topAv.append(createAvatarSvg(a.avatar.gender, a.avatar.color))
-      top.append(topAv, field('input', a.name, v => a.name = v.trim(), { className: 'f name', placeholder: 'tên (vd: dev-fe)' }), cli, chk, roLabel, del)
+      const nameInp = field('input', a.name, v => {
+        a.name = v.trim()
+        const navItem = navList?.children?.[i]
+        const lbl = navItem?.querySelector?.('.settings-nav-label') || navItem?.children?.[1]
+        if (lbl) lbl.textContent = a.name ? `@${a.name}` : '(chưa có tên)'
+      }, { className: 'f name', placeholder: 'tên (vd: dev-fe)' })
+      top.append(topAv, nameInp, cli, chk, roLabel, del)
 
       // Avatar editor: live preview + gender toggle + 8 color swatches
       const avRow = el('div', 'avatar-row')
@@ -1134,6 +1353,14 @@
       avBox.append(createAvatarSvg(a.avatar.gender, a.avatar.color))
 
       const avCtrl = el('div', 'avatar-controls')
+
+      function updateNavAvatar() {
+        const navItem = navList?.children?.[i]
+        const avSpan = navItem?.querySelector?.('.settings-nav-av') || navItem?.children?.[0]
+        if (avSpan && typeof avSpan.replaceChildren === 'function') {
+          avSpan.replaceChildren(createAvatarSvg(a.avatar.gender, a.avatar.color))
+        }
+      }
 
       const genderGroup = el('div', 'avatar-gender-group')
       const maleBtn = el('button', 'avatar-gender-btn' + (a.avatar.gender === 'male' ? ' active' : ''), 'Nam')
@@ -1144,6 +1371,7 @@
         femaleBtn.classList.remove('active')
         avBox.replaceChildren(createAvatarSvg(a.avatar.gender, a.avatar.color))
         topAv.replaceChildren(createAvatarSvg(a.avatar.gender, a.avatar.color))
+        updateNavAvatar()
       }
       const femaleBtn = el('button', 'avatar-gender-btn' + (a.avatar.gender === 'female' ? ' active' : ''), 'Nữ')
       femaleBtn.type = 'button'
@@ -1153,6 +1381,7 @@
         maleBtn.classList.remove('active')
         avBox.replaceChildren(createAvatarSvg(a.avatar.gender, a.avatar.color))
         topAv.replaceChildren(createAvatarSvg(a.avatar.gender, a.avatar.color))
+        updateNavAvatar()
       }
       genderGroup.append(maleBtn, femaleBtn)
 
@@ -1172,6 +1401,7 @@
           })
           avBox.replaceChildren(createAvatarSvg(a.avatar.gender, a.avatar.color))
           topAv.replaceChildren(createAvatarSvg(a.avatar.gender, a.avatar.color))
+          updateNavAvatar()
         }
         palDiv.append(sw)
       })
@@ -1212,11 +1442,25 @@
       ml.append(select([['', m ? 'Mặc định của CLI' : 'Đang tải…'], ...models.map(x => [x.id, x.label || x.id])], a.model || '', v => { a.model = v; renderEditors() }))
       const ef = el('label', '', 'Effort')
       ef.append(select([['', 'Mặc định'], ...efforts.map(e => [e, e])], a.effort || '', v => a.effort = v))
+      tune.append(ml, ef)
+
+      const limitsRow = el('div', 'atop')
       const to = el('label', '', 'Giới hạn mỗi lượt (phút)')
       const toVal = a.timeoutMinutes != null ? a.timeoutMinutes : 30
       const toInp = field('input', toVal, v => { a.timeoutMinutes = v }, { type: 'number', min: '1', max: '1440', step: '1', className: 'f', style: 'width: 100px;' })
       to.append(toInp)
-      tune.append(ml, ef, to)
+
+      // Chừa chỗ cho ô Ngưỡng xoay phiên (T27)
+      const rotLab = el('label', '', 'Ngưỡng xoay phiên (token)')
+      const rotVal = a.rotateThreshold != null ? a.rotateThreshold : (a.tokenThreshold != null ? a.tokenThreshold : '')
+      const rotInp = field('input', rotVal, v => { a.rotateThreshold = v ? Number(v) : null }, {
+        type: 'number', min: '0', step: '1000', placeholder: '150.000 (0: tắt)', className: 'f', style: 'width: 140px;',
+        title: 'Tự mở phiên mới khi token vào vượt ngưỡng (mặc định 150k, 0 = tắt)'
+      })
+      const rotNote = el('small', '', 'Mặc định 150k, 0 = tắt (Sprint 7)')
+      rotNote.style.color = 'var(--muted)'
+      rotLab.append(rotInp, rotNote)
+      limitsRow.append(to, rotLab)
 
       let reviewCard = null
       if (a.scopeNeedsReview) {
@@ -1255,10 +1499,14 @@
         line.append(lab)
         if (cur) line.append(el('small', '', cur.adopted ? 'Lượt tới gửi kèm bối cảnh nhóm' : `Đã đọc ${cur.seen} tin · ${when(cur.at)}`))
       }
-      card.append(top, avRow, tune, role, ownsLab, cmdLab, ...(cmdErr ? [cmdErr] : []), ...(reviewCard ? [reviewCard] : []), line)
+      card.append(top, avRow, tune, limitsRow, role, ownsLab, cmdLab, ...(cmdErr ? [cmdErr] : []), ...(reviewCard ? [reviewCard] : []), line)
       return card
     }))
+
+    updateSettingsViews()
   }
+
+  initSettingsNav()
 
   $('#gear').onclick = async () => {
     draft = structuredClone(team).map((a, i) => {
@@ -1318,6 +1566,10 @@
     }
     $('#btn-init-git').onclick = () => openGitInitModal()
 
+    initSettingsNav()
+    if (!currentSettingTab || (currentSettingTab.startsWith('agent:') && parseInt(currentSettingTab.slice(6), 10) >= draft.length)) {
+      currentSettingTab = 'general'
+    }
     renderEditors()
     $('#settings').showModal()
   }
@@ -1418,8 +1670,14 @@
       allowedCommands: ['npm run check'],
       avatar: nextAvatar
     })
+    currentSettingTab = 'agent:' + (draft.length - 1)
     renderEditors()
-    $('#editors').lastChild.scrollIntoView()
+    const lastCard = $('#editors')?.lastChild
+    if (lastCard) {
+      lastCard.scrollIntoView?.()
+      const nameInp = lastCard.querySelector?.('input.name')
+      if (nameInp) nameInp.focus()
+    }
   }
   $('#resetAll').onclick = async () => {
     try {
@@ -1429,22 +1687,29 @@
   $('#cancel').onclick = () => $('#settings').close()
   $('#save').onclick = async () => {
     $('#err').textContent = ''
-    for (const a of draft) {
+    for (let idx = 0; idx < draft.length; idx++) {
+      const a = draft[idx]
       const val = a.timeoutMinutes == null || a.timeoutMinutes === '' ? 30 : Number(a.timeoutMinutes)
       if (!Number.isInteger(val) || val < 1 || val > 1440) {
         $('#err').textContent = `Giới hạn mỗi lượt của @${a.name || 'agent'} phải là số nguyên từ 1 đến 1440 phút`
+        currentSettingTab = 'agent:' + idx
+        updateSettingsViews()
         return
       }
       a.timeoutMinutes = val
 
       if (!a.avatar || !['male', 'female'].includes(a.avatar.gender) || !AVATAR_PALETTE.includes(a.avatar.color)) {
         $('#err').textContent = `Avatar của @${a.name || 'agent'} không hợp lệ`
+        currentSettingTab = 'agent:' + idx
+        updateSettingsViews()
         return
       }
 
       const cmdRes = validateAllowedCommands(a.allowedCommands || [])
       if (!cmdRes.valid) {
         $('#err').textContent = `Lỗi cấu hình lệnh của @${a.name || 'agent'}: ${cmdRes.message}`
+        currentSettingTab = 'agent:' + idx
+        updateSettingsViews()
         return
       }
       a.allowedCommands = cmdRes.commands
@@ -1459,11 +1724,15 @@
     if (worktreesEnabled) {
       if (mergeChecksRaw.length === 0) {
         $('#err').textContent = 'Phải có ít nhất 1 lệnh kiểm tra khi bật worktree'
+        currentSettingTab = 'worktree'
+        updateSettingsViews()
         return
       }
       const chkRes = validateAllowedCommands(mergeChecksRaw)
       if (!chkRes.valid) {
         $('#err').textContent = `Lỗi lệnh kiểm tra: ${chkRes.message}`
+        currentSettingTab = 'worktree'
+        updateSettingsViews()
         return
       }
       mergeChecks = chkRes.commands
@@ -1471,6 +1740,8 @@
       const chkRes = validateAllowedCommands(mergeChecksRaw)
       if (!chkRes.valid) {
         $('#err').textContent = `Lỗi lệnh kiểm tra: ${chkRes.message}`
+        currentSettingTab = 'worktree'
+        updateSettingsViews()
         return
       }
       mergeChecks = chkRes.commands
@@ -1480,6 +1751,8 @@
     const chainLimit = rawChainLimit === '' ? 12 : Number(rawChainLimit)
     if (!Number.isInteger(chainLimit) || chainLimit < 1 || chainLimit > 50) {
       $('#err').textContent = 'Giới hạn chuỗi agent phải là số nguyên từ 1 đến 50 lượt'
+      currentSettingTab = 'limits'
+      updateSettingsViews()
       return
     }
 
@@ -1489,6 +1762,8 @@
       const parsedCost = Number(rawCostCeiling)
       if (isNaN(parsedCost) || parsedCost < 0) {
         $('#err').textContent = 'Trần chi phí mỗi chuỗi phải là số dương hoặc để trống'
+        currentSettingTab = 'limits'
+        updateSettingsViews()
         return
       }
       costCeiling = Number(parsedCost.toFixed(4))
