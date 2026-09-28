@@ -68,6 +68,22 @@ Cấu hình còn treo: techlead vẫn `owns: []` (toàn quyền, khóa cả dự
 - agy thỉnh thoảng trả về phản hồi rỗng.
 - Danh sách phiên codex chỉ quét 400 phiên gần nhất.
 
+## Backlog sau Sprint 7 (cập nhật 2026-09-28)
+Đã xong: A, B, D, F, H, J, xoay phiên theo token, ⚙ hai bên. Còn lại:
+
+| # | Việc | Vì sao | Cỡ |
+|---|---|---|---|
+| E | **Xem diff mỗi lượt + nút hoàn tác** | Đã có worktree nên mỗi lượt agent là một commit: xem diff và `git revert` commit đó là đủ, dễ hơn trước nhiều | Vừa |
+| C | **Thông báo macOS khi có agent @user hoặc chuỗi dừng** | main.js chưa có `Notification`, End-User vẫn phải canh app | Nhỏ |
+| L | **Lượt rỗng nhưng có commit thì app tự tóm tắt** ("dev-fe sửa index.html +114/−14, task T27"), rồi gọi PM | Log có 16 tin "(không có phản hồi)". Gần nhất là T27: PM phải tự grep mới biết đã có code | Nhỏ |
+| M | **Smoke test UI bằng Electron** trong `npm run check`: mở ⚙, đổi mục, lưu, mở popup | T24/T27 không có check tự động nên phải chờ End-User thử tay | Vừa |
+| N | **Tắt app khi agent đang chạy thì hỏi xác nhận** (main.js chưa có `before-quit`) | Tiến trình CLI vẫn chạy ngầm và sửa file, câu trả lời bị mất. End-User từng chọn không dừng agent: chỉ hỏi, không tự dừng | Nhỏ |
+| G | Mẫu team, import/export `agents.json` | Mở dự án mới nhanh | Vừa |
+| I | Icon, đóng gói `.dmg`, ký app, tự cập nhật | Bản trong `dist/` đang cũ | Vừa |
+| O | **Báo cáo chi phí theo sprint/agent** | Hiện chỉ có tổng box, khó biết agent nào tốn tiền | Nhỏ |
+
+**PM đề xuất Sprint 8: E + C + L.** E trực tiếp giúp duyệt chất lượng; C và L nhỏ, giảm thời gian ngồi canh và giảm việc PM phải đoán. M làm cùng nếu QA còn sức, để không phụ thuộc thử tay.
+
 ## Đề xuất của PM
 
 Làm **#1, #3, #4** trước. Ba mục này nhỏ, cùng nằm ở luồng gọi CLI, và giúp End-User kiểm soát được agent cũng như chi phí. Sau đó làm #2 trước khi cho nhiều dev agent chạy song song.
