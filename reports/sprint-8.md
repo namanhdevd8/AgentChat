@@ -12,7 +12,7 @@ Có hai lớp quyền tách rời. Cả hai đều mặc định cấm hết:
    - Mặc định chỉ có `npm run check`.
    - Danh sách này **không** được truyền cho CLI. Vì vậy dù có ghi `npm test` ở đây, Claude vẫn không được tự gọi Bash `npm test`.
 
-End-User thấy "không có dữ liệu thì cấm hết" là đúng, và cách hiển thị hiện tại dễ gây hiểu lầm.
+Đính chính (techlead, T29): danh sách rỗng chỉ tắt app runner (block run-command). Nó không cấm các lệnh CLI tự chạy; những lệnh đó do chế độ quyền của từng CLI quyết định. Cách hiển thị hiện tại dễ gây hiểu lầm. Contract: reports/sprint-8-design.md.
 
 ## Phạm vi P
 1. **Mục "Quyền" cho từng agent trong ⚙**, chọn một trong 3 mức:
