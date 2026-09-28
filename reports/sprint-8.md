@@ -41,3 +41,12 @@ Trả lời hộp thoại xin quyền theo thời gian thực. Chế độ `-p` 
 - CLI giả trả `permission_denials` → có tin hệ thống, có nút. Bấm nút → quy tắc được lưu, agent chạy lại.
 - Bật Toàn quyền phải xác nhận; tắt thì quay về như cũ.
 - `npm run check` xanh.
+
+## Nghiệm thu (PM, 2026-09-28)
+- QA T32 đạt: `npm run check` xanh (11,3 giây). QA chỉ test trên CLI giả và Electron giả lập.
+  - Mức Chỉ sửa file không hồi quy.
+  - Lệnh trong danh sách chuyển thành `Bash(...)`, mỗi quy tắc một argv; codex và agy ra đúng cờ.
+  - Bật Toàn quyền: Huỷ thì không ghi, Xác nhận mới lưu.
+  - Cấp quyền sau khi bị từ chối: chỉ chạy lại một lượt, bấm hai lần vẫn một lượt.
+- T30, T32 → Xong. **T31 giữ Chờ duyệt đến khi End-User thử tay** hộp thoại Toàn quyền và nút "Cho phép và chạy lại" với Claude thật.
+- Lỗi nhẹ, để backlog (chưa tái hiện được vì ⚙ mở dạng modal): khi nhận `team-changed`, FE (index.html:4265) lấy revision mới nhưng giữ draft cũ, nên bấm Lưu sẽ ghi đè thay vì báo CONFLICT. Sửa khi có cách mở ⚙ song song, hoặc khi End-User gặp lỗi này.
