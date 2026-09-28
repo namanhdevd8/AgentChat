@@ -18,6 +18,7 @@ const jobs = [], orphans = [], loadedRoots = new Set(), rootDirs = new Map()
 const summaryUnavailable = new Set()
 const logGenerations = new Map(), appLogWrites = new Map()
 const continuedChains = new Set()
+const pendingPermissions = new Map(), permissionReservations = new Map()
 let win, sequence = 0, pumping = false, pumpAgain = false, orphanTimer
 let watched = { dir: null, root: null, file: null, watchers: [], timer: null, changed: null }
 
@@ -433,6 +434,38 @@ async function post(dir, from, text, extra = {}, appendOptions = {}) {
 }
 
 const runKey = (root, name) => root + '\0' + name
+const permissionKey = (root, name) => root + '\0' + name
+const permissionView = request => ({ id: request.id, agent: request.agent, cli: request.cli, workspaceId: request.workspaceId,
+  sourceRunId: request.sourceRunId, denials: request.denials })
+function pendingValid(request) {
+  try {
+    const agent = core.team(request.root).find(item => item.name === request.agent)
+    const context = agent && agentSessionContext(request.root, agent.name)
+    return !!agent && agent.cli === request.cli && core.teamRevision(request.root) === request.teamRevision
+      && logGenerations.get(request.root) === request.generation && context?.workspaceId === request.workspaceId
+      && !jobs.some(job => job.root === request.root && job.name === request.agent && !job.finished)
+      && !orphans.some(lock => lock.root === request.root && lock.name === request.agent)
+  } catch { return false }
+}
+function permissionRequests(root) {
+  const out = []
+  for (const [key, request] of pendingPermissions) if (request.root === root) {
+    if (pendingValid(request)) out.push(permissionView(request)); else pendingPermissions.delete(key)
+  }
+  return out
+}
+function emitPermissions(root) {
+  const requests = permissionRequests(root)
+  win?.webContents.send('permissions-changed', root, { requests })
+  return requests
+}
+function clearPending(root, name = null) {
+  let changed = false
+  for (const [key, request] of pendingPermissions) if (request.root === root && (!name || request.agent === name)) {
+    pendingPermissions.delete(key); changed = true
+  }
+  if (changed) emitPermissions(root)
+}
 const zeroUsage = () => ({ inputTokens: 0, outputTokens: 0, costUsd: 0, durationMs: 0, partial: false })
 function migrateTaskScope(dir) {
   const root = rootOf(dir), pmBusy = [...jobs, ...orphans].some(x => x.root === root && String(x.name).toLowerCase() === 'pm')
@@ -523,7 +556,7 @@ async function route(dir, msg, hops, chain = null) {
     if (chain.turns >= chain.chainLimit)
       return haltChain(dir, chain, `Dừng sau ${chain.chainLimit} lượt agent liên tiếp.`, targets.slice(i))
     chain.turns++
-    await ask(dir, targets[i], hops, null, chain)
+    await ask(dir, targets[i], hops, null, chain, msg)
   }
 }
 
@@ -534,23 +567,37 @@ function sharedMetadataLocks(scope, root) {
 }
 const scopeAllowsForJob = (scope, file) => !scope.readOnly && (!scope.owns.length || core.scopeAllows(scope, file))
 
-async function ask(dir, agent, hops, special = null, chain = null) {
+async function ask(dir, agent, hops, special = null, chain = null, trigger = null, retryContext = null, grantRequestId = null) {
   const root = rootOf(dir)
+  const reserved = permissionReservations.get(permissionKey(root, agent.name))
+  if (reserved && reserved.id !== grantRequestId) throw gitError('BUSY', `@${agent.name} đang cấp quyền`)
+  if (!grantRequestId) clearPending(root, agent.name)
   let setupError
   try { if (!special) migrateTaskScope(dir) } catch (e) { if (String(agent.name).toLowerCase() === 'pm') setupError = `Không nâng được quyền task cho PM: ${e.message}` }
   agent = core.team(dir).find(a => a.name === agent.name) || agent
-  if (special?.kind === 'summary') agent = { ...agent, resume: false, allowedCommands: [], owns: [], readOnly: true }
+  if (special?.kind === 'summary') agent = { ...agent, resume: false, allowedCommands: [], permissions: { mode: 'edit', allowTools: [], networkAccess: false }, owns: [], readOnly: true }
   const scope = core.normalizeScope(agent, root)
   let workspace = { cwd: root, workspaceId: null, branch: null, worktree: false }
   if (!special) try { workspace = await prepareWorkspace(root, agent) } catch (e) { setupError ||= e.message }
   let taskIds = []
   if (!special) try { taskIds = (await core.taskBoardIndexed(root)).tasks.filter(task => task.assignee === agent.name && task.status !== 'done').map(task => task.id) } catch {}
+  if (grantRequestId) {
+    const grant = permissionReservations.get(permissionKey(root, agent.name))
+    if (!grant || grant.id !== grantRequestId) throw gitError('CANCELLED', 'Thao tác cấp quyền đã bị huỷ')
+    if (grant.retryRevision !== core.teamRevision(root) || grant.generation !== logGenerations.get(root)
+      || grant.workspaceId !== workspace.workspaceId) throw gitError('CONFLICT', 'Dự án đã thay đổi sau khi lưu quyền')
+  }
+  const capturedTrigger = trigger && typeof trigger.from === 'string' && typeof trigger.text === 'string' && Buffer.byteLength(trigger.text) <= 32768
+    ? { from: trigger.from, text: trigger.text, ...(Number.isInteger(trigger.seq) ? { seq: trigger.seq } : {}) } : null
   const job = { dir, root, name: agent.name, key: runKey(root, agent.name), runId: randomUUID(), seq: sequence++, hops,
     agent: { ...agent, owns: [...scope.owns], readOnly: scope.readOnly, scopeNeedsReview: scope.scopeNeedsReview,
-      allowedCommands: [...agent.allowedCommands], avatar: { ...agent.avatar } }, scope,
+      allowedCommands: [...agent.allowedCommands], permissions: agent.permissions && typeof agent.permissions === 'object'
+        ? { ...agent.permissions, allowTools: Array.isArray(agent.permissions.allowTools) ? [...agent.permissions.allowTools] : agent.permissions.allowTools } : agent.permissions,
+      avatar: { ...agent.avatar } }, scope,
     locks: workspace.worktree ? sharedMetadataLocks(scope, root) : core.scopeLocks(scope, root), label: 'đang xếp hàng…', phase: 'queued', blockedBy: [], stopping: false,
     finished: false, headStarted: false, reserved: false, spawned: false, pgid: null, setupError,
-    controller: new AbortController(), auditController: new AbortController(), timer: null, taskIds, chain, ...workspace, ...(special || {}) }
+    controller: new AbortController(), auditController: new AbortController(), timer: null, taskIds, chain, trigger: capturedTrigger,
+    retryContext, ...workspace, ...(special || {}) }
   jobs.push(job)
   if (heads().includes(job)) startHead(job)
   return job
@@ -674,9 +721,16 @@ function recordChainTurn(job, result, changed, metadataChanged, auditComplete) {
     && chain.noProgress.every((name, index, list) => index < 2 || name.toLowerCase() === list[index - 2].toLowerCase()))
     chain.pingPong = [...new Set(chain.noProgress.map(name => name.toLowerCase()))]
 }
+function permissionCandidate(job, result) {
+  if (!job.trigger || job.kind || job.repairQueueId || result.orphanState || ['stopped', 'timeout'].includes(result.outcome)
+    || !result.permissionDenials?.some(denial => denial.canGrant)) return null
+  return { id: randomUUID(), root: job.root, agent: job.name, cli: job.agent.cli, workspaceId: job.workspaceId || null,
+    sourceRunId: job.runId, denials: result.permissionDenials, trigger: job.trigger, teamRevision: core.teamRevision(job.root),
+    generation: logGenerations.get(job.root), reserved: false }
+}
 
 async function executeJob(job) {
-  let before, metadataBefore, result, paths = [], changed = [], metadataChanged = [], auditComplete = true, workspaceError, handoffError
+  let before, metadataBefore, result, paths = [], changed = [], metadataChanged = [], auditComplete = true, workspaceError, handoffError, pendingPermission
   try {
     before = await core.snapshot(job.cwd || job.root, { signal: job.controller.signal, excludeChat: job.worktree })
     if (job.worktree) metadataBefore = await core.snapshot(job.root, { signal: job.controller.signal, onlyChat: true })
@@ -689,7 +743,8 @@ async function executeJob(job) {
   if (!result) {
     const latest = core.team(job.root).find(agent => agent.name === job.name), runAgent = latest
       ? { ...job.agent, sessionTokenLimit: latest.sessionTokenLimit, sessionConfigError: latest.sessionConfigError } : job.agent
-    if (job.kind !== 'summary' && runAgent.sessionConfigError) result = { outcome: 'error', text: runAgent.sessionConfigError, usage: zeroUsage() }
+    if (job.kind !== 'summary' && (runAgent.sessionConfigError || runAgent.permissionConfigError)) result = { outcome: 'error',
+      text: runAgent.sessionConfigError || runAgent.permissionConfigError, usage: zeroUsage() }
     else result = await core.run(job.root, runAgent, {
       cwd: job.cwd || job.root, workspaceId: job.workspaceId,
       runId: job.runId, trackSession: job.kind !== 'summary', sessionTokenLimit: runAgent.sessionTokenLimit,
@@ -697,6 +752,7 @@ async function executeJob(job) {
       onProgress: label => { if (!job.stopping) progress(job, label) },
       onSpawn: pid => { job.spawned = true; job.pgid = pid; persistRegistry(job.root) },
       onSessionChanged: () => { try { emitSessions(job.root) } catch (e) { console.error('Không gửi được trạng thái phiên:', e) } },
+      ...(job.retryContext ? { retryContext: job.retryContext } : {}),
       ...(job.initialPrompt ? { initialPrompt: job.initialPrompt } : {}),
     })
   }
@@ -786,11 +842,21 @@ async function executeJob(job) {
         files: workspaceError.files || [], log: '' } })
     if (job.spawned) await warning(job, paths, auditComplete)
     recordChainTurn(job, result, changed, metadataChanged, auditComplete)
+    if (result.permissionDenials?.length) {
+      pendingPermission = permissionCandidate(job, result)
+      await post(job.dir, 'system', `${job.name} bị từ chối quyền: ${result.permissionDenials.map(denial => denial.label).join('; ')}`,
+        { kind: 'permission-denied', relatedRunId: job.runId, agent: job.name, cli: job.agent.cli, workspaceId: job.workspaceId || null,
+          permissionRequestId: pendingPermission?.id || null, denials: result.permissionDenials })
+    }
     if (result.outcome === 'success') await route(job.dir, msg, job.hops + 1, job.chain)
   } finally {
     if (result.orphanState) keepOrphan(job, result.orphanState)
     else releaseReservation(job)
     removeJob(job)
+  }
+  if (pendingPermission && pendingValid(pendingPermission)) {
+    pendingPermissions.set(permissionKey(job.root, job.name), pendingPermission)
+    emitPermissions(job.root)
   }
   scheduleSummary(job.root).catch(e => console.error(e))
 }
@@ -944,7 +1010,7 @@ async function refreshLog(root) {
   core.invalidateLogIndex(root)
   const index = await core.getLogIndex(root)
   logGenerations.set(root, index.generation)
-  if (previous && previous !== index.generation) win?.webContents.send('log-reset', root, { generation: index.generation })
+  if (previous && previous !== index.generation) { clearPending(root); win?.webContents.send('log-reset', root, { generation: index.generation }) }
 }
 function viewerRoot(root, workspaceId, href = '') {
   if (!workspaceId || String(href).split(/[?#]/, 1)[0].startsWith('.chat/')) return root
@@ -1020,6 +1086,31 @@ function emitSessions(root) {
   win?.webContents.send('sessions-changed', root, current)
   return current
 }
+function emitTeam(root, team = core.team(root)) {
+  const data = { team, revision: core.teamRevision(root) }
+  win?.webContents.send('team-changed', root, data)
+  return data
+}
+function guardTeamChange(root, before, next) {
+  for (const active of [...jobs, ...orphans]) if (active.root === root && !active.finished) {
+    const old = before.find(agent => agent.name === active.name), changed = next.find(agent => agent.name === active.name)
+    if (!old || !changed || old.cli !== changed.cli || (old.resume !== false) !== (changed.resume !== false)
+      || old.readOnly !== changed.readOnly || JSON.stringify(old.owns) !== JSON.stringify(changed.owns)
+      || JSON.stringify(old.allowedCommands) !== JSON.stringify(changed.allowedCommands)
+      || JSON.stringify(old.permissions) !== JSON.stringify(changed.permissions))
+      throw gitError('BUSY', `Không thể đổi tên, xoá, CLI, nhớ phiên, phạm vi, lệnh hoặc quyền của @${active.name} khi còn lượt/khóa`)
+  }
+  if (permissionReservations.size && [...permissionReservations.keys()].some(key => key.startsWith(root + '\0')))
+    throw gitError('BUSY', 'Đang có thao tác cấp quyền')
+  if (core.projectSettings(root).settings.worktreesEnabled) for (const workspace of readWorktrees(root).agents)
+    if (!next.some(agent => agent.name === workspace.agent)) throw gitError('BUSY', `Không thể đổi tên hoặc xoá @${workspace.agent} khi agent còn workspace`)
+}
+function fullEscalations(before, next) {
+  return next.filter(agent => agent.permissions.mode === 'full' && (() => {
+    const old = before.find(item => item.name === agent.name)
+    return !old || old.permissions.mode !== 'full' || old.cli !== agent.cli
+  })())
+}
 function resolveFile(dir, input, workspaceId = null) {
   const root = knownProject(dir)
   if (typeof input !== 'string' || !input || /[\0-\x1f\x7f]/.test(input) || input.includes('\\')) throw new Error('Đường dẫn không hợp lệ')
@@ -1035,8 +1126,9 @@ function resolveFile(dir, input, workspaceId = null) {
 
 const validSender = event => { if (event.sender !== win?.webContents) throw new Error('Nguồn IPC không hợp lệ') }
 const apiError = error => {
-  const message = redactManagedPath(error.message || 'Thao tác thất bại')
-  return { ok: false, error: { code: error.code || 'IO_ERROR', message } }
+  const detail = redactManagedPath(error.message || 'Thao tác thất bại')
+  const message = error.permissionSaved ? `Đã lưu quyền nhưng chưa chạy lại: ${detail}` : detail
+  return { ok: false, error: { code: error.code || 'IO_ERROR', message, ...(error.permissionSaved ? { permissionSaved: true } : {}) } }
 }
 const apiCall = async action => { try { return { ok: true, ...await action() } } catch (e) { return apiError(e) } }
 
@@ -1063,7 +1155,8 @@ ipcMain.handle('open', async (event, dir) => {
   scheduleSummary(root).catch(e => console.error(e))
   if (config.settings.worktreesEnabled) pumpMerge(root).catch(e => console.error(e))
   return { history, totals: core.logTotals(index), settings: config.settings, settingsRevision: config.revision,
-    team: core.team(root), sessions: sessionMap(root), active: activeFor(root), orphanLocks: orphanFor(root) }
+    team: core.team(root), teamRevision: core.teamRevision(root), permissionRequests: permissionRequests(root),
+    sessions: sessionMap(root), active: activeFor(root), orphanLocks: orphanFor(root) }
 })
 ipcMain.handle('logPage', (event, dir, options) => { validSender(event); return apiCall(async () => ({ page: await core.logPage(knownProject(dir), options) })) })
 ipcMain.handle('searchLog', (event, dir, options) => { validSender(event); return apiCall(() => core.searchLog(knownProject(dir), options)) })
@@ -1077,7 +1170,8 @@ ipcMain.handle('saveProjectSettings', (event, dir, request) => {
     if (request.expectedRevision !== current.revision) throw gitError('CONFLICT', 'Cấu hình đã thay đổi, hãy tải lại')
     const togglesWorktrees = nextSettings.worktreesEnabled !== current.settings.worktreesEnabled
       || JSON.stringify(nextSettings.mergeChecks) !== JSON.stringify(current.settings.mergeChecks)
-    if (togglesWorktrees && ([...jobs, ...orphans].some(item => item.root === root) || mergeControllers.has(root)))
+    if (togglesWorktrees && ([...jobs, ...orphans].some(item => item.root === root) || mergeControllers.has(root)
+      || [...permissionReservations.keys()].some(key => key.startsWith(root + '\0'))))
       throw gitError('BUSY', 'Đang có lượt, khóa hoặc kiểm tra gộp; chưa thể đổi cấu hình worktree')
     if (!current.settings.worktreesEnabled && nextSettings.worktreesEnabled) await enableWorktrees(root, nextSettings)
     if (current.settings.worktreesEnabled && !nextSettings.worktreesEnabled) {
@@ -1089,6 +1183,7 @@ ipcMain.handle('saveProjectSettings', (event, dir, request) => {
     if (!saved.settings.autoSummary) for (const job of jobs.filter(item => item.root === root && item.kind === 'summary')) stopJob(job, 'stopped')
     win?.webContents.send('project-settings', root, saved)
     await emitWorktreeState(root).catch(() => {})
+    if (togglesWorktrees) clearPending(root)
     emitSessions(root)
     if (saved.settings.autoSummary) scheduleSummary(root).catch(e => console.error(e))
     if (saved.settings.worktreesEnabled) pumpMerge(root).catch(e => console.error(e))
@@ -1212,31 +1307,73 @@ ipcMain.handle('openLink', async (event, dir, href) => {
   const error = await shell.openPath(resolveFile(dir, href))
   if (error) throw new Error(error)
 })
-ipcMain.handle('saveTeam', (event, dir, members) => {
+ipcMain.handle('saveTeam', (event, dir, members, request) => {
   validSender(event)
-  const root = knownProject(dir), before = core.team(root)
-  for (const job of jobs) if (job.root === rootOf(dir) && !job.finished) {
-    const old = before.find(a => a.name === job.name), next = members.find(a => a.name === job.name)
-    let scopeChanged = true
-    if (old && next) {
-      const scope = core.normalizeScope(next, root)
-      scopeChanged = old.readOnly !== scope.readOnly || JSON.stringify(old.owns) !== JSON.stringify(scope.owns)
+  return apiCall(async () => {
+    const root = knownProject(dir)
+    if (!request || typeof request.expectedRevision !== 'string') throw gitError('INVALID_ARGUMENT', 'Thiếu revision cấu hình nhóm')
+    let revision = core.teamRevision(root), before = core.team(root)
+    if (request.expectedRevision !== revision) throw gitError('CONFLICT', 'Cấu hình nhóm đã thay đổi, hãy tải lại')
+    let next = core.normalizeTeam(root, members)
+    guardTeamChange(root, before, next)
+    const escalations = fullEscalations(before, next)
+    if (escalations.length) {
+      const answer = await dialog.showMessageBox(win, { type: 'warning', buttons: ['Huỷ', 'Bật Toàn quyền'], defaultId: 0, cancelId: 0,
+        message: `Bật Toàn quyền cho ${escalations.map(agent => `${agent.name} (${agent.cli})`).join(', ')}?`,
+        detail: `Dự án: ${root}\nAgent có thể chạy lệnh, dùng mạng và tác động tới file ngoài dự án theo quyền tài khoản máy. Phạm vi file của app không phải sandbox bảo vệ hệ điều hành.` })
+      if (answer.response !== 1) throw gitError('CANCELLED', 'Đã huỷ bật Toàn quyền')
+      revision = core.teamRevision(root); before = core.team(root)
+      if (request.expectedRevision !== revision) throw gitError('CONFLICT', 'Cấu hình nhóm đã thay đổi trong lúc xác nhận')
+      next = core.normalizeTeam(root, members); guardTeamChange(root, before, next)
     }
-    let commandsChanged = true
-    if (old && next) {
-      const commands = Object.hasOwn(next, 'allowedCommands') ? core.normalizeAllowedCommands(next.allowedCommands) : old.allowedCommands
-      commandsChanged = JSON.stringify(old.allowedCommands) !== JSON.stringify(commands)
+    const saved = core.saveTeam(root, next), data = emitTeam(root, saved)
+    clearPending(root); emitSessions(root)
+    return data
+  })
+})
+ipcMain.handle('grantPermissionAndRetry', (event, dir, input) => {
+  validSender(event)
+  return apiCall(async () => {
+    const root = knownProject(dir)
+    if (!input || typeof input !== 'object' || Array.isArray(input)
+      || Object.keys(input).sort().join('\0') !== 'denialId\0requestId'
+      || typeof input.requestId !== 'string' || typeof input.denialId !== 'string')
+      throw gitError('INVALID_ARGUMENT', 'Yêu cầu cấp quyền không hợp lệ')
+    const entry = [...pendingPermissions.entries()].find(([, item]) => item.root === root && item.id === input.requestId)
+    if (!entry) throw gitError('EXPIRED', 'Yêu cầu cấp quyền đã hết hiệu lực; hãy gửi lại yêu cầu')
+    const [key, request] = entry, denial = request.denials.find(item => item.id === input.denialId)
+    if (!pendingValid(request)) { pendingPermissions.delete(key); emitPermissions(root); throw gitError('EXPIRED', 'Yêu cầu cấp quyền đã hết hiệu lực') }
+    if (request.reserved || permissionReservations.has(key)) throw gitError('BUSY', 'Yêu cầu cấp quyền đang được xử lý')
+    if (!denial?.canGrant || !denial.rule) throw gitError('UNSUPPORTED', denial?.reason || 'Không thể tự cấp quyền này')
+    const members = core.team(root), agent = members.find(item => item.name === request.agent)
+    if (!agent || agent.cli !== request.cli || agent.permissions.mode === 'full' || core.permissionRules(agent).includes(denial.rule))
+      throw gitError('CONFLICT', 'Quyền hoặc agent đã thay đổi')
+    const permissions = { ...agent.permissions, mode: 'custom',
+      allowTools: agent.permissions.mode === 'custom' ? [...new Set([...agent.permissions.allowTools, denial.rule])] : [denial.rule] }
+    const next = core.normalizeTeam(root, members.map(item => item.name === agent.name ? { ...item, permissions } : item))
+    guardTeamChange(root, members, next)
+    request.reserved = true; permissionReservations.set(key, request)
+    let permissionSaved = false
+    try {
+      const saved = core.saveTeam(root, next)
+      permissionSaved = true
+      const changed = emitTeam(root, saved)
+      request.retryRevision = changed.revision
+      pendingPermissions.delete(key); emitPermissions(root)
+      const updated = saved.find(item => item.name === agent.name), chain = newChain(root)
+      chain.turns = 1
+      let job
+      try { job = await ask(root, updated, 0, null, chain, request.trigger,
+        { rule: denial.rule, trigger: request.trigger }, request.id) }
+      catch (e) { e.permissionSaved = true; throw e }
+      return { runId: job.runId, team: changed.team, teamRevision: changed.revision }
+    } catch (e) {
+      if (permissionSaved) e.permissionSaved = true
+      throw e
+    } finally {
+      request.reserved = false; permissionReservations.delete(key)
     }
-    if (!old || !next || old.cli !== next.cli || (old.resume !== false) !== (next.resume !== false) || scopeChanged || commandsChanged)
-      throw new Error(`Không thể đổi tên, xoá, đổi CLI, nhớ phiên, phạm vi hoặc lệnh của @${job.name} khi còn lượt`)
-  }
-  if (core.projectSettings(root).settings.worktreesEnabled) for (const workspace of readWorktrees(root).agents) {
-    const next = members.find(agent => agent.name === workspace.agent)
-    if (!next) throw new Error(`Không thể đổi tên hoặc xoá @${workspace.agent} khi agent còn workspace`)
-  }
-  const saved = core.saveTeam(root, members)
-  emitSessions(root)
-  return saved
+  })
 })
 ipcMain.handle('accounts', event => { validSender(event); return core.accounts() })
 ipcMain.handle('sessions', (event, dir) => {
@@ -1255,22 +1392,30 @@ ipcMain.handle('models', (event, cli) => { validSender(event); return core.model
 ipcMain.handle('useSession', async (event, dir, name, cli, id, workspaceId = null) => {
   validSender(event)
   const root = knownProject(dir)
-  if (jobs.some(j => j.root === root && j.name === name) || orphans.some(o => o.root === root && o.name === name)) throw new Error(`@${name} còn lượt hoặc khóa cũ`)
-  const context = agentSessionContext(root, name)
+  const busy = () => jobs.some(j => j.root === root && j.name === name) || orphans.some(o => o.root === root && o.name === name)
+    || permissionReservations.has(permissionKey(root, name))
+  if (busy()) throw new Error(`@${name} còn lượt, khóa cũ hoặc thao tác cấp quyền`)
+  let context = agentSessionContext(root, name)
   if (context.workspaceId !== workspaceId) throw gitError('INVALID_ARGUMENT', 'Workspace của phiên không còn đúng')
   const index = await core.getLogIndex(root)
+  if (busy()) throw new Error(`@${name} còn lượt, khóa cũ hoặc thao tác cấp quyền`)
+  context = agentSessionContext(root, name)
+  if (context.workspaceId !== workspaceId) throw gitError('INVALID_ARGUMENT', 'Workspace của phiên không còn đúng')
   core.setSession(dir, name, { id, cli, seen: index.records.length, seenHash: index.prefixHashes[index.records.length], at: new Date().toISOString(), adopted: true }, context.workspaceId)
+  clearPending(root, name)
   emitSessions(root)
 })
 ipcMain.handle('resetSession', (event, dir, name) => {
   validSender(event)
   const root = knownProject(dir), busy = [...jobs, ...orphans].some(x => x.root === root && (!name || x.name === name))
+    || [...permissionReservations.keys()].some(key => key.startsWith(root + '\0') && (!name || key === permissionKey(root, name)))
   if (busy) throw new Error(name ? `@${name} còn lượt hoặc khóa cũ` : 'Box đang có lượt hoặc khóa cũ')
   if (name) core.setSession(dir, name, null, agentSessionContext(root, name).workspaceId)
   else {
     core.setSession(dir, null, null)
     for (const workspace of readWorktrees(root).agents) core.setSession(root, null, null, workspace.id)
   }
+  clearPending(root, name)
   emitSessions(root)
 }) // name null → reset all
 ipcMain.handle('stop', (event, dir, name, runId) => {

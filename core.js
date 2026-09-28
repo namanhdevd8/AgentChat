@@ -19,6 +19,7 @@ const DEFAULT_TEAM = [
   { name: 'qa', cli: 'agy', role: 'QA: viết test case, kiểm thử, báo lỗi.' },
 ]
 const DEFAULT_COMMANDS = ['npm run check']
+const DEFAULT_PERMISSIONS = { mode: 'edit', allowTools: [], networkAccess: false }
 const AVATAR_COLORS = ['#ff8fab', '#7cb4ff', '#5fe0b0', '#ffa94d', '#bb9bff', '#ffd23f', '#66d9e8', '#ff6b6b']
 const markdown = new MarkdownIt({ html: false })
 
@@ -64,7 +65,21 @@ function claudeResult(s, baseline) {
     if (baseline != null && s.rawCostUsd >= baseline) usage.costUsd = Number((s.rawCostUsd - baseline).toFixed(12))
     else usage.partial = true
   }
-  return { id: s.id, text: s.text, usage, error: !s.terminal ? 'Thiếu kết quả cuối từ Claude' : s.error }
+  return { id: s.id, text: s.text, usage, ...(s.permissionDenials.length ? { permissionDenials: s.permissionDenials } : {}),
+    error: !s.terminal ? 'Thiếu kết quả cuối từ Claude' : s.error }
+}
+
+function claudePermissionArgs(agent) {
+  const permissions = agent.permissions || DEFAULT_PERMISSIONS
+  if (permissions.mode === 'full') return ['--permission-mode', 'bypassPermissions']
+  const rules = permissionRules({ ...agent, permissions, allowedCommands: agent.allowedCommands || DEFAULT_COMMANDS })
+  return ['--permission-mode', 'acceptEdits', ...(rules.length ? ['--allowedTools', ...rules] : [])]
+}
+function codexPermissionArgs(agent) {
+  const permissions = agent.permissions || DEFAULT_PERMISSIONS
+  if (permissions.mode === 'full') return ['-c', 'sandbox_mode="danger-full-access"', '-c', 'approval_policy="never"']
+  const network = permissions.mode === 'custom' && permissions.networkAccess
+  return ['-c', 'sandbox_mode="workspace-write"', '-c', 'approval_policy="never"', '-c', `sandbox_workspace_write.network_access=${network}`]
 }
 
 function codexLabel(e, dir) {
@@ -94,8 +109,9 @@ function agyLabel(update, dir) {
 const CLI = {
   claude: {
     // prompt right after -p: --add-dir is variadic and would swallow a trailing prompt ("Input must be provided…")
-    args: (p, id, a = {}) => ['-p', p, '--output-format', 'stream-json', '--verbose', '--permission-mode', 'acceptEdits', ...opt('--add-dir', a.sharedChat), ...opt('--model', a.model), ...opt('--effort', a.effort), ...opt('--resume', id)],
-    state: () => ({ id: null, text: null, usage: null, rawCostUsd: null, error: null, terminal: false }),
+    args: (p, id, a = {}) => ['-p', p, '--output-format', 'stream-json', '--verbose', ...claudePermissionArgs(a),
+      ...opt('--add-dir', a.sharedChat), ...opt('--model', a.model), ...opt('--effort', a.effort), ...opt('--resume', id)],
+    state: () => ({ id: null, text: null, usage: null, rawCostUsd: null, permissionDenials: [], error: null, terminal: false }),
     event(e, s, { dir }) {
       s.id ||= e.session_id
       if (e.type === 'system' && e.subtype === 'init') s.id = e.session_id || s.id
@@ -117,6 +133,9 @@ const CLI = {
         s.id = e.session_id || s.id
         s.usage = rawUsage(e.usage || e.result?.usage)
         s.rawCostUsd = value(e.total_cost_usd ?? e.result?.total_cost_usd)
+        const denials = e.permission_denials ?? e.result?.permission_denials
+        if (Array.isArray(denials)) s.permissionDenials.push(...denials)
+        else if (denials != null) s.permissionDenials.push(denials)
         if (e.is_error || (e.subtype && e.subtype !== 'success')) s.error = errorText(e.result) || (Array.isArray(e.errors) && e.errors.filter(x => typeof x === 'string').join('; ')) || 'Claude báo lỗi'
       }
     },
@@ -124,7 +143,7 @@ const CLI = {
   },
   codex: {
     // `exec resume` has no -s flag, so the sandbox goes through -c for both
-    args: (p, id, a = {}) => ['exec', ...opt('--add-dir', a.sharedChat), ...(id ? ['resume'] : []), '--json', '--skip-git-repo-check', '-c', 'sandbox_mode="workspace-write"',
+    args: (p, id, a = {}) => ['exec', ...opt('--add-dir', a.sharedChat), ...(id ? ['resume'] : []), '--json', '--skip-git-repo-check', ...codexPermissionArgs(a),
       ...opt('-m', a.model), ...opt('-c', a.effort && `model_reasoning_effort="${a.effort}"`), ...(id ? [id] : []), p],
     state: () => ({ id: null, text: null, usage: null, error: null, terminal: false }),
     event(e, s, context) {
@@ -138,7 +157,9 @@ const CLI = {
       error: !s.terminal ? 'Thiếu kết quả cuối từ Codex' : s.error }),
   },
   agy: {
-    args: (p, id, a = {}) => ['-p', p, '--output-format', 'stream-json', '--print-timeout', '0', '--mode', 'accept-edits', ...opt('--add-dir', a.sharedChat), ...opt('--model', a.model), ...opt('--effort', a.effort), ...opt('--conversation', id)],
+    args: (p, id, a = {}) => ['-p', p, '--output-format', 'stream-json', '--print-timeout', '0', '--mode', 'accept-edits',
+      ...(a.permissions?.mode === 'full' ? ['--dangerously-skip-permissions'] : []), ...opt('--add-dir', a.sharedChat),
+      ...opt('--model', a.model), ...opt('--effort', a.effort), ...opt('--conversation', id)],
     state: context => ({ id: null, text: null, usage: null, error: null, terminal: false, steps: new Map(), afterBoundary: !context.resumed }),
     event(e, s, context) {
       if (e.event === 'init') s.id = e.conversation_id || e.init?.conversation_id || s.id
@@ -717,6 +738,78 @@ function normalizeAllowedCommands(value) {
   if (!Array.isArray(value) || value.length > 20) throw new Error('Danh sách lệnh phải có tối đa 20 dòng')
   return [...new Set(value.map(normalizeCommand))]
 }
+function normalizePermissions(value, cli, name = '?') {
+  if (value === undefined) return { ...DEFAULT_PERMISSIONS, allowTools: [] }
+  if (!sameKeys(value, ['mode', 'allowTools', 'networkAccess']) || !['edit', 'custom', 'full'].includes(value.mode)
+    || !Array.isArray(value.allowTools) || value.allowTools.length > 32 || typeof value.networkAccess !== 'boolean')
+    throw new Error(`Cấu hình quyền của @${name} không hợp lệ`)
+  const rules = []
+  for (const input of value.allowTools) {
+    if (typeof input !== 'string' || input.length > 512 || /[\0-\x1f\x7f]/.test(input)) throw new Error(`Quy tắc quyền của @${name} không hợp lệ`)
+    const rule = input.trim()
+    if (!rule) continue
+    const match = /^(mcp__[A-Za-z0-9_-]+__(?:[A-Za-z0-9_-]+|\*)|[A-Za-z][A-Za-z0-9_-]*)(?:\((.*)\))?$/.exec(rule)
+    if (!match || (match[2] != null && (!match[2].trim() || !balancedParens(match[2])))) throw new Error(`Quy tắc quyền "${rule}" không hợp lệ`)
+    if (match[1].startsWith('mcp__') && (!/^mcp__[A-Za-z0-9_-]+__(?:[A-Za-z0-9_-]+|\*)$/.test(match[1]) || match[2] != null))
+      throw new Error(`Quy tắc MCP "${rule}" phải ghi rõ server và tool`)
+    if (!rules.includes(rule)) rules.push(rule)
+  }
+  const bin = account(cli)?.bin
+  if (!bin) throw new Error(`Tài khoản CLI "${cli}" không hỗ trợ`)
+  if ((bin === 'claude' || bin === 'agy') && value.networkAccess) throw new Error(`@${name}: ${bin} không hỗ trợ cấu hình mạng riêng`)
+  if ((bin === 'codex' || bin === 'agy') && rules.length) throw new Error(`@${name}: ${bin} không hỗ trợ danh sách công cụ`)
+  if (bin === 'agy' && value.mode === 'custom') throw new Error(`@${name}: agy không hỗ trợ quyền Tuỳ chỉnh`)
+  return { mode: value.mode, allowTools: rules, networkAccess: value.networkAccess }
+}
+function balancedParens(text) {
+  let depth = 0
+  for (const char of text) {
+    if (char === '(') depth++
+    else if (char === ')' && --depth < 0) return false
+  }
+  return depth === 0
+}
+function permissionRules(agent) {
+  if (account(agent.cli)?.bin !== 'claude' || agent.permissions.mode === 'full') return []
+  const commands = agent.allowedCommands.map(command => `Bash(${command})`)
+  return [...new Set([...commands, ...(agent.permissions.mode === 'custom' ? agent.permissions.allowTools : [])])]
+}
+function normalizePermissionDenials(entries, agent) {
+  if (!Array.isArray(entries) || !entries.length) return []
+  if (entries.length > 32) return [{ id: randomUUID(), tool: 'CLI', label: 'CLI báo quá 32 lần từ chối quyền', rule: null,
+    canGrant: false, reason: 'Quá nhiều mục để tự cấp an toàn' }]
+  const applied = new Set(permissionRules(agent)), full = agent.permissions.mode === 'full', out = [], seen = new Set()
+  for (const entry of entries) {
+    const valid = entry && typeof entry === 'object' && !Array.isArray(entry) && typeof entry.tool_name === 'string'
+      && entry.tool_name.trim() && entry.tool_input && typeof entry.tool_input === 'object' && !Array.isArray(entry.tool_input)
+    const tool = valid ? clean(entry.tool_name) : 'CLI'
+    let rule = null, label = valid ? tool : 'CLI báo từ chối quyền nhưng không đủ thông tin'
+    let reason = valid ? 'Không thể tự tạo quy tắc đủ hẹp; hãy mở mục Quyền' : 'Dữ liệu từ chối không hợp lệ'
+    let inputSize = Infinity
+    if (valid) try { inputSize = Buffer.byteLength(JSON.stringify(entry.tool_input)) } catch {}
+    if (valid && inputSize <= 8192 && entry.tool_name === 'Bash' && typeof entry.tool_input.command === 'string') {
+      try { const command = normalizeCommand(entry.tool_input.command); rule = `Bash(${command})`; label = rule }
+      catch { reason = 'Lệnh chứa cú pháp shell không thể cấp tự động an toàn' }
+    } else if (valid && inputSize <= 8192 && entry.tool_name === 'WebFetch' && typeof entry.tool_input.url === 'string') {
+      try {
+        const url = new URL(entry.tool_input.url)
+        if (!['http:', 'https:'].includes(url.protocol) || !url.hostname || url.username || url.password) throw new Error()
+        rule = `WebFetch(domain:${url.hostname})`; label = rule
+      } catch { reason = 'URL bị từ chối không hợp lệ để cấp theo hostname' }
+    } else if (valid && inputSize <= 8192 && /^mcp__[A-Za-z0-9_-]+__[A-Za-z0-9_-]+$/.test(entry.tool_name)) {
+      rule = entry.tool_name; label = entry.tool_name
+    } else if (valid && inputSize > 8192) reason = 'Dữ liệu từ chối vượt quá 8 KiB'
+    if (rule && (full || applied.has(rule))) reason = full ? 'Agent đã ở chế độ Toàn quyền; hãy kiểm tra deny/hook của CLI'
+      : 'Quy tắc đã được cấp; hãy kiểm tra deny/hook của CLI'
+    const canGrant = !!rule && !full && !applied.has(rule)
+    if (canGrant) reason = null
+    const useId = valid && typeof entry.tool_use_id === 'string' ? entry.tool_use_id : ''
+    const key = rule ? `${tool}\0${rule}` : useId ? `${tool}\0${useId}` : `${tool}\0${label}`
+    if (seen.has(key)) continue
+    seen.add(key); out.push({ id: randomUUID(), tool, label, rule, canGrant, reason })
+  }
+  return out
+}
 const validAvatar = avatar => sameKeys(avatar, ['gender', 'color']) && ['male', 'female'].includes(avatar.gender)
   && AVATAR_COLORS.includes(avatar.color)
 function normalizeAvatars(members) {
@@ -742,14 +835,17 @@ function team(dir) {
     let scope
     try { scope = normalizeScope(agent, dir) }
     catch (e) { scope = { owns: [], readOnly: agent.readOnly === true, ownsLegacy: typeof agent.owns === 'string' ? agent.owns : JSON.stringify(agent.owns), scopeNeedsReview: true, scopeError: e.message } }
-    let allowedCommands, commandConfigError, tokenLimit, sessionConfigError
+    let allowedCommands, commandConfigError, tokenLimit, sessionConfigError, permissions, permissionConfigError
     try { allowedCommands = normalizeAllowedCommands(agent.allowedCommands ?? DEFAULT_COMMANDS) }
     catch (e) { allowedCommands = []; commandConfigError = e.message }
     try { tokenLimit = sessionTokenLimit(agent) }
     catch (e) { sessionConfigError = e.message }
+    try { permissions = normalizePermissions(agent.permissions, agent.cli, agent.name) }
+    catch (e) { permissionConfigError = e.message }
     return { ...agent, ...scope, allowedCommands, avatar: avatars[index],
       ...(tokenLimit != null ? { sessionTokenLimit: tokenLimit } : {}), ...(commandConfigError ? { commandConfigError } : {}),
-      ...(sessionConfigError ? { sessionConfigError } : {}) }
+      ...(sessionConfigError ? { sessionConfigError } : {}), ...(permissions ? { permissions } : {}),
+      ...(permissionConfigError ? { permissionConfigError } : {}) }
   })
 }
 function timeoutMinutes(agent) {
@@ -763,22 +859,24 @@ function sessionTokenLimit(agent) {
   return n
 }
 
-function saveTeam(dir, members) {
+function normalizeTeam(dir, members) {
   const names = new Set(), before = team(dir)
   const merged = members.map(a => {
     const old = before.find(x => x.name === a.name)
     return { ...a, allowedCommands: Object.hasOwn(a, 'allowedCommands') ? a.allowedCommands : old?.allowedCommands ?? DEFAULT_COMMANDS,
       avatar: Object.hasOwn(a, 'avatar') ? a.avatar : old?.avatar,
-      sessionTokenLimit: Object.hasOwn(a, 'sessionTokenLimit') ? a.sessionTokenLimit : old?.sessionTokenLimit ?? DEFAULT_SESSION_TOKEN_LIMIT }
+      sessionTokenLimit: Object.hasOwn(a, 'sessionTokenLimit') ? a.sessionTokenLimit : old?.sessionTokenLimit ?? DEFAULT_SESSION_TOKEN_LIMIT,
+      permissions: Object.hasOwn(a, 'permissions') ? a.permissions : old?.permissions ?? { ...DEFAULT_PERMISSIONS, allowTools: [] } }
   })
   const avatars = normalizeAvatars(merged)
   const normalized = merged.map((a, index) => {
     const old = before.find(x => x.name === a.name)
     const scope = normalizeScope({ ...a, scopeNeedsReview: old?.scopeNeedsReview && !a.scopeConfirmed }, dir)
     const saved = { ...a, ...scope, timeoutMinutes: timeoutMinutes(a), sessionTokenLimit: sessionTokenLimit(a),
-      allowedCommands: normalizeAllowedCommands(a.allowedCommands), avatar: avatars[index] }
+      allowedCommands: normalizeAllowedCommands(a.allowedCommands), permissions: normalizePermissions(a.permissions, a.cli, a.name), avatar: avatars[index] }
     if (a.avatar !== undefined && !validAvatar(a.avatar)) throw new Error(`Avatar của @${a.name || '?'} không hợp lệ`)
-    delete saved.scopeConfirmed; delete saved.commandConfigError; delete saved.sessionConfigError; delete saved.avatarConfigError; delete saved.scopeError
+    delete saved.scopeConfirmed; delete saved.commandConfigError; delete saved.sessionConfigError; delete saved.permissionConfigError
+    delete saved.avatarConfigError; delete saved.scopeError
     if (!scope.scopeNeedsReview) delete saved.scopeNeedsReview
     return saved
   })
@@ -789,12 +887,17 @@ function saveTeam(dir, members) {
     if (!/^[\w.:-]*$/.test(a.model || '') || !/^\w*$/.test(a.effort || '')) throw new Error(`Model/effort của @${a.name} không hợp lệ`)
     names.add(a.name.toLowerCase())
   }
+  return normalized
+}
+function saveTeam(dir, members) {
+  const normalized = normalizeTeam(dir, members)
   const file = chat(dir, 'agents.json'), backup = chat(dir, 'agents.json.pre-sprint-2.bak'), temp = chat(dir, 'agents.json.tmp')
   if (!fs.existsSync(backup)) fs.copyFileSync(file, backup, fs.constants.COPYFILE_EXCL)
   fs.writeFileSync(temp, JSON.stringify(normalized, null, 2))
   fs.renameSync(temp, file)
   return normalized
 }
+const teamRevision = dir => createHash('sha256').update(rawFs.readFileSync(chat(dir, 'agents.json'))).digest('hex')
 
 function migrateTaskScope(dir) {
   const original = rawTeam(dir), index = original.findIndex(a => String(a.name).toLowerCase() === 'pm')
@@ -1400,7 +1503,14 @@ async function promptIndexed(dir, agent, session, options = {}) {
   const promptSession = resumed ? { ...session, seen: 0 } : session
   const savedHandoff = resumed || options.trackSession === false ? null : readHandoff(dir, agent.name, options.workspaceId || null)
   const handoff = savedHandoff && { ...savedHandoff, status: savedHandoff.runId === options.previousRunId ? 'current' : 'older' }
-  return { text: prompt(dir, agent, promptSession, messages, board, resumed ? null : validSummary(index)?.text, { handoff }), total: index.records.length,
+  let text = prompt(dir, agent, promptSession, messages, board, resumed ? null : validSummary(index)?.text, { handoff })
+  if (options.retryContext) {
+    const retry = options.retryContext
+    if (!retry || typeof retry.rule !== 'string' || typeof retry.trigger?.from !== 'string' || typeof retry.trigger.text !== 'string'
+      || Buffer.byteLength(retry.trigger.text) > 32768) throw fail('INVALID_ARGUMENT', 'Ngữ cảnh chạy lại không hợp lệ')
+    text += `\n\n## Yêu cầu chạy lại sau khi cấp quyền\nQuyền ${JSON.stringify(retry.rule)} vừa được cấp. Kiểm tra trạng thái hiện tại và tiếp tục phần chưa xong; không lặp lại mù quáng thao tác đã hoàn tất.\nYêu cầu đã kích hoạt lượt trước: ${JSON.stringify(retry.trigger)}`
+  }
+  return { text, total: index.records.length,
     seenHash: index.prefixHashes[index.records.length], generation: index.generation, handoffStatus: handoff?.status || 'missing' }
 }
 
@@ -1556,10 +1666,12 @@ async function run(dir, agent, options = {}) {
   const started = performance.now(), { signal, onProgress, onSpawn } = options
   const cwd = options.cwd || dir, workspaceId = options.workspaceId || null, trackSession = options.trackSession !== false
   try { agent = { ...agent, sessionTokenLimit: trackSession ? sessionTokenLimit({ ...agent,
-    ...(Object.hasOwn(options, 'sessionTokenLimit') ? { sessionTokenLimit: options.sessionTokenLimit } : {}) }) : 0, cwd,
+    ...(Object.hasOwn(options, 'sessionTokenLimit') ? { sessionTokenLimit: options.sessionTokenLimit } : {}) }) : 0,
+    allowedCommands: trackSession ? normalizeAllowedCommands(agent.allowedCommands ?? DEFAULT_COMMANDS) : [],
+    permissions: trackSession ? normalizePermissions(agent.permissions, agent.cli, agent.name) : { ...DEFAULT_PERMISSIONS, allowTools: [] }, cwd,
     ...(workspaceId ? { sharedChat: chat(dir) } : {}) } }
   catch (e) { return { outcome: 'error', text: e.message, usage: { ...emptyUsage(true), durationMs: Math.max(0, Math.round(performance.now() - started)) },
-    commandResults: [], sessionRotation: null, orphanState: null, pgid: null } }
+    commandResults: [], permissionDenials: [], sessionRotation: null, orphanState: null, pgid: null } }
   const record = trackSession ? sessions(dir, workspaceId)[agent.name] : null
   let session = agent.resume === false || !record?.id || record.cli !== agent.cli ? null : record
   const rotationSource = sessionRotationPending(agent, session) ? session : null
@@ -1571,19 +1683,17 @@ async function run(dir, agent, options = {}) {
     if (options.initialPrompt != null) {
       const index = await getLogIndex(dir); logFailure(index)
       initial = { text: options.initialPrompt, total: index.records.length, seenHash: index.prefixHashes[index.records.length] }
-    } else initial = await promptIndexed(dir, agent, session, { workspaceId, trackSession,
+    } else initial = await promptIndexed(dir, agent, session, { workspaceId, trackSession, retryContext: options.retryContext,
       previousRunId: rotationSource?.lastTurn?.runId || record?.lastTurn?.runId })
   } catch (e) {
     return { outcome: 'error', text: e.message, usage: { ...emptyUsage(true), durationMs: Math.max(0, Math.round(performance.now() - started)) },
-      commandResults: [], sessionRotation: null, orphanState: null, pgid: null }
+      commandResults: [], permissionDenials: [], sessionRotation: null, orphanState: null, pgid: null }
   }
   let r = { text: null, id: session?.id, seen: initial.total, usage: emptyUsage(true), error: null, rawCostUsd: null }
   let promptText = initial.text, emptyRetried = false, commandRequests = 0, jobSeen = initial.total, pgid, orphanState
   const resumedFrom = session?.id
   let freshRetried = false
-  let allowedCommands
-  try { allowedCommands = normalizeAllowedCommands(agent.allowedCommands ?? DEFAULT_COMMANDS) } catch { allowedCommands = [] }
-  const usages = [], commandResults = []
+  const allowedCommands = agent.allowedCommands, usages = [], commandResults = [], denialEntries = []
   const rememberEarly = id => {
     if (!id) return baseline
     if (session?.id !== id) {
@@ -1597,6 +1707,7 @@ async function run(dir, agent, options = {}) {
     try { r = await exec(dir, agent, session, { signal, onProgress, onSession: rememberEarly, onSpawn, costBaseline: baseline, promptText, seen: jobSeen, cwd }) }
     catch (e) { r = { text: null, id: session?.id, seen: jobSeen, usage: emptyUsage(true), error: e.message, rawCostUsd: null } }
     usages.push(r.usage || emptyUsage(true))
+    if (Array.isArray(r.permissionDenials)) denialEntries.push(...r.permissionDenials)
     pgid = r.pgid || pgid; orphanState = r.orphanState
     if (r.id) rememberEarly(r.id)
     if (acc?.bin === 'claude' && r.rawCostUsd != null) {
@@ -1612,12 +1723,14 @@ async function run(dir, agent, options = {}) {
       if (trackSession) { setSession(dir, agent.name, null, workspaceId); options.onSessionChanged?.() }
       session = null
       if (acc?.bin === 'claude') baseline = 0
-      try { initial = await promptIndexed(dir, agent, null, { workspaceId, trackSession, previousRunId: record?.lastTurn?.runId }) } catch { break }
+      try { initial = await promptIndexed(dir, agent, null, { workspaceId, trackSession, retryContext: options.retryContext,
+        previousRunId: record?.lastTurn?.runId }) } catch { break }
       promptText = initial.text; jobSeen = initial.total
       onProgress?.('phiên cũ lỗi, mở phiên mới…')
       continue
     }
     if (r.error) break
+    if (!(r.text || '').trim() && r.permissionDenials?.length) { r.text = 'CLI báo bị từ chối quyền.'; break }
 
     const request = parseRunCommandBlock(r.text)
     if (request.requested) {
@@ -1674,13 +1787,15 @@ async function run(dir, agent, options = {}) {
   const sessionRotation = rotationSource && id && id !== rotationSource.id ? { previousSessionId: rotationSource.id,
     previousRunId: rotationSource.lastTurn.runId, inputTokens: rotationSource.lastTurn.inputTokens,
     limit: agent.sessionTokenLimit, handoffStatus: initial.handoffStatus || 'missing' } : null
+  const permissionDenials = normalizePermissionDenials(denialEntries, agent)
   return { outcome, text: outcome === 'error' ? (r.killError?.message || r.error || 'Lỗi không xác định') : (r.text || '').trim() || '(không có phản hồi)', usage,
-    commandResults, sessionRotation, emptyResponse: outcome === 'success' && !(r.text || '').trim(),
+    commandResults, permissionDenials, sessionRotation, emptyResponse: outcome === 'success' && !(r.text || '').trim(),
     orphanState: r.orphanState || orphanState, pgid: r.pgid || pgid }
 }
 
 module.exports = { CLI, account, accounts, cliSessions, models, init, readLog, appendLog, appendLogIndexed, getLogIndex, invalidateLogIndex, logPage, searchLog, logTotals,
-  normalizeProjectSettings, projectSettings, writeProjectSettings, summaryBatch, acceptSummary, materializeSummary, recoverSummary, team, saveTeam,
+  normalizeProjectSettings, projectSettings, writeProjectSettings, summaryBatch, acceptSummary, materializeSummary, recoverSummary,
+  team, normalizeTeam, saveTeam, teamRevision, normalizePermissions, permissionRules, normalizePermissionDenials,
   timeoutMinutes, sessionTokenLimit, sessions, setSession, sessionRotationPending, readHandoff, writeHandoff,
   mentions, files, normalizeScope, normalizeAllowedCommands, scopeAllows, scopeLocks, lockConflict, snapshot, changedPaths, prompt, promptIndexed, run, runCommand, groupAlive,
   migrateTaskScope, parseTaskDefinitions, buildTaskBoard, taskBoard, taskBoardIndexed, parseTaskStatusBlock, parseRunCommandBlock, parseHandoffBlock, validateTaskChanges,
