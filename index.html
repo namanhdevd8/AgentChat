@@ -962,9 +962,58 @@
 
     return { valid: true, commands: normalized }
   }
+
+  function validateAllowTools(tools) {
+    if (!Array.isArray(tools)) return { valid: true, tools: [] }
+    const normalized = []
+    const seen = new Set()
+
+    for (const raw of tools) {
+      const t = (raw || '').trim()
+      if (!t) continue
+      if (t.length > 512) {
+        return { valid: false, message: `Quy tắc công cụ vượt quá 512 ký tự: "${t.slice(0, 30)}…"` }
+      }
+      if (/[\x00-\x1f\x7f]/.test(t)) {
+        return { valid: false, message: `Quy tắc chứa ký tự điều khiển: "${t}"` }
+      }
+      const parenIdx = t.indexOf('(')
+      let toolName = t
+      if (parenIdx !== -1) {
+        if (!t.endsWith(')')) {
+          return { valid: false, message: `Quy tắc công cụ ngoặc không cân bằng: "${t}"` }
+        }
+        toolName = t.slice(0, parenIdx)
+        const inner = t.slice(parenIdx + 1, -1)
+        if (inner.includes('(') || inner.includes(')')) {
+          return { valid: false, message: `Quy tắc công cụ chứa ngoặc lồng nhau: "${t}"` }
+        }
+      }
+      if (!/^[A-Za-z0-9_-]+$/.test(toolName) && !toolName.startsWith('mcp__')) {
+        return { valid: false, message: `Tên công cụ không hợp lệ: "${toolName}"` }
+      }
+      if (toolName.startsWith('mcp__')) {
+        const parts = toolName.split('__')
+        if (parts.length < 3 || !parts[1] || !parts[2] || parts[1] === '*' || parts[1].includes('*')) {
+          return { valid: false, message: `Quy tắc MCP phải có tên server cụ thể (mcp__server__tool): "${toolName}"` }
+        }
+      }
+      if (!seen.has(t)) {
+        seen.add(t)
+        normalized.push(t)
+      }
+    }
+
+    if (normalized.length > 32) {
+      return { valid: false, message: 'Tối đa 32 quy tắc công cụ' }
+    }
+
+    return { valid: true, tools: normalized }
+  }
+
   const hhmm = iso => new Date(iso).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' })
   const fileIcon = () => { const s = document.createElementNS('http://www.w3.org/2000/svg', 'svg'); s.setAttribute('viewBox', '0 0 24 24'); s.innerHTML = '<path d="M6 2h8l5 5v15H6z M14 2v5h5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round"/>'; return s }
-  let dir = null, team = [], last = null, boxLog = []
+  let dir = null, team = [], currentTeamRevision = null, permissionRequests = [], last = null, boxLog = []
   const activeRuns = new Map()
   let orphanLocks = []
   let openSeq = 0, openingDir = null, pendingEvents = []
@@ -1047,6 +1096,8 @@
     currentTotals = null
     worktreeState = null
     sess = {}
+    currentTeamRevision = null
+    permissionRequests = []
 
     let res
     try {
@@ -1067,8 +1118,14 @@
       if (a.sessionTokenLimit == null) {
         a.sessionTokenLimit = 150000
       }
+      if (!a.permissions || typeof a.permissions !== 'object') {
+        a.permissions = { mode: 'edit', allowTools: [], networkAccess: false }
+      }
       return a
     })
+
+    currentTeamRevision = res.teamRevision || null
+    permissionRequests = Array.isArray(res.permissionRequests) ? res.permissionRequests : []
 
     if (res.sessions && typeof res.sessions === 'object') {
       sess = res.sessions
@@ -1140,6 +1197,11 @@
         renderOrphanLocks()
       } else if (ev.type === 'sessions-changed') {
         sess = ev.sessions || {}
+      } else if (ev.type === 'team-changed') {
+        if (ev.data?.revision) currentTeamRevision = ev.data.revision
+        if (Array.isArray(ev.data?.team)) team = ev.data.team
+      } else if (ev.type === 'permissions-changed') {
+        permissionRequests = Array.isArray(ev.data?.requests) ? ev.data.requests : []
       }
     }
     pendingEvents = []
@@ -1314,6 +1376,16 @@
       if (!Array.isArray(a.allowedCommands)) {
         a.allowedCommands = ['npm run check']
       }
+      if (!a.permissions || typeof a.permissions !== 'object') {
+        a.permissions = { mode: 'edit', allowTools: [], networkAccess: false }
+      }
+      if (!['edit', 'custom', 'full'].includes(a.permissions.mode)) {
+        a.permissions.mode = 'edit'
+      }
+      if (!Array.isArray(a.permissions.allowTools)) {
+        a.permissions.allowTools = []
+      }
+      a.permissions.networkAccess = !!a.permissions.networkAccess
 
       const isWorktrees = !!(worktreeState?.enabled)
       const wtAgent = worktreeState?.agents?.find(x => x.name.toLowerCase() === a.name.toLowerCase())
@@ -1321,7 +1393,19 @@
       const card = el('div', 'agent box')
       const top = el('div', 'atop')
       need(a.cli, a.name, workspaceId)
-      const cli = select(accounts.map(c => [c, c]), a.cli, v => { a.cli = v; a.model = a.effort = ''; renderEditors() })
+      const cli = select(accounts.map(c => [c, c]), a.cli, v => {
+        if (a.cli !== v) {
+          a.cli = v
+          a.model = a.effort = ''
+          if (!a.permissions || typeof a.permissions !== 'object') {
+            a.permissions = { mode: 'edit', allowTools: [], networkAccess: false }
+          }
+          a.permissions.mode = 'edit'
+          if (!v.startsWith('claude')) a.permissions.allowTools = []
+          if (!v.startsWith('codex')) a.permissions.networkAccess = false
+          renderEditors()
+        }
+      })
 
       const chk = el('label', 'chk')
       const cb = el('input'); cb.type = 'checkbox'; cb.checked = a.resume !== false
@@ -1430,20 +1514,152 @@
       ownsNote.style.color = 'var(--muted)'
       ownsLab.append(ownsArea, ownsNote)
 
-      // allowedCommands
+      // ---- Group: Quyền ----
+      const isClaude = a.cli.startsWith('claude')
+      const isCodex = a.cli.startsWith('codex')
+      const isAgy = a.cli.startsWith('agy')
+
+      const permGroup = el('div', 'agent-perm-group box')
+      if (permGroup.style) {
+        permGroup.style.padding = '12px'
+        permGroup.style.background = 'var(--surface)'
+        permGroup.style.display = 'grid'
+        permGroup.style.gap = '10px'
+        permGroup.style.border = '2px solid var(--ink)'
+        permGroup.style.borderRadius = '8px'
+      }
+
+      const permHdr = el('div', 'settings-perm-hdr')
+      if (permHdr.style) {
+        permHdr.style.fontWeight = '700'
+        permHdr.style.fontSize = '13px'
+        permHdr.style.textTransform = 'uppercase'
+        permHdr.style.letterSpacing = '.06em'
+        permHdr.style.color = 'var(--muted)'
+      }
+      permHdr.textContent = 'Quyền công cụ của CLI'
+      permGroup.append(permHdr)
+
+      const modeOptions = [
+        ['edit', 'Mặc định (sửa file + lệnh đã cho phép)'],
+        ['custom', isAgy ? 'Tuỳ chỉnh (agy không hỗ trợ)' : 'Tuỳ chỉnh'],
+        ['full', 'Toàn quyền']
+      ]
+      const modeLab = el('label', 'grow', 'Mức quyền')
+      const modeSel = select(modeOptions, a.permissions.mode, v => {
+        if (isAgy && v === 'custom') {
+          a.permissions.mode = 'edit'
+        } else {
+          a.permissions.mode = v
+        }
+        renderEditors()
+      })
+      if (isAgy && modeSel.children) {
+        for (const opt of modeSel.children) {
+          if (opt && opt.value === 'custom') opt.disabled = true
+        }
+      }
+      modeLab.append(modeSel)
+      permGroup.append(modeLab)
+
+      if (a.permissions.mode === 'full') {
+        const fullWarn = el('div', 'task-error-banner')
+        if (fullWarn.style) {
+          fullWarn.style.background = 'var(--pink)'
+          fullWarn.style.color = 'var(--on-color)'
+          fullWarn.style.padding = '8px 10px'
+          fullWarn.style.border = '2px solid var(--ink)'
+          fullWarn.style.borderRadius = '6px'
+          fullWarn.style.fontSize = '12px'
+          fullWarn.style.fontWeight = '600'
+        }
+        fullWarn.textContent = '⚠️ Cảnh báo Toàn quyền: Agent có thể chạy lệnh, dùng mạng và tác động tới file ngoài dự án theo quyền tài khoản máy. Phạm vi file của app không phải sandbox bảo vệ hệ điều hành.'
+        permGroup.append(fullWarn)
+
+        if (isCodex) {
+          const codexFullNote = el('small', '', 'Codex Toàn quyền: Mạng không bị giới hạn bởi workspace sandbox (-c sandbox_mode="danger-full-access").')
+          if (codexFullNote.style) codexFullNote.style.color = 'var(--muted)'
+          permGroup.append(codexFullNote)
+        } else if (isAgy) {
+          const agyFullNote = el('small', '', 'agy Toàn quyền: Bỏ hỏi quyền (--dangerously-skip-permissions).')
+          if (agyFullNote.style) agyFullNote.style.color = 'var(--muted)'
+          permGroup.append(agyFullNote)
+        }
+      }
+
+      if (a.permissions.mode === 'custom') {
+        if (isClaude) {
+          const toolsLines = Array.isArray(a.permissions.allowTools) ? a.permissions.allowTools.join('\n') : ''
+          const toolsLab = el('label', '', 'Quy tắc công cụ bổ sung (--allowedTools, mỗi dòng một quy tắc)')
+          const toolsArea = field('textarea', toolsLines, v => {
+            a.permissions.allowTools = v.split('\n').map(s => s.trim()).filter(Boolean)
+          }, {
+            className: 'f',
+            rows: 3,
+            placeholder: 'vd:\nBash(npm test:*)\nBash(git status)\nWebFetch\nmcp__github__get_issue'
+          })
+          const toolsNote = el('small', '', 'Quy tắc này bổ sung cho cấu hình CLI sẵn có. Mỗi dòng một rule: Tool hoặc Tool(pattern), MCP dạng mcp__server__tool. Tối đa 32 quy tắc.')
+          if (toolsNote.style) toolsNote.style.color = 'var(--muted)'
+          toolsLab.append(toolsArea, toolsNote)
+          permGroup.append(toolsLab)
+
+          // Read-only preview of Bash commands from allowedCommands
+          const normCmds = Array.isArray(a.allowedCommands) ? a.allowedCommands : []
+          const bashRules = normCmds.map(c => `Bash(${c})`).join('\n')
+          const bashPreviewLab = el('label', '', 'Quyền Bash tự sinh từ lệnh được phép (chỉ đọc)')
+          const bashPreviewArea = field('textarea', bashRules || '(không có lệnh nào)', () => {}, {
+            className: 'f',
+            rows: Math.min(3, Math.max(1, normCmds.length)),
+            disabled: true
+          })
+          if (bashPreviewArea.style) {
+            bashPreviewArea.style.opacity = '0.75'
+            bashPreviewArea.style.background = 'var(--bg)'
+            bashPreviewArea.style.fontFamily = 'ui-monospace, monospace'
+            bashPreviewArea.style.fontSize = '11px'
+          }
+          const bashPreviewNote = el('small', '', 'Tự động cấp vào --allowedTools khi Claude chạy ở mức Mặc định hoặc Tuỳ chỉnh.')
+          if (bashPreviewNote.style) bashPreviewNote.style.color = 'var(--muted)'
+          bashPreviewLab.append(bashPreviewArea, bashPreviewNote)
+          permGroup.append(bashPreviewLab)
+        } else if (isCodex) {
+          const netLab = el('label', 'chk')
+          const netCb = el('input'); netCb.type = 'checkbox'; netCb.checked = !!a.permissions.networkAccess
+          netCb.onchange = () => { a.permissions.networkAccess = netCb.checked; renderEditors() }
+          netLab.append(netCb, 'Cho lệnh trong sandbox truy cập mạng')
+          const netNote = el('small', '', 'Codex tự chạy lệnh trong sandbox; danh sách bên dưới chỉ áp dụng khi app chạy hộ.')
+          if (netNote.style) netNote.style.color = 'var(--muted)'
+          permGroup.append(netLab, netNote)
+        } else if (isAgy) {
+          const agyNote = el('small', '', 'agy không hỗ trợ danh sách công cụ tuỳ chỉnh.')
+          if (agyNote.style) agyNote.style.color = 'var(--muted)'
+          permGroup.append(agyNote)
+        }
+      }
+
+      // allowedCommands (inside permGroup)
       const cmdLines = Array.isArray(a.allowedCommands) ? a.allowedCommands.join('\n') : ''
       const cmdLab = el('label', '', 'Lệnh được tự chạy (mỗi dòng một lệnh)')
       const cmdArea = field('textarea', cmdLines, v => {
         a.allowedCommands = v.split('\n').map(s => s.trim()).filter(Boolean)
+        if (isClaude && a.permissions.mode === 'custom') {
+          renderEditors()
+        }
       }, { className: 'f', rows: 2, placeholder: 'vd:\nnpm run check\nnode check.js\n(để trống: tắt chạy lệnh)' })
-      const cmdNote = el('small', '', 'Mặc định: npm run check. Để trống: tắt chạy lệnh. Mỗi dòng một lệnh literal, không dùng cú pháp shell.')
-      cmdNote.style.color = 'var(--muted)'
+      const cmdNote = el('small', '', 'Để trống: tắt lệnh do app chạy hộ. Claude cũng không được app cấp thêm quyền Bash từ danh sách này. Quyền CLI sẵn có và Toàn quyền vẫn áp dụng.')
+      if (cmdNote.style) cmdNote.style.color = 'var(--muted)'
       cmdLab.append(cmdArea, cmdNote)
+      permGroup.append(cmdLab)
 
-      let cmdErr = null
-      if (a.commandConfigError) {
-        cmdErr = el('div', 'task-error-banner', `⚠️ Lỗi cấu hình lệnh: ${a.commandConfigError}`)
+      if (a.permissionConfigError) {
+        const permErr = el('div', 'task-error-banner', `⚠️ Lỗi cấu hình quyền: ${a.permissionConfigError}`)
+        permGroup.append(permErr)
       }
+      if (a.commandConfigError) {
+        const cmdErr = el('div', 'task-error-banner', `⚠️ Lỗi cấu hình lệnh: ${a.commandConfigError}`)
+        permGroup.append(cmdErr)
+      }
+
       let sessErr = null
       if (a.sessionConfigError) {
         sessErr = el('div', 'task-error-banner', `⚠️ Lỗi cấu hình xoay phiên: ${a.sessionConfigError}`)
@@ -1516,7 +1732,7 @@
         line.append(lab)
         if (cur) line.append(el('small', '', cur.adopted ? 'Lượt tới gửi kèm bối cảnh nhóm' : `Đã đọc ${cur.seen} tin · ${when(cur.at)}`))
       }
-      card.append(top, avRow, tune, limitsRow, role, ownsLab, cmdLab, ...(cmdErr ? [cmdErr] : []), ...(sessErr ? [sessErr] : []), ...(reviewCard ? [reviewCard] : []), line)
+      card.append(top, avRow, tune, limitsRow, role, ownsLab, permGroup, ...(sessErr ? [sessErr] : []), ...(reviewCard ? [reviewCard] : []), line)
       return card
     }))
 
@@ -1535,6 +1751,9 @@
       }
       if (a.sessionTokenLimit == null) {
         a.sessionTokenLimit = 150000
+      }
+      if (!a.permissions || typeof a.permissions !== 'object') {
+        a.permissions = { mode: 'edit', allowTools: [], networkAccess: false }
       }
       return a
     })
@@ -1689,6 +1908,7 @@
       timeoutMinutes: 30,
       sessionTokenLimit: 150000,
       allowedCommands: ['npm run check'],
+      permissions: { mode: 'edit', allowTools: [], networkAccess: false },
       avatar: nextAvatar
     })
     currentSettingTab = 'agent:' + (draft.length - 1)
@@ -1754,6 +1974,45 @@
       }
       a.allowedCommands = cmdRes.commands
       delete a.commandConfigError
+
+      if (!a.permissions || typeof a.permissions !== 'object') {
+        a.permissions = { mode: 'edit', allowTools: [], networkAccess: false }
+      }
+      if (!['edit', 'custom', 'full'].includes(a.permissions.mode)) {
+        a.permissions.mode = 'edit'
+      }
+      if (a.cli.startsWith('agy') && a.permissions.mode === 'custom') {
+        $('#err').textContent = `agy không hỗ trợ chế độ Tuỳ chỉnh cho @${a.name || 'agent'}`
+        currentSettingTab = 'agent:' + idx
+        updateSettingsViews()
+        return
+      }
+      if (a.permissions.mode === 'custom') {
+        if (a.cli.startsWith('claude')) {
+          const toolRes = validateAllowTools(a.permissions.allowTools || [])
+          if (!toolRes.valid) {
+            $('#err').textContent = `Lỗi quy tắc công cụ của @${a.name || 'agent'}: ${toolRes.message}`
+            currentSettingTab = 'agent:' + idx
+            updateSettingsViews()
+            return
+          }
+          a.permissions.allowTools = toolRes.tools
+          a.permissions.networkAccess = false
+        } else if (a.cli.startsWith('codex')) {
+          a.permissions.allowTools = []
+          a.permissions.networkAccess = !!a.permissions.networkAccess
+        } else {
+          a.permissions.allowTools = []
+          a.permissions.networkAccess = false
+        }
+      } else if (a.permissions.mode === 'edit') {
+        if (!a.cli.startsWith('claude')) a.permissions.allowTools = []
+        if (!a.cli.startsWith('codex')) a.permissions.networkAccess = false
+      } else if (a.permissions.mode === 'full') {
+        if (!a.cli.startsWith('claude')) a.permissions.allowTools = []
+        if (!a.cli.startsWith('codex')) a.permissions.networkAccess = false
+      }
+      delete a.permissionConfigError
     }
 
     const autoSummary = $('#setting-auto-summary').checked
@@ -1811,7 +2070,19 @@
 
     const saveDir = dir
     try {
-      team = await api.saveTeam(saveDir, draft)
+      const saveRes = await api.saveTeam(saveDir, draft, { expectedRevision: currentTeamRevision })
+      if (saveRes && typeof saveRes === 'object' && 'ok' in saveRes) {
+        if (!saveRes.ok) {
+          $('#err').textContent = saveRes.error?.message || 'Không thể lưu danh sách thành viên'
+          return
+        }
+        team = saveRes.team || draft
+        if (saveRes.revision) currentTeamRevision = saveRes.revision
+      } else if (Array.isArray(saveRes)) {
+        team = saveRes
+      } else {
+        team = draft
+      }
       if (typeof api.saveProjectSettings === 'function') {
         const pRes = await api.saveProjectSettings(saveDir, {
           expectedRevision: currentSettingsRevision,
@@ -1865,6 +2136,33 @@
     toastTimer = setTimeout(() => {
       t.style.display = 'none'
     }, 4000)
+  }
+
+  async function openSettingsForAgent(agentName) {
+    if (!agentName) return
+    const gearBtn = $('#gear')
+    if (gearBtn && gearBtn.onclick) {
+      await gearBtn.onclick()
+    }
+    const idx = draft.findIndex(a => a.name.toLowerCase() === agentName.toLowerCase())
+    if (idx >= 0) {
+      currentSettingTab = 'agent:' + idx
+      updateSettingsViews()
+    }
+  }
+
+  function updateGrantButtonsState() {
+    document.querySelectorAll('.btn-grant-perm').forEach(btn => {
+      const reqId = btn.dataset.reqId
+      const agent = btn.dataset.agent
+      const isBusy = !!activeRuns.get(runKey(dir, agent))
+      const pReq = permissionRequests.find(r => r.id === reqId)
+      if (btn.textContent === 'Đã cấp quyền' || btn.textContent === 'Đã lưu quyền' || btn.textContent === 'Đang cấp quyền…') {
+        btn.disabled = true
+      } else {
+        btn.disabled = isBusy || !pReq
+      }
+    })
   }
 
   let mdInstance = null
@@ -2149,6 +2447,141 @@
         repBtn.onclick = () => runMergeAction('requestMergeRepair', m.queueId, repBtn, `Đã yêu cầu @${m.owner} sửa xung đột`)
         card.append(repBtn)
       }
+      node = card
+    } else if (m.kind === 'permission-denied') {
+      const card = el('div', 'sys perm-denied-card box')
+      card.style.border = '2px solid var(--ink)'
+      card.style.background = 'var(--bg)'
+      card.style.padding = '10px 12px'
+      card.style.marginTop = '6px'
+
+      const hdr = el('div', 'perm-denied-hdr')
+      hdr.style.fontWeight = '700'
+      hdr.style.marginBottom = '6px'
+      hdr.style.display = 'flex'
+      hdr.style.alignItems = 'center'
+      hdr.style.gap = '6px'
+      hdr.append('🚫 CLI báo từ chối quyền của @', el('span', '', m.agent || 'agent'))
+      card.append(hdr)
+
+      if (m.text) {
+        const desc = el('div', 'perm-denied-desc', m.text)
+        desc.style.fontSize = '13px'
+        desc.style.marginBottom = '8px'
+        card.append(desc)
+      }
+
+      const denials = Array.isArray(m.denials) ? m.denials : []
+      const reqId = m.permissionRequestId
+
+      const listDiv = el('div', 'perm-denied-list')
+      listDiv.style.display = 'flex'
+      listDiv.style.flexDirection = 'column'
+      listDiv.style.gap = '8px'
+
+      denials.forEach(dItem => {
+        const itemRow = el('div', 'perm-denied-item box')
+        itemRow.style.padding = '8px'
+        itemRow.style.background = 'var(--surface)'
+        itemRow.style.fontSize = '12px'
+        itemRow.style.display = 'flex'
+        itemRow.style.flexDirection = 'column'
+        itemRow.style.gap = '4px'
+
+        const infoDiv = el('div')
+        const toolB = el('b', '', dItem.tool || 'Công cụ')
+        infoDiv.append(toolB)
+        if (dItem.label) {
+          infoDiv.append(': ', el('span', '', dItem.label))
+        }
+        itemRow.append(infoDiv)
+
+        if (dItem.rule) {
+          const rulePre = el('div', '')
+          rulePre.append('Quy tắc đề xuất: ', el('code', '', dItem.rule))
+          itemRow.append(rulePre)
+        }
+
+        if (dItem.reason) {
+          const reasonDiv = el('div', '', dItem.reason)
+          reasonDiv.style.color = 'var(--muted)'
+          itemRow.append(reasonDiv)
+        }
+
+        const actRow = el('div')
+        actRow.style.display = 'flex'
+        actRow.style.gap = '8px'
+        actRow.style.alignItems = 'center'
+        actRow.style.marginTop = '4px'
+
+        const isBusy = activeRuns.has(runKey(dir, m.agent))
+        const pReq = permissionRequests.find(r => r.id === reqId)
+        const canGrantNow = !isBusy && !!pReq && !!dItem.canGrant
+
+        if (dItem.canGrant) {
+          const grantBtn = el('button', 'box press btn sm primary btn-grant-perm', 'Cho phép và chạy lại')
+          grantBtn.type = 'button'
+          grantBtn.dataset.reqId = reqId || ''
+          grantBtn.dataset.denialId = dItem.id || ''
+          grantBtn.dataset.agent = m.agent || ''
+          grantBtn.disabled = !canGrantNow
+          grantBtn.title = 'Lưu quyền này cho agent và chạy tiếp yêu cầu trước; có thể phát sinh chi phí một lượt'
+
+          grantBtn.onclick = async () => {
+            if (!reqId || !dItem.id) return
+            grantBtn.disabled = true
+            grantBtn.textContent = 'Đang cấp quyền…'
+            try {
+              if (typeof api.grantPermissionAndRetry !== 'function') {
+                throw new Error('Chức năng cấp quyền đang chờ BE hoàn tất')
+              }
+              const gRes = await api.grantPermissionAndRetry(dir, { requestId: reqId, denialId: dItem.id })
+              if (!gRes || !gRes.ok) {
+                if (gRes?.error?.permissionSaved) {
+                  showToast('Đã lưu quyền nhưng chưa chạy lại được lượt mới: ' + (gRes.error.message || ''))
+                  grantBtn.textContent = 'Đã lưu quyền'
+                } else {
+                  throw new Error(gRes?.error?.message || 'Cấp quyền thất bại')
+                }
+              } else {
+                showToast('Đã cấp quyền và khởi động lại lượt!')
+                grantBtn.textContent = 'Đã cấp quyền'
+                if (Array.isArray(gRes.team)) {
+                  team = gRes.team
+                  renderTeam()
+                }
+                if (gRes.teamRevision) {
+                  currentTeamRevision = gRes.teamRevision
+                }
+              }
+            } catch (err) {
+              showToast(err.message.replace(/^.*?Error: /, ''))
+              grantBtn.disabled = false
+              grantBtn.textContent = 'Cho phép và chạy lại'
+            }
+          }
+          actRow.append(grantBtn)
+        }
+
+        const openBtn = el('button', 'box press btn sm btn-open-perm', 'Mở mục Quyền')
+        openBtn.type = 'button'
+        openBtn.onclick = () => {
+          openSettingsForAgent(m.agent)
+        }
+        actRow.append(openBtn)
+
+        itemRow.append(actRow)
+        listDiv.append(itemRow)
+      })
+
+      if (denials.length > 0) {
+        card.append(listDiv)
+      } else {
+        const noDenials = el('div', '', 'Yêu cầu quyền không có chi tiết.')
+        noDenials.style.color = 'var(--muted)'
+        card.append(noDenials)
+      }
+
       node = card
     } else if (m.from === 'system') {
       const sys = el('div', 'sys')
@@ -3195,6 +3628,8 @@
         btn.classList.toggle('busy', isBusy)
       })
 
+      updateGrantButtonsState()
+
       if (currentPopoverAgent) {
         const agent = team.find(a => a.name === currentPopoverAgent)
         if (agent) updateMemberPopoverContent(agent)
@@ -3818,6 +4253,35 @@
         const agent = team.find(a => a.name === currentPopoverAgent)
         if (agent) updateMemberPopoverContent(agent)
       }
+    }
+  })
+
+  api.on('team-changed', (d, data) => {
+    if (openingDir === d) {
+      pendingEvents.push({ type: 'team-changed', data })
+      return
+    }
+    if (d === dir && data) {
+      if (data.revision) currentTeamRevision = data.revision
+      if (Array.isArray(data.team)) {
+        team = data.team
+        updateAllAgentAvatars()
+        renderTeam()
+      }
+      if ($('#settings')?.open) {
+        $('#err').textContent = '⚠️ Cấu hình thành viên đã bị thay đổi bên ngoài. Hãy mở lại Cài đặt trước khi lưu.'
+      }
+    }
+  })
+
+  api.on('permissions-changed', (d, data) => {
+    if (openingDir === d) {
+      pendingEvents.push({ type: 'permissions-changed', data })
+      return
+    }
+    if (d === dir && data) {
+      permissionRequests = Array.isArray(data.requests) ? data.requests : []
+      updateGrantButtonsState()
     }
   })
 
