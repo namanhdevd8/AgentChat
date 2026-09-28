@@ -82,7 +82,18 @@ Cấu hình còn treo: techlead vẫn `owns: []` (toàn quyền, khóa cả dự
 | I | Icon, đóng gói `.dmg`, ký app, tự cập nhật | Bản trong `dist/` đang cũ | Vừa |
 | O | **Báo cáo chi phí theo sprint/agent** | Hiện chỉ có tổng box, khó biết agent nào tốn tiền | Nhỏ |
 
-**PM đề xuất Sprint 8: E + C + L.** E trực tiếp giúp duyệt chất lượng; C và L nhỏ, giảm thời gian ngồi canh và giảm việc PM phải đoán. M làm cùng nếu QA còn sức, để không phụ thuộc thử tay.
+| P | **Quyền công cụ của CLI theo agent** (End-User báo 2026-09-28) | Claude chạy `-p --permission-mode acceptEdits` (core.js:97): được sửa file, nhưng Bash/WebFetch/MCP cần hỏi quyền. Chạy ngầm không có ai trả lời nên agent bị từ chối, rồi đi đường vòng | Vừa |
+
+**Đề xuất cho P:**
+1. Thêm mục "Quyền" cho từng agent trong ⚙, có 3 mức:
+   - Chỉ sửa file (hiện tại).
+   - Tuỳ chỉnh: danh sách công cụ được phép, ví dụ `Bash(npm test:*)`, `WebFetch`, truyền vào `--allowedTools`.
+   - Toàn quyền: `bypassPermissions`, có cảnh báo đỏ.
+2. Kết quả của Claude có trường `permission_denials`. App đọc trường này và hiện tin hệ thống, ví dụ "claude bị từ chối Bash(pnpm i)", kèm nút "Cho phép và chạy lại".
+3. codex: tuỳ chọn bật mạng hoặc `danger-full-access`. agy: dò cờ tương ứng.
+- Cách tạm, không cần code: tạo `.claude/settings.json` trong dự án mới, có `permissions.allow`. Claude `-p` có đọc file này.
+
+**PM đề xuất Sprint 8: P + E + C + L** (P làm trước vì đang chặn dự án mới). E trực tiếp giúp duyệt chất lượng; C và L nhỏ, giảm thời gian ngồi canh và giảm việc PM phải đoán. M làm cùng nếu QA còn sức, để không phụ thuộc thử tay.
 
 ## Đề xuất của PM
 
