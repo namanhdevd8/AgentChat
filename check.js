@@ -546,6 +546,85 @@ async function sprint7Checks() {
     'Tự xoay: tắt', 'Sẽ mở phiên mới ở lượt kế tiếp', 'Không nhớ phiên', "'sessions-changed'"]) assert.ok(ui.includes(s), `index.html thiếu: ${s}`)
 }
 
+// ---- Sprint 8 P core: permissions schema/migration, argv per CLI (fresh + resume), denial normalization ----
+function sprint8Checks() {
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-chat-s8-')); core.init(d)
+  const agentsFile = path.join(d, '.chat', 'agents.json'), DEF = { mode: 'edit', allowTools: [], networkAccess: false }
+  fs.writeFileSync(agentsFile, JSON.stringify([{ name: 'c', cli: 'claude', role: 'x' }, { name: 'x', cli: 'codex2', role: 'x', allowedCommands: [] }]))
+  let tm = core.team(d)
+  assert.deepStrictEqual(tm.map(a => [a.permissions, a.allowedCommands]), [[DEF, ['npm run check']], [DEF, []]]) // missing → defaults, [] stays []
+  assert.ok(!fs.readFileSync(agentsFile, 'utf8').includes('permissions')) // opening doesn't rewrite
+  const custom = { mode: 'custom', allowTools: ['Bash(npm test:*)', ' WebFetch ', '', 'Bash(npm run check)', 'mcp__github__get_issue'], networkAccess: false }
+  tm = core.saveTeam(d, tm.map(a => a.name === 'c' ? { ...a, permissions: custom } : a))
+  assert.deepStrictEqual(tm[0].permissions.allowTools, ['Bash(npm test:*)', 'WebFetch', 'Bash(npm run check)', 'mcp__github__get_issue'])
+  tm = core.saveTeam(d, core.team(d).map(({ permissions, ...a }) => a)); assert.strictEqual(tm[0].permissions.mode, 'custom') // old payload keeps
+  const rejects = [['c', { ...DEF, networkAccess: true }], ['c', { ...DEF, mode: 'root' }], ['c', null], ['c', []], ['c', { mode: 'edit', allowTools: [] }],
+    ['c', { ...DEF, allowTools: ['mcp__x'] }], ['c', { ...DEF, allowTools: ['mcp__*'] }], ['c', { ...DEF, allowTools: ['Bash(a'] }], ['c', { ...DEF, allowTools: ['a\nb'] }],
+    ['c', { ...DEF, allowTools: Array(33).fill('WebFetch') }], ['x', { ...DEF, allowTools: ['WebFetch'] }], ['x', { mode: 'custom', allowTools: ['Bash(ls)'], networkAccess: true }]]
+  for (const [name, permissions] of rejects)
+    assert.throws(() => core.saveTeam(d, core.team(d).map(a => a.name === name ? { ...a, permissions } : a)), undefined, `${name} ${JSON.stringify(permissions)}`)
+  assert.throws(() => core.normalizePermissions({ ...DEF, mode: 'custom' }, 'agy')) // agy custom unsupported
+  const saved = fs.readFileSync(agentsFile, 'utf8')
+  fs.writeFileSync(agentsFile, JSON.stringify([{ name: 'c', cli: 'claude', role: 'x', permissions: { mode: 'full' } }])) // hand-edited junk
+  assert.ok(core.team(d)[0].permissionConfigError) // blocked, never falls back to full (run() re-normalizes → error before spawn)
+  fs.writeFileSync(agentsFile, saved)
+
+  // argv: Claude prompt right after -p, each rule its own argv, commands first as exact Bash(cmd), dedup; resume keeps flags
+  const A = (cli, permissions, extra = {}) => ({ name: 'a', cli, allowedCommands: ['npm run check'], permissions, ...extra })
+  const flags = (args, name) => {
+    const i = args.indexOf(name), end = args.findIndex((x, j) => j > i && x.startsWith('--'))
+    return i < 0 ? null : args.slice(i + 1, end < 0 ? args.length : end)
+  }
+  let args = core.CLI.claude.args('P', null, A('claude', DEF))
+  assert.deepStrictEqual(args.slice(0, 2), ['-p', 'P'])
+  assert.deepStrictEqual([flags(args, '--permission-mode'), flags(args, '--allowedTools')], [['acceptEdits'], ['Bash(npm run check)']])
+  args = core.CLI.claude.args('P', null, A('claude', DEF, { allowedCommands: [] })) // pre-Sprint-8 flags when nothing is granted
+  assert.ok(args.includes('acceptEdits') && !args.includes('--allowedTools') && !args.includes('bypassPermissions'))
+  args = core.CLI.claude.args('P', null, A('claude', { ...custom, allowTools: tm[0].permissions.allowTools }))
+  assert.deepStrictEqual(flags(args, '--allowedTools'), ['Bash(npm run check)', 'Bash(npm test:*)', 'WebFetch', 'mcp__github__get_issue'])
+  args = core.CLI.claude.args('P', null, A('claude', { ...custom, mode: 'edit', allowTools: ['WebFetch'] })) // inactive custom list
+  assert.deepStrictEqual(flags(args, '--allowedTools'), ['Bash(npm run check)'])
+  args = core.CLI.claude.args('P', 'S', A('claude', { ...DEF, mode: 'full' }, { sharedChat: '/c' }))
+  assert.deepStrictEqual([args.slice(0, 2), flags(args, '--permission-mode'), args.includes('--allowedTools'), args.slice(-2), flags(args, '--add-dir')],
+    [['-p', 'P'], ['bypassPermissions'], false, ['--resume', 'S'], ['/c']])
+  // Codex: -c TOML pairs on exec and exec resume, never Bash(...)
+  const toml = args => args.flatMap((x, i) => args[i - 1] === '-c' ? [x] : [])
+  for (const id of [null, 'T']) {
+    args = core.CLI.codex.args('P', id, A('codex', DEF, { sharedChat: '/c' }))
+    assert.deepStrictEqual(toml(args), ['sandbox_mode="workspace-write"', 'approval_policy="never"', 'sandbox_workspace_write.network_access=false'])
+    assert.ok(!args.some(x => x.startsWith('Bash(')) && args.at(-1) === 'P' && args.includes('/c') && (id ? args.includes('resume') && args.at(-2) === 'T' : !args.includes('resume')))
+    assert.strictEqual(toml(core.CLI.codex.args('P', id, A('codex', { ...DEF, mode: 'custom', networkAccess: true })))[2], 'sandbox_workspace_write.network_access=true')
+    assert.strictEqual(toml(core.CLI.codex.args('P', id, A('codex', { ...DEF, networkAccess: true })))[2], 'sandbox_workspace_write.network_access=false') // edit ignores it
+    assert.deepStrictEqual(toml(core.CLI.codex.args('P', id, A('codex', { ...DEF, mode: 'full' }))), ['sandbox_mode="danger-full-access"', 'approval_policy="never"'])
+  }
+  assert.ok(!core.CLI.agy.args('P', null, A('agy', DEF)).includes('--dangerously-skip-permissions'))
+  assert.ok(core.CLI.agy.args('P', 'C', A('agy', { ...DEF, mode: 'full' })).includes('--dangerously-skip-permissions'))
+  assert.deepStrictEqual(core.permissionRules({ cli: 'codex2', allowedCommands: ['npm run check'], permissions: DEF }), []) // suffixed account → codex rules
+  assert.deepStrictEqual(core.permissionRules({ cli: 'claude2', allowedCommands: ['npm run check'], permissions: DEF }), ['Bash(npm run check)'])
+
+  // denials: only narrow rules are grantable; junk/HTML/@/oversized never crash, never produce broad rules
+  const agent = { cli: 'claude', allowedCommands: ['npm run check'], permissions: DEF }
+  const den = core.normalizePermissionDenials([
+    { tool_name: 'Bash', tool_use_id: 'u1', tool_input: { command: 'npm  test' } },
+    { tool_name: 'Bash', tool_use_id: 'u2', tool_input: { command: 'npm test' } }, // same rule → dedup
+    { tool_name: 'Bash', tool_input: { command: 'npm test && rm -rf /' } },
+    { tool_name: 'Bash', tool_input: { command: 'npm run check' } }, // already granted
+    { tool_name: 'WebFetch', tool_input: { url: 'https://docs.example.com/a?b=1' } },
+    { tool_name: 'WebFetch', tool_input: { url: 'https://u:p@evil.com/' } },
+    { tool_name: 'mcp__github__get_issue', tool_input: {} },
+    { tool_name: 'Write', tool_input: { file_path: '/etc/x' } },
+    { tool_name: '<img src=x onerror=alert(1)> @dev', tool_input: {} },
+    { tool_name: 'Bash', tool_input: { command: 'x'.repeat(9000) } },
+    'junk', null, { tool_name: 'Bash', tool_input: ['npm test'] }], agent)
+  const grantable = den.filter(x => x.canGrant).map(x => x.rule)
+  assert.deepStrictEqual(grantable, ['Bash(npm test)', 'WebFetch(domain:docs.example.com)', 'mcp__github__get_issue'])
+  assert.ok(den.every(x => typeof x.id === 'string' && typeof x.label === 'string' && (x.canGrant || x.reason)))
+  assert.ok(!den.some(x => /^(Bash|WebFetch)$|\*|&&/.test(x.rule || ''))) // never a broad or compound rule
+  assert.deepStrictEqual(core.normalizePermissionDenials([{ tool_name: 'Bash', tool_input: { command: 'npm test' } }], { ...agent, permissions: { ...DEF, mode: 'full' } })
+    .map(x => x.canGrant), [false])
+  assert.deepStrictEqual(core.normalizePermissionDenials(Array(33).fill({ tool_name: 'Bash', tool_input: { command: 'ls' } }), agent).map(x => x.canGrant), [false])
+}
+
 // ---- Sprint 6 F: indexed log, accent-insensitive search, 10k messages, J settings, summary checkpoint ----
 async function sprint6Checks() {
   const d = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-chat-s6-')); core.init(d)
@@ -647,11 +726,13 @@ function mainChecks() {
 
 async function mainHarness() {
   const Module = require('module'), { execFileSync } = require('child_process')
-  const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-chat-ud-')), handlers = {}
-  const webContents = { send() {}, setWindowOpenHandler() {}, on() {} }
+  const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-chat-ud-')), handlers = {}, sent = []
+  let dialogs = 0, dialogAnswer = 0
+  const webContents = { send: (...a) => sent.push(a), setWindowOpenHandler() {}, on() {} }
   const electron = { app: { getPath: () => userData, requestSingleInstanceLock: () => true, whenReady: () => Promise.resolve(), on() {}, quit() {} },
     BrowserWindow: function () { return { webContents, loadFile: () => Promise.resolve(), isMinimized: () => false } },
-    ipcMain: { handle: (name, fn) => { handlers[name] = fn } }, dialog: {}, shell: {} }
+    ipcMain: { handle: (name, fn) => { handlers[name] = fn } }, shell: {},
+    dialog: { showMessageBox: async () => { dialogs++; return { response: dialogAnswer } } } }
   const load = Module._load
   Module._load = function (request, ...rest) { return request === 'electron' ? electron : load.call(this, request, ...rest) }
 
@@ -667,6 +748,21 @@ if (process.env.FAKE_PROGRESS) fs.appendFileSync('progress-' + me + '.txt', 'x')
 out({ type: 'thread.started', thread_id: 'M' + process.pid })
 out({ type: 'item.completed', item: { type: 'agent_message', text: JSON.parse(process.env.FAKE_REPLY || '{}')[me] || 'xong' } })
 out({ type: 'turn.completed', usage: { input_tokens: Number(process.env.FAKE_IN || 1), output_tokens: 1 } })
+`, { mode: 0o755 })
+  // fake claude: denies Bash(npm test) unless granted via --allowedTools or full; FAKE_CLAUDE=emptydeny|emptynodeny for the retry rules
+  const claudeLog = path.join(mbin, 'claude-args')
+  fs.writeFileSync(path.join(mbin, 'claude'), `#!${process.execPath}
+const fs = require('fs'), argv = process.argv.slice(2), p = argv[argv.indexOf('-p') + 1], mode = process.env.FAKE_CLAUDE || ''
+fs.appendFileSync(${JSON.stringify(claudeLog)}, JSON.stringify(argv) + '\\n')
+const out = o => process.stdout.write(JSON.stringify(o) + '\\n'), i = argv.indexOf('--allowedTools')
+const granted = (i >= 0 && argv.slice(i + 1).includes('Bash(npm test)')) || argv.includes('bypassPermissions')
+const retry = p.includes('Bạn chưa gửi tin trả lời'), deny = !granted && !retry && mode !== 'emptynodeny'
+const denials = deny ? [{ tool_name: 'Bash', tool_use_id: 'u1', tool_input: { command: 'npm test' } },
+  { tool_name: 'Bash', tool_input: { command: 'npm test && rm -rf /' } }, { tool_name: '<b>x</b> @dev-a', tool_input: {} }] : []
+const text = granted ? 'đã chạy npm test' : retry ? 'đã trả lời' : mode.startsWith('empty') ? '' : 'bị chặn'
+out({ type: 'system', subtype: 'init', session_id: 'C' + process.pid })
+out({ type: 'result', subtype: 'success', is_error: false, result: text, session_id: 'C' + process.pid,
+  usage: { input_tokens: 1, output_tokens: 1 }, total_cost_usd: 0.001, permission_denials: denials })
 `, { mode: 0o755 })
   process.env.PATH = mbin + path.delimiter + process.env.PATH
 
@@ -713,6 +809,59 @@ out({ type: 'turn.completed', usage: { input_tokens: Number(process.env.FAKE_IN 
   sm = await call('sessions', root); assert.deepStrictEqual([sm['dev-r'].lastTurn.inputTokens, sm['dev-r'].rotationPending], [1, false])
   assert.ok(!log().some(m => m.from === 'dev-a')) // "@dev-a" inside the handoff never routed
   delete process.env.FAKE_REPLY; delete process.env.FAKE_IN
+
+  // S8 P: saveTeam envelope + revision, native confirm for Toàn quyền, denial → pending → grant → exactly one retry
+  const cArgs = () => fs.existsSync(claudeLog) ? fs.readFileSync(claudeLog, 'utf8').trim().split('\n').map(line => JSON.parse(line)) : []
+  const agentsRaw = () => fs.readFileSync(at('.chat/agents.json'), 'utf8'), rev = () => core.teamRevision(root)
+  const save = (members, expectedRevision = rev()) => call('saveTeam', root, members, { expectedRevision })
+  const DEF = { mode: 'edit', allowTools: ['WebFetch'], networkAccess: false } // inactive custom rule must never be enabled by a grant
+  const devp = { name: 'dev-p', cli: 'claude', role: 'Dev', owns: ['*.txt'], resume: true, allowedCommands: ['npm run check'], permissions: DEF }
+  let res = await save([...core.team(root), devp], 'stale'); assert.strictEqual(res.error?.code, 'CONFLICT')
+  res = await save([...core.team(root), devp]); assert.ok(res.ok && typeof res.revision === 'string' && Array.isArray(res.team), JSON.stringify(res))
+  assert.strictEqual(res.revision, rev()); assert.strictEqual(dialogs, 0)
+  const withP = permissions => core.team(root).map(a => a.name === 'dev-p' ? { ...a, permissions } : a)
+  let raw = agentsRaw(); dialogAnswer = 0
+  res = await save(withP({ ...DEF, mode: 'full' })); assert.deepStrictEqual([res.error?.code, dialogs, agentsRaw() === raw], ['CANCELLED', 1, true])
+  dialogAnswer = 1; res = await save(withP({ ...DEF, mode: 'full' }))
+  assert.deepStrictEqual([res.ok, dialogs, core.team(root).find(a => a.name === 'dev-p').permissions.mode], [true, 2, 'full'])
+  // summary-style run (trackSession:false) never inherits full; empty + denial → no empty retry, empty without denial → one retry
+  const pFull = core.team(root).find(a => a.name === 'dev-p'), nClaude = () => cArgs().length
+  let n0 = nClaude(), r0 = await core.run(root, pFull, { trackSession: false, initialPrompt: 'tóm tắt' })
+  assert.ok(cArgs().at(-1).includes('acceptEdits') && !cArgs().at(-1).includes('bypassPermissions'), cArgs().at(-1).join(' '))
+  process.env.FAKE_CLAUDE = 'emptydeny'; n0 = nClaude(); r0 = await core.run(root, pFull, { trackSession: false, initialPrompt: 'x' })
+  assert.deepStrictEqual([nClaude() - n0, r0.outcome, r0.permissionDenials.some(x => x.rule === 'Bash(npm test)')], [1, 'success', true])
+  process.env.FAKE_CLAUDE = 'emptynodeny'; n0 = nClaude(); r0 = await core.run(root, pFull, { trackSession: false, initialPrompt: 'x' })
+  assert.deepStrictEqual([nClaude() - n0, r0.text], [2, 'đã trả lời']); delete process.env.FAKE_CLAUDE
+  res = await save(core.team(root).map(a => a.name === 'dev-p' ? { ...a, avatar: { ...a.avatar, gender: a.avatar.gender === 'male' ? 'female' : 'male' } } : a))
+  assert.deepStrictEqual([res.ok, dialogs], [true, 2]) // editing a full agent's avatar does not ask again
+  res = await save(withP(DEF)); assert.deepStrictEqual([res.ok, dialogs], [true, 2]) // turning full off does not ask
+
+  const draftRevision = rev(); n0 = nClaude(); sent.length = 0
+  mark = log().length; await call('send', root, '@dev-p chạy npm test')
+  const denied = await waitFor('tin bị từ chối quyền', () => log().slice(mark).find(m => m.kind === 'permission-denied'))
+  assert.ok(denied.permissionRequestId && !JSON.stringify(denied).includes('rm -rf /"}'), JSON.stringify(denied)) // no raw tool_input kept
+  const grantable = denied.denials.filter(x => x.canGrant)
+  assert.deepStrictEqual(grantable.map(x => x.rule), ['Bash(npm test)']) // compound command and unknown tool never grantable
+  const pReq = await waitFor('permissions-changed', () => sent.filter(e => e[0] === 'permissions-changed' && e[1] === root).at(-1)?.[2].requests[0])
+  assert.deepStrictEqual([pReq.id, pReq.agent, pReq.denials.length], [denied.permissionRequestId, 'dev-p', denied.denials.length])
+  for (const bad of [{ requestId: 'nope', denialId: grantable[0].id }, { requestId: pReq.id, denialId: grantable[0].id, extra: 1 }, 'x'])
+    assert.strictEqual((await call('grantPermissionAndRetry', root, bad)).ok, false, JSON.stringify(bad))
+  const blocked = denied.denials.find(x => !x.canGrant)
+  assert.strictEqual((await call('grantPermissionAndRetry', root, { requestId: pReq.id, denialId: blocked.id })).error?.code, 'UNSUPPORTED')
+  const grants = await Promise.all([1, 2].map(() => call('grantPermissionAndRetry', root, { requestId: pReq.id, denialId: grantable[0].id })))
+  assert.strictEqual(grants.filter(g => g.ok).length, 1, JSON.stringify(grants)) // double click → one job
+  const granted = grants.find(g => g.ok); assert.ok(granted.runId && granted.teamRevision === rev())
+  assert.deepStrictEqual(core.team(root).find(a => a.name === 'dev-p').permissions, { mode: 'custom', allowTools: ['Bash(npm test)'], networkAccess: false })
+  await waitFor('dev-p chạy lại', () => log().slice(mark).some(m => m.from === 'dev-p' && m.text === 'đã chạy npm test'))
+  await new Promise(r => setTimeout(r, 300))
+  assert.strictEqual(nClaude() - n0, 2) // the denied turn + exactly one retry, no automatic loop
+  const retryArgs = cArgs().at(-1), retryPrompt = retryArgs[retryArgs.indexOf('-p') + 1]
+  assert.deepStrictEqual(retryArgs.slice(retryArgs.indexOf('--allowedTools') + 1, retryArgs.indexOf('--allowedTools') + 3), ['Bash(npm run check)', 'Bash(npm test)'])
+  assert.ok(retryPrompt.includes('chạy npm test') && retryPrompt.includes('Bash(npm test)'), 'prompt chạy lại thiếu yêu cầu cũ hoặc quyền vừa cấp')
+  assert.ok(!log().some(m => m.from === 'dev-a')) // "@dev-a" in a denial label never routed
+  assert.ok(sent.some(e => e[0] === 'team-changed' && e[1] === root && e[2].revision === rev()))
+  res = await save(core.team(root), draftRevision); assert.strictEqual(res.error?.code, 'CONFLICT') // stale ⚙ draft can't undo the grant
+  assert.strictEqual((await call('grantPermissionAndRetry', root, { requestId: pReq.id, denialId: grantable[0].id })).error?.code, 'EXPIRED')
 
   // J3: two agents ping-pong without file/task changes → stopped after 3 rounds; "Tiếp tục" starts a fresh chain
   process.env.FAKE_REPLY = pingPong
@@ -812,4 +961,4 @@ out({ type: 'turn.completed', usage: { input_tokens: Number(process.env.FAKE_IN 
   assert.strictEqual(queue().at(-1).state, 'paused')
   assert.deepStrictEqual(queue().slice(0, -1), otherEntries)
 }
-auditChecks().then(viewerChecks).then(runChecks).then(sprint7Checks).then(sprint6Checks).then(rendererChecks).then(mainChecks).then(() => console.log('ok'), e => { console.error(e); process.exit(1) })
+auditChecks().then(viewerChecks).then(runChecks).then(sprint7Checks).then(sprint8Checks).then(sprint6Checks).then(rendererChecks).then(mainChecks).then(() => console.log('ok'), e => { console.error(e); process.exit(1) })
