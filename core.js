@@ -36,7 +36,10 @@ const opt = (flag, v) => v ? [flag, v] : []
 const value = (v, integer = false) => typeof v === 'number' && Number.isFinite(v) && v >= 0 && (!integer || Number.isInteger(v)) ? v : null
 const emptyUsage = (partial = false) => ({ inputTokens: null, outputTokens: null, costUsd: null, durationMs: 0, partial })
 const rawUsage = (u = {}) => {
-  const inputTokens = value(u.input_tokens ?? u.inputTokens, true)
+  // Anthropic reports cache reads/writes apart from input_tokens (which alone reads "Vào 4"); count all tokens sent
+  const cached = ['cache_read_input_tokens', 'cache_creation_input_tokens'].reduce((n, k) => n + (value(u[k], true) || 0), 0)
+  const input = value(u.input_tokens ?? u.inputTokens, true)
+  const inputTokens = input == null ? null : input + cached
   const outputTokens = value(u.output_tokens ?? u.outputTokens, true)
   const costUsd = value(u.cost_usd ?? u.costUsd)
   return { inputTokens, outputTokens, costUsd, durationMs: 0, partial: inputTokens == null || outputTokens == null }
@@ -414,7 +417,7 @@ function lockConflict(a, b) {
     const ap = foldCase(a.pattern), bp = foldCase(b.pattern)
     if (!globsOverlap(ap, bp)) return null
     if ((a.excludes || []).some(e => globCovers(foldCase(e), bp)) || (b.excludes || []).some(e => globCovers(foldCase(e), ap))) return null
-    return a.pattern === '**' ? b.path : a.path
+    return `${a.pattern} ⟷ ${b.pattern}` // shown as the reason; a glob's directory prefix can be the whole project
   }
   const key = foldCase
   const ap = key(path.resolve(a.path)), bp = key(path.resolve(b.path))
@@ -1067,7 +1070,7 @@ function parseTaskChanges(changes) {
   const ids = new Set()
   for (const change of changes) {
     if (!sameKeys(change, ['id', 'status', 'expectedRevision']) || !/^T[1-9][0-9]*$/.test(change.id)
-      || !TASK_STATUSES.has(change.status) || typeof change.expectedRevision !== 'string' || !change.expectedRevision || ids.has(change.id))
+      || !TASK_STATUSES.has(change.status) || typeof change.expectedRevision !== 'string' || ids.has(change.id))
       throw fail('INVALID', 'Yêu cầu cập nhật task không hợp lệ')
     ids.add(change.id)
   }
@@ -1081,7 +1084,9 @@ function validateTaskChanges(board, changes, actor) {
   for (const change of parseTaskChanges(changes)) {
     const task = board.tasks.find(t => t.id === change.id)
     if (!task) throw fail('NOT_FOUND', `Không tìm thấy task ${change.id}`)
-    if (task.revision !== change.expectedRevision) throw fail('CONFLICT', 'Task đã thay đổi, hãy chọn lại')
+    // PM may create a task and move it in the same turn: it has no revision yet, so "" is accepted while still todo
+    const fresh = change.expectedRevision === '' && isPm && task.status === 'todo'
+    if (!fresh && task.revision !== change.expectedRevision) throw fail('CONFLICT', 'Task đã thay đổi, hãy chọn lại')
     if (!isPm && task.assignee !== actor) throw fail('INVALID', 'Agent chỉ được đổi task của mình')
     if (task.status !== change.status) updates.push({ id: task.id, createdAt: task.createdAt, assignee: task.assignee,
       status: change.status, eventId: randomUUID() })
@@ -1750,9 +1755,23 @@ async function run(dir, agent, options = {}) {
     return baseline
   }
   while (!signal?.aborted) {
+    const resumedTurn = !!session?.id
     try { r = await exec(dir, agent, session, { signal, onProgress, onSession: rememberEarly, onSpawn, costBaseline: baseline, promptText, seen: jobSeen, cwd }) }
     catch (e) { r = { text: null, id: session?.id, seen: jobSeen, usage: emptyUsage(true), error: e.message, rawCostUsd: null } }
     usages.push(r.usage || emptyUsage(true))
+    // codex reports the thread's running total on every resumed turn (verified: 6 → 11 → 16 output tokens for three
+    // one-word answers), so a turn is the difference to the total saved with the session
+    if (acc?.bin === 'codex' && r.usage) {
+      const raw = r.usage, base = resumedTurn ? session?.tokenCheckpoint : { inputTokens: 0, outputTokens: 0 }
+      const diff = k => raw[k] == null || base?.[k] == null || raw[k] < base[k] ? null : raw[k] - base[k]
+      const turn = { ...raw, inputTokens: diff('inputTokens'), outputTokens: diff('outputTokens') }
+      if (turn.inputTokens == null || turn.outputTokens == null) turn.partial = true
+      usages[usages.length - 1] = turn
+      if (raw.inputTokens != null && raw.outputTokens != null && session) {
+        session.tokenCheckpoint = { inputTokens: raw.inputTokens, outputTokens: raw.outputTokens }
+        if (trackSession && agent.resume !== false && session.id) setSession(dir, agent.name, { ...sessions(dir, workspaceId)[agent.name], ...session }, workspaceId)
+      }
+    }
     if (Array.isArray(r.permissionDenials)) denialEntries.push(...r.permissionDenials)
     pgid = r.pgid || pgid; orphanState = r.orphanState
     if (r.id) rememberEarly(r.id)

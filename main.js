@@ -642,6 +642,7 @@ const conflict = (left, right) => {
   return null
 }
 const displayPath = (job, file) => {
+  if (!path.isAbsolute(file)) return file // already a readable pattern pair from lockConflict
   const relative = path.relative(job.root, file).split(path.sep).join('/')
   return relative && relative !== '..' && !relative.startsWith('../') ? relative : file
 }

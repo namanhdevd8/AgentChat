@@ -363,6 +363,15 @@ const fs = require('fs'), out = s => process.stdout.write(s)
 fs.appendFileSync(${JSON.stringify(argsLog)}, JSON.stringify(process.argv.slice(2)) + '\\n')
 if (process.env.FAKE_MODE === 'gone' && process.argv.includes('resume')) { process.stderr.write('Error: no rollout found for thread id T1\\n'); process.exit(1) }
 out(JSON.stringify({ type: 'thread.started', thread_id: process.env.FAKE_TID || 'T1' }) + '\\n')
+// like real codex: turn.completed carries the thread's running total, not this turn's tokens
+const usage = (i, o) => {
+  const f = ${JSON.stringify(path.join(bin, 'totals.json'))}, tid = process.env.FAKE_TID || 'T1'
+  let all = {}; try { all = JSON.parse(fs.readFileSync(f, 'utf8')) } catch {}
+  const prev = process.argv.includes('resume') && all[tid] || { i: 0, o: 0 }
+  const next = { i: i == null ? null : prev.i + i, o: prev.o + o }
+  if (i != null) { all[tid] = next; fs.writeFileSync(f, JSON.stringify(all)) }
+  return { input_tokens: next.i, output_tokens: next.o }
+}
 if (process.env.FAKE_MODE === 'slow') {
   fs.writeFileSync(${JSON.stringify(pidFile)}, String(require('child_process').spawn('sleep', ['30']).pid))
   out(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: '@pm làm tiếp' } }) + '\\n')
@@ -370,7 +379,7 @@ if (process.env.FAKE_MODE === 'slow') {
 } else if (process.env.FAKE_MODE !== 'ok') { // Sprint 5 modes: cmd:<command>, loop, empty, empty2, task, broken
   const mode = process.env.FAKE_MODE, argv = process.argv.slice(2), p = argv[argv.length - 1], F = '\\x60'.repeat(3)
   const ask = command => 'Chạy\\n' + F + 'run-command\\n' + JSON.stringify({ command }) + '\\n' + F
-  const reply = text => { if (text) out(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text } }) + '\\n'); out(JSON.stringify({ type: 'turn.completed', usage: { input_tokens: process.env.FAKE_IN === 'null' ? null : Number(process.env.FAKE_IN || 3), output_tokens: 2 } }) + '\\n') }
+  const reply = text => { if (text) out(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text } }) + '\\n'); out(JSON.stringify({ type: 'turn.completed', usage: usage(process.env.FAKE_IN === 'null' ? null : Number(process.env.FAKE_IN || 3), 2) }) + '\\n') }
   if (mode === 'broken') process.exit(1)
   else if (p.includes('DỮ LIỆU KHÔNG TIN CẬY')) reply(mode === 'loop' ? ask('node ok.js') : 'kết quả ' + (/"exitCode":(\\d+|null)/.exec(p) || [])[1] + (p.includes('"error"') ? ' lỗi' : ''))
   else if (p.includes('Bạn chưa gửi tin trả lời')) reply(mode === 'empty' ? 'đã trả lời' : '')
@@ -384,7 +393,7 @@ if (process.env.FAKE_MODE === 'slow') {
   const b = Buffer.from(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'xin chào' } }) + '\\n')
   const cut = b.indexOf(Buffer.from('à')) + 1 // split inside the 2-byte "à"
   out(b.subarray(0, cut))
-  setTimeout(() => { out(b.subarray(cut)); out(JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 3, output_tokens: 2 } })) }, 50)
+  setTimeout(() => { out(b.subarray(cut)); out(JSON.stringify({ type: 'turn.completed', usage: usage(3, 2) })) }, 50)
 }
 `, { mode: 0o755 })
 process.env.PATH = bin + path.delimiter + process.env.PATH
@@ -969,3 +978,16 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
   assert.deepStrictEqual(queue().slice(0, -1), otherEntries)
 }
 auditChecks().then(viewerChecks).then(runChecks).then(sprint7Checks).then(sprint8Checks).then(sprint6Checks).then(rendererChecks).then(mainChecks).then(() => console.log('ok'), e => { console.error(e); process.exit(1) })
+
+// PM creates a task and moves it in the same turn (no revision yet): "" is accepted only for PM on a todo task
+{
+  const board = { tasks: [{ id: 'T1', assignee: 'dev', createdAt: 'x', status: 'todo', revision: 'r1' }, { id: 'T2', assignee: 'dev', createdAt: 'x', status: 'doing', revision: 'r2' }] }
+  const V = (changes, actor) => core.validateTaskChanges(board, changes, actor)
+  assert.strictEqual(V([{ id: 'T1', status: 'doing', expectedRevision: '' }], 'pm').length, 1)
+  assert.throws(() => V([{ id: 'T1', status: 'doing', expectedRevision: '' }], 'dev'), /thay đổi/) // others still need the revision
+  assert.throws(() => V([{ id: 'T2', status: 'done', expectedRevision: '' }], 'pm'), /thay đổi/)   // already moved → revision required
+  console.log('ok (task revision)')
+}
+// Claude: cache reads/writes are tokens sent too (without them a turn showed "Vào 4")
+assert.strictEqual(core.CLI.claude.parse(J({ type: 'result', subtype: 'success', result: 'ok', session_id: 's', usage: { input_tokens: 4, cache_read_input_tokens: 30000, cache_creation_input_tokens: 500, output_tokens: 9 }, total_cost_usd: 0.1 }), { costBaseline: 0 }).usage.inputTokens, 30504)
+console.log('ok (claude cache tokens)')
