@@ -336,8 +336,12 @@ function normalizeScope(agent, dir) {
     owns = parts
   }
   if (!Array.isArray(owns)) throw new Error(`Phạm vi của @${agent.name || '?'} phải là danh sách`)
-  owns = [...new Set(owns.map(p => scopePattern(p, dir)).filter(Boolean))]
+  // "!pattern" carves an area out of the scope, e.g. dev owns CL/** but not the reviewer's **/_review/** inside it
+  const isExclude = p => typeof p === 'string' && p.trim().startsWith('!')
+  const excludes = [...new Set(owns.filter(isExclude).map(p => scopePattern(p.trim().slice(1), dir)).filter(Boolean))]
+  owns = [...new Set(owns.filter(p => !isExclude(p)).map(p => scopePattern(p, dir)).filter(Boolean))]
   const out = { owns, readOnly }
+  if (excludes.length) out.excludes = excludes
   if (agent.ownsLegacy) out.ownsLegacy = String(agent.ownsLegacy)
   if (agent.scopeNeedsReview === true && agent.scopeConfirmed !== true) out.scopeNeedsReview = true
   return out
@@ -347,30 +351,72 @@ function scopeAllows(scope, relative) {
   if (scope.readOnly) return false
   let p = String(relative || '').replace(/^\.\//, '')
   if (!p || path.isAbsolute(p) || p.includes('\\') || p.split('/').includes('..')) return false
-  if (!scope.owns.length) return true
-  return scope.owns.some(pattern => {
-    if (pattern.endsWith('/**')) { const base = pattern.slice(0, -3); return p === base || p.startsWith(base + '/') }
+  const matches = pattern => {
+    if (pattern.endsWith('/**')) { const base = pattern.slice(0, -3); if (p === base || p.startsWith(base + '/')) return true }
     if (!hasGlob(pattern)) return p === pattern
     return path.matchesGlob(p, pattern)
-  })
+  }
+  if ((scope.excludes || []).some(matches)) return false
+  return !scope.owns.length || scope.owns.some(matches)
 }
 
 function scopeLocks(scope, dir) {
   if (scope.readOnly) return []
   const root = fs.realpathSync(dir)
-  if (!scope.owns.length) return [{ path: root, tree: true }]
+  const excludes = scope.excludes || []
+  // path/tree keep the old coarse shape (stored in locks.json, used for locks without a pattern);
+  // pattern/excludes let two agents' globs be compared precisely in lockConflict
+  if (!scope.owns.length) return [{ path: root, tree: true, pattern: '**', excludes }]
   const locks = scope.owns.map(pattern => {
-    if (!hasGlob(pattern)) return { path: path.resolve(root, ...pattern.split('/')), tree: false }
+    if (!hasGlob(pattern)) return { path: path.resolve(root, ...pattern.split('/')), tree: false, pattern, excludes }
     const parts = pattern.split('/'), fixed = []
     for (const part of parts) { if (hasGlob(part)) break; fixed.push(part) }
-    // ponytail: lock the fixed directory prefix of globs; exact glob intersection only if this reduces useful parallelism
-    return { path: path.resolve(root, ...fixed), tree: true }
+    return { path: path.resolve(root, ...fixed), tree: true, pattern, excludes }
   })
   return locks.filter((lock, i) => !locks.slice(0, i).some(x => x.path === lock.path && x.tree === lock.tree))
 }
 
+const foldCase = p => process.platform === 'darwin' ? p.toLowerCase() : p
+
+// Can one path match both segment globs? Over-approximates when both have wildcards (may say yes, never wrongly no).
+function segmentsOverlap(x, y) {
+  if (!hasGlob(x) && !hasGlob(y)) return x === y
+  if (!hasGlob(x)) return path.matchesGlob(x, y)
+  if (!hasGlob(y)) return path.matchesGlob(y, x)
+  const head = s => s.slice(0, s.search(/[*?]/)), tail = s => s.slice(Math.max(s.lastIndexOf('*'), s.lastIndexOf('?')) + 1)
+  const [hx, hy, tx, ty] = [head(x), head(y), tail(x), tail(y)]
+  return (hx.startsWith(hy) || hy.startsWith(hx)) && (tx.endsWith(ty) || ty.endsWith(tx))
+}
+
+// Can one path match both globs? "**" spans zero or more segments.
+function globsOverlap(a, b) {
+  const A = a.split('/'), B = b.split('/'), memo = new Map()
+  const go = (i, j) => {
+    const key = i * (B.length + 1) + j
+    if (memo.has(key)) return memo.get(key)
+    let r
+    if (i === A.length && j === B.length) r = true
+    else if (A[i] === '**') r = go(i + 1, j) || (j < B.length && go(i, j + 1))
+    else if (B[j] === '**') r = go(i, j + 1) || (i < A.length && go(i + 1, j))
+    else r = i < A.length && j < B.length && segmentsOverlap(A[i], B[j]) && go(i + 1, j + 1)
+    memo.set(key, r)
+    return r
+  }
+  return go(0, 0)
+}
+
+// Is every path of `inner` inside `outer`? Only the obvious cases; unsure → false (keeps the lock).
+const globCovers = (outer, inner) => outer === inner || outer === '**'
+  || (outer.endsWith('/**') && (inner === outer.slice(0, -3) || inner.startsWith(outer.slice(0, -2))))
+
 function lockConflict(a, b) {
-  const key = p => process.platform === 'darwin' ? p.toLowerCase() : p
+  if (typeof a.pattern === 'string' && typeof b.pattern === 'string') {
+    const ap = foldCase(a.pattern), bp = foldCase(b.pattern)
+    if (!globsOverlap(ap, bp)) return null
+    if ((a.excludes || []).some(e => globCovers(foldCase(e), bp)) || (b.excludes || []).some(e => globCovers(foldCase(e), ap))) return null
+    return a.pattern === '**' ? b.path : a.path
+  }
+  const key = foldCase
   const ap = key(path.resolve(a.path)), bp = key(path.resolve(b.path))
   const inside = (file, tree) => file === tree || file.startsWith(tree + path.sep)
   if (ap === bp || (a.tree && inside(bp, ap)) || (b.tree && inside(ap, bp))) return a.tree ? a.path : b.path

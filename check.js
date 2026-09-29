@@ -99,7 +99,7 @@ assert.deepStrictEqual(S('index.html, reports/').owns, ['index.html', 'reports/*
 assert.deepStrictEqual(S('reports').owns, ['reports/**']) // existing dir → tree
 assert.deepStrictEqual(S(['./src/**/*.js', 'src/**/*.js', '']).owns, ['src/**/*.js']) // trim ./, drop empty, dedupe
 assert.deepStrictEqual(S('reports/ (chỉ đọc code)'), { owns: [], readOnly: false, ownsLegacy: 'reports/ (chỉ đọc code)', scopeNeedsReview: true }) // prose: not readOnly, not full access
-for (const bad of ['../x', 'src/../x', '/etc/passwd', 'a\\b', '!x', '{a,b}', 'a**/b', 'C:x'])
+for (const bad of ['../x', 'src/../x', '/etc/passwd', 'a\\b', 'a!b', '{a,b}', 'a**/b', 'C:x'])
   assert.throws(() => S([bad]), undefined, `phải từ chối phạm vi ${bad}`)
 fs.symlinkSync(os.tmpdir(), path.join(proj, 'link'))
 assert.throws(() => S(['link/**']), /symlink/)
@@ -112,17 +112,24 @@ assert.ok(!allows(['reports/**'], 'reports2/a.md') && !allows(['index.html'], 'i
 assert.ok(allows(['src/**/*.js'], 'src/a/b.js') && !allows(['src/**/*.js'], 'src/a.css'))
 assert.ok(!allows([], '../outside.txt'))
 
-const locks = (owns, readOnly) => core.scopeLocks(S(owns, readOnly), proj)
-const clash = (a, b) => a.some(x => b.some(y => core.lockConflict(x, y)))
+const locks = (owns, readOnly) => core.scopeLocks(S(owns, readOnly), proj).map(({ path, tree }) => ({ path, tree }))
+const plocks = owns => core.scopeLocks(S(owns), proj) // with pattern/excludes, as the scheduler uses them
+const clash = (a, b) => plocks(a).some(x => plocks(b).some(y => core.lockConflict(x, y)))
 assert.deepStrictEqual(locks([]), [{ path: proj, tree: true }])
 assert.deepStrictEqual(locks(['a.js'], true), []) // reader holds nothing
 assert.deepStrictEqual(locks(['new.txt']), [{ path: path.join(proj, 'new.txt'), tree: false }]) // file not yet created is still locked
-assert.ok(!clash(locks(['index.html']), locks(['main.js', 'core.js', 'preload.js']))) // FE ∥ BE
-assert.ok(clash(locks(['index.html']), locks(['index.html'])))
-assert.ok(clash(locks(['src/**/*.js']), locks(['src/**/*.css']))) // same glob prefix → conservative wait
-assert.ok(clash(locks(['src/**']), locks(['src/a/b.js'])) && clash(locks([]), locks(['check.js'])))
-assert.ok(!clash(locks(['src/**']), locks(['src2/a.js']))) // segment boundary
-if (process.platform === 'darwin') assert.ok(clash(locks(['Index.html']), locks(['index.html'])))
+assert.ok(!clash((['index.html']), (['main.js', 'core.js', 'preload.js']))) // FE ∥ BE
+assert.ok(clash((['index.html']), (['index.html'])))
+assert.ok(!clash((['src/**/*.js']), (['src/**/*.css']))) // globs compared precisely, not by directory prefix
+assert.ok(!clash((['reports/dev-*']), (['reports/review-*'])) && clash((['reports/dev-*']), (['reports/*'])))
+assert.ok(clash((['CL/**']), (['**/_review/**']))) // _review/ inside CL/ really overlaps…
+assert.ok(!clash((['CL/**', 'tools/**', '!**/_review/**']), (['**/_review/**', 'process.md']))) // …unless dev excludes it
+assert.ok(clash(([]), (['**/_review/**'])) && !clash((['!**/_review/**']), (['**/_review/**']))) // [] minus exclusion
+assert.ok(!allows(['CL/**', '!**/_review/**'], 'CL/A/_review/r.md') && allows(['CL/**', '!**/_review/**'], 'CL/A/INPUT/x'))
+assert.deepStrictEqual(S(['CL/**', '!**/_review/**']), { owns: ['CL/**'], excludes: ['**/_review/**'], readOnly: false })
+assert.ok(clash((['src/**']), (['src/a/b.js'])) && clash(([]), (['check.js'])))
+assert.ok(!clash((['src/**']), (['src2/a.js']))) // segment boundary
+if (process.platform === 'darwin') assert.ok(clash((['Index.html']), (['index.html'])))
 
 async function auditChecks() {
   const f = n => path.join(proj, n)

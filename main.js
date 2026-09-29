@@ -597,7 +597,7 @@ async function ask(dir, agent, hops, special = null, chain = null, trigger = nul
   const capturedTrigger = trigger && typeof trigger.from === 'string' && typeof trigger.text === 'string' && Buffer.byteLength(trigger.text) <= 32768
     ? { from: trigger.from, text: trigger.text, ...(Number.isInteger(trigger.seq) ? { seq: trigger.seq } : {}) } : null
   const job = { dir, root, name: agent.name, key: runKey(root, agent.name), runId: randomUUID(), seq: sequence++, hops,
-    agent: { ...agent, owns: [...scope.owns], readOnly: scope.readOnly, scopeNeedsReview: scope.scopeNeedsReview,
+    agent: { ...agent, owns: [...scope.owns, ...(scope.excludes || []).map(e => '!' + e)], readOnly: scope.readOnly, scopeNeedsReview: scope.scopeNeedsReview,
       allowedCommands: [...agent.allowedCommands], permissions: agent.permissions && typeof agent.permissions === 'object'
         ? { ...agent.permissions, allowTools: Array.isArray(agent.permissions.allowTools) ? [...agent.permissions.allowTools] : agent.permissions.allowTools } : agent.permissions,
       avatar: { ...agent.avatar } }, scope,
