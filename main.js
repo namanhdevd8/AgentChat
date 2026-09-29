@@ -546,7 +546,8 @@ async function haltChain(dir, chain, reason, targets) {
 async function route(dir, msg, hops, chain = null) {
   const members = core.team(dir)
   let targets = core.mentions(msg.text, members, msg.from)
-  if (msg.from === 'user' && !targets.length) targets = members.slice(0, 1) // no @ → first member (PM)
+  if (msg.from === 'user' && !targets.length) // no @ → PM, whatever order the team is listed in
+    targets = [members.find(a => String(a.name).toLowerCase() === 'pm') || members[0]].filter(Boolean)
   if (!targets.length) return
   chain ||= newChain(rootOf(dir))
   if (chain.pingPong) return haltChain(dir, chain, `${chain.pingPong.join(' và ')} đã chat qua lại 3 vòng mà không có file hoặc task thay đổi.`, targets)
@@ -569,6 +570,12 @@ const scopeAllowsForJob = (scope, file) => !scope.readOnly && (!scope.owns.lengt
 
 async function ask(dir, agent, hops, special = null, chain = null, trigger = null, retryContext = null, grantRequestId = null) {
   const root = rootOf(dir)
+  // An agent that already has a turn waiting to start gets nothing from a second one: that turn builds its prompt
+  // from the latest log when it starts. Without this, each extra @ ran a stale turn ("Chưa có tin mới nào gọi …").
+  if (!special && !retryContext && !grantRequestId) {
+    const waiting = jobs.find(job => job.key === runKey(root, agent.name) && !job.finished && job.phase === 'queued' && !job.kind)
+    if (waiting) return waiting
+  }
   const reserved = permissionReservations.get(permissionKey(root, agent.name))
   if (reserved && reserved.id !== grantRequestId) throw gitError('BUSY', `@${agent.name} đang cấp quyền`)
   if (!grantRequestId) clearPending(root, agent.name)
