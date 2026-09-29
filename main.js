@@ -475,16 +475,17 @@ const heads = () => jobs.filter((job, i) => !job.finished && !jobs.slice(0, i).s
 const activeFor = dir => {
   const root = rootOf(dir)
   return heads().filter(job => job.root === root && job.headStarted)
-    .map(({ name, runId, label, stopping, phase, blockedBy }) => ({ name, runId, label, stopping, phase, blockedBy }))
+    .map(job => ({ name: job.name, runId: job.runId, label: job.label, stopping: job.stopping, phase: job.phase, blockedBy: job.blockedBy, chain: chainInfo(job) }))
 }
 const orphanFor = dir => {
   const root = rootOf(dir)
   return orphans.filter(lock => lock.root === root).map(({ name, runId, scope, state }) => ({ name, runId, owns: scope.owns, readOnly: scope.readOnly, state }))
 }
+const chainInfo = job => job.chain ? { turns: job.chain.turns, limit: job.chain.chainLimit } : null
 function progress(job, label = job.label) {
   job.label = label
   win?.webContents.send('progress', job.dir, job.name,
-    { runId: job.runId, label, phase: job.phase, blockedBy: job.blockedBy || [], stopping: job.stopping })
+    { runId: job.runId, label, phase: job.phase, blockedBy: job.blockedBy || [], stopping: job.stopping, chain: chainInfo(job) })
 }
 
 async function terminal(job, result, waiting = false) {
@@ -558,6 +559,8 @@ async function route(dir, msg, hops, chain = null) {
       return haltChain(dir, chain, `Dừng sau ${chain.chainLimit} lượt agent liên tiếp.`, targets.slice(i))
     chain.turns++
     await ask(dir, targets[i], hops, null, chain, msg)
+    for (const job of jobs) if (job.chain === chain && job.headStarted && !job.finished) progress(job) // refresh "chuỗi x/y"
+
   }
 }
 
@@ -574,7 +577,7 @@ async function ask(dir, agent, hops, special = null, chain = null, trigger = nul
   // from the latest log when it starts. Without this, each extra @ ran a stale turn ("Chưa có tin mới nào gọi …").
   if (!special && !retryContext && !grantRequestId) {
     const waiting = jobs.find(job => job.key === runKey(root, agent.name) && !job.finished && job.phase === 'queued' && !job.kind)
-    if (waiting) return waiting
+    if (waiting) { if (chain && chain.turns > 0) chain.turns--; return waiting } // merged, so not an extra turn
   }
   const reserved = permissionReservations.get(permissionKey(root, agent.name))
   if (reserved && reserved.id !== grantRequestId) throw gitError('BUSY', `@${agent.name} đang cấp quyền`)

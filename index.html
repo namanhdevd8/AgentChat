@@ -190,7 +190,7 @@
   .sec-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
   .task-error-banner { padding: 6px 10px; background: var(--pink); color: var(--on-color); font-size: 12px; font-weight: 700; border-radius: 6px; margin-bottom: 8px; border: 1.5px solid var(--ink); }
   .task-tree { display: flex; flex-direction: column; gap: 8px; overflow-y: auto; flex: 1; min-height: 0; padding-right: 2px; }
-  .task-group { border: 2px solid var(--ink); border-radius: 8px; background: var(--bg); overflow: hidden; box-shadow: 2px 2px 0 var(--ink); }
+  .task-group { flex-shrink: 0; /* never squeeze a group; .task-tree scrolls instead */ border: 2px solid var(--ink); border-radius: 8px; background: var(--bg); overflow: hidden; box-shadow: 2px 2px 0 var(--ink); }
   .task-group-sum {
     display: flex; align-items: center; justify-content: space-between; padding: 6px 10px;
     font-weight: 700; font-size: 12px; cursor: pointer; background: var(--surface);
@@ -1059,7 +1059,8 @@
         label: r.label || 'đang khởi động…',
         stopping: !!r.stopping,
         phase: r.phase || 'running',
-        blockedBy: r.blockedBy || []
+        blockedBy: r.blockedBy || [],
+        chain: r.chain || null
       })
     }
   }
@@ -3669,7 +3670,8 @@
           statusText = 'đang kiểm tra file…'
         }
 
-        const txt = `@${run.name} · ${statusText}`
+        const chainTxt = run.chain ? `chuỗi ${run.chain.turns}/${run.chain.limit} · ` : '' // agent turns since your last message
+        const txt = `@${run.name} · ${chainTxt}${statusText}`
         lead.append(el('span', 'typing-label', txt))
 
         const stopBtn = el('button', 'btn-stop box press', run.stopping ? 'Đang dừng…' : 'Dừng')
@@ -4196,6 +4198,7 @@
       if (data.phase) r.phase = data.phase
       if (data.blockedBy) r.blockedBy = data.blockedBy
       if (data.stopping !== undefined) r.stopping = !!data.stopping
+      if (data.chain !== undefined) r.chain = data.chain
       if (data.label === 'đang dừng…') r.stopping = true
       if (d === dir) renderActiveUI()
     }
