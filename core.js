@@ -328,6 +328,10 @@ function scopePattern(input, dir) {
   return p
 }
 
+// normalizeScope splits "!x" into scope.excludes; anything written back (agents.json, locks.json, the ⚙ form)
+// must use this combined list, or exclusions silently disappear on the next save
+const ownsList = scope => [...scope.owns, ...(scope.excludes || []).map(e => '!' + e)]
+
 function normalizeScope(agent, dir) {
   const readOnly = agent.readOnly === true
   let owns = agent.owns
@@ -891,7 +895,7 @@ function team(dir) {
     catch (e) { sessionConfigError = e.message }
     try { permissions = normalizePermissions(agent.permissions, agent.cli, agent.name) }
     catch (e) { permissionConfigError = e.message }
-    return { ...agent, ...scope, allowedCommands, avatar: avatars[index],
+    return { ...agent, ...scope, owns: ownsList(scope), excludes: undefined, allowedCommands, avatar: avatars[index],
       ...(tokenLimit != null ? { sessionTokenLimit: tokenLimit } : {}), ...(commandConfigError ? { commandConfigError } : {}),
       ...(sessionConfigError ? { sessionConfigError } : {}), ...(permissions ? { permissions } : {}),
       ...(permissionConfigError ? { permissionConfigError } : {}) }
@@ -921,11 +925,11 @@ function normalizeTeam(dir, members) {
   const normalized = merged.map((a, index) => {
     const old = before.find(x => x.name === a.name)
     const scope = normalizeScope({ ...a, scopeNeedsReview: old?.scopeNeedsReview && !a.scopeConfirmed }, dir)
-    const saved = { ...a, ...scope, timeoutMinutes: timeoutMinutes(a), sessionTokenLimit: sessionTokenLimit(a),
+    const saved = { ...a, ...scope, owns: ownsList(scope), timeoutMinutes: timeoutMinutes(a), sessionTokenLimit: sessionTokenLimit(a),
       allowedCommands: normalizeAllowedCommands(a.allowedCommands), permissions: normalizePermissions(a.permissions, a.cli, a.name), avatar: avatars[index] }
     if (a.avatar !== undefined && !validAvatar(a.avatar)) throw new Error(`Avatar của @${a.name || '?'} không hợp lệ`)
     delete saved.scopeConfirmed; delete saved.commandConfigError; delete saved.sessionConfigError; delete saved.permissionConfigError
-    delete saved.avatarConfigError; delete saved.scopeError
+    delete saved.avatarConfigError; delete saved.scopeError; delete saved.excludes
     if (!scope.scopeNeedsReview) delete saved.scopeNeedsReview
     return saved
   })
@@ -955,7 +959,7 @@ function migrateTaskScope(dir) {
   if (pm.readOnly || pm.scopeNeedsReview) return { changed: false, reason: 'REVIEW' }
   const required = ['.chat/tasks.json', '.chat/tasks.json.tmp']
   if (!pm.owns.length || required.every(file => scopeAllows(pm, file))) return { changed: false }
-  const next = original.map((agent, i) => i === index ? { ...agent, owns: [...pm.owns, ...required.filter(file => !scopeAllows(pm, file))] } : agent)
+  const next = original.map((agent, i) => i === index ? { ...agent, owns: [...ownsList(pm), ...required.filter(file => !scopeAllows(pm, file))] } : agent)
   const file = chat(dir, 'agents.json'), backup = chat(dir, 'agents.json.pre-sprint-3.bak'), temp = chat(dir, 'agents.json.tmp')
   if (!fs.existsSync(backup)) fs.copyFileSync(file, backup, fs.constants.COPYFILE_EXCL)
   fs.writeFileSync(temp, JSON.stringify(next, null, 2)); fs.renameSync(temp, file)
@@ -1862,6 +1866,6 @@ module.exports = { CLI, account, accounts, cliSessions, models, init, readLog, a
   normalizeProjectSettings, projectSettings, writeProjectSettings, summaryBatch, acceptSummary, materializeSummary, recoverSummary,
   team, normalizeTeam, saveTeam, teamRevision, normalizePermissions, permissionRules, normalizePermissionDenials,
   timeoutMinutes, sessionTokenLimit, sessions, setSession, sessionRotationPending, readHandoff, writeHandoff,
-  mentions, files, normalizeScope, normalizeAllowedCommands, scopeAllows, scopeLocks, lockConflict, snapshot, changedPaths, prompt, promptIndexed, run, runCommand, groupAlive,
+  mentions, files, normalizeScope, ownsList, normalizeAllowedCommands, scopeAllows, scopeLocks, lockConflict, snapshot, changedPaths, prompt, promptIndexed, run, runCommand, groupAlive,
   migrateTaskScope, parseTaskDefinitions, buildTaskBoard, taskBoard, taskBoardIndexed, parseTaskStatusBlock, parseRunCommandBlock, parseHandoffBlock, validateTaskChanges,
   resolveProjectFile, readProjectFile }

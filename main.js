@@ -479,7 +479,7 @@ const activeFor = dir => {
 }
 const orphanFor = dir => {
   const root = rootOf(dir)
-  return orphans.filter(lock => lock.root === root).map(({ name, runId, scope, state }) => ({ name, runId, owns: scope.owns, readOnly: scope.readOnly, state }))
+  return orphans.filter(lock => lock.root === root).map(({ name, runId, scope, state }) => ({ name, runId, owns: core.ownsList(scope), readOnly: scope.readOnly, state }))
 }
 const chainInfo = job => job.chain ? { turns: job.chain.turns, limit: job.chain.chainLimit } : null
 function progress(job, label = job.label) {
@@ -600,7 +600,7 @@ async function ask(dir, agent, hops, special = null, chain = null, trigger = nul
   const capturedTrigger = trigger && typeof trigger.from === 'string' && typeof trigger.text === 'string' && Buffer.byteLength(trigger.text) <= 32768
     ? { from: trigger.from, text: trigger.text, ...(Number.isInteger(trigger.seq) ? { seq: trigger.seq } : {}) } : null
   const job = { dir, root, name: agent.name, key: runKey(root, agent.name), runId: randomUUID(), seq: sequence++, hops,
-    agent: { ...agent, owns: [...scope.owns, ...(scope.excludes || []).map(e => '!' + e)], readOnly: scope.readOnly, scopeNeedsReview: scope.scopeNeedsReview,
+    agent: { ...agent, owns: core.ownsList(scope), readOnly: scope.readOnly, scopeNeedsReview: scope.scopeNeedsReview,
       allowedCommands: [...agent.allowedCommands], permissions: agent.permissions && typeof agent.permissions === 'object'
         ? { ...agent.permissions, allowTools: Array.isArray(agent.permissions.allowTools) ? [...agent.permissions.allowTools] : agent.permissions.allowTools } : agent.permissions,
       avatar: { ...agent.avatar } }, scope,
@@ -874,10 +874,10 @@ async function executeJob(job) {
 
 const registryFile = root => path.join(root, '.chat', 'locks.json')
 function registryRecords(root) {
-  const live = jobs.filter(j => j.root === root && j.reserved).map(j => ({ runId: j.runId, name: j.name, owns: j.scope.owns,
+  const live = jobs.filter(j => j.root === root && j.reserved).map(j => ({ runId: j.runId, name: j.name, owns: core.ownsList(j.scope),
     readOnly: j.scope.readOnly, locks: j.locks, pgid: j.pgid, startedAt: j.claimedAt, workspaceId: j.workspaceId || null,
     kind: 'agent', cwd: j.workspaceId ? j.cwd : root }))
-  const old = orphans.filter(o => o.root === root).map(o => ({ runId: o.runId, name: o.name, owns: o.scope.owns,
+  const old = orphans.filter(o => o.root === root).map(o => ({ runId: o.runId, name: o.name, owns: core.ownsList(o.scope),
     readOnly: o.scope.readOnly, locks: o.locks, pgid: o.pgid, startedAt: o.startedAt, workspaceId: o.workspaceId || null,
     kind: o.kind || 'agent', cwd: o.cwd || root }))
   const integration = [...mergeControllers.entries()].filter(([key]) => key === root).map(([, value]) => ({ runId: value.entry.id,

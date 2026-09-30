@@ -991,3 +991,15 @@ auditChecks().then(viewerChecks).then(runChecks).then(sprint7Checks).then(sprint
 // Claude: cache reads/writes are tokens sent too (without them a turn showed "Vào 4")
 assert.strictEqual(core.CLI.claude.parse(J({ type: 'result', subtype: 'success', result: 'ok', session_id: 's', usage: { input_tokens: 4, cache_read_input_tokens: 30000, cache_creation_input_tokens: 500, output_tokens: 9 }, total_cost_usd: 0.1 }), { costBaseline: 0 }).usage.inputTokens, 30504)
 console.log('ok (claude cache tokens)')
+// "!x" exclusions survive a round trip through team() → ⚙ save → team() (they used to be dropped on save)
+{
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-excl-')); core.init(d)
+  const members = core.team(d).map(a => a.name === core.team(d)[0].name ? { ...a, owns: ['src/**', '!src/gen/**'] } : a)
+  core.saveTeam(d, members)
+  const back = core.team(d)[0]
+  assert.deepStrictEqual(back.owns, ['src/**', '!src/gen/**'])
+  core.saveTeam(d, core.team(d)) // saving what the form shows again keeps it
+  assert.deepStrictEqual(core.team(d)[0].owns, ['src/**', '!src/gen/**'])
+  assert.ok(!core.scopeAllows(core.normalizeScope(core.team(d)[0], d), 'src/gen/a.js'))
+  console.log('ok (exclusions persist)')
+}
