@@ -1,4 +1,5 @@
 // Project = folder. Chat log, team and shared memory live in <project>/.chat, reports in <project>/reports.
+// A folder can hold more independent boxes: .chat2, .chat3… (see chatName).
 const { spawn, execFile } = require('child_process')
 const { createHash, randomUUID } = require('crypto')
 const { promisify } = require('util')
@@ -8,6 +9,59 @@ const MarkdownIt = require('markdown-it')
 const fs = require('fs'), path = require('path'), os = require('os')
 // Electron's fs treats *.asar as folders (e.g. dist/…/app.asar); the snapshot must see them as plain files.
 const rawFs = process.versions.electron ? require('original-fs') : fs
+const isWin = process.platform === 'win32'
+
+// ---- Windows: npm installs CLIs (codex, npm) as .cmd shims. Node refuses to spawn those without a shell, and cmd.exe
+// would mangle a multi-line prompt, so a shim runs through cmd.exe with escaped args (same scheme as cross-spawn) and
+// the prompt goes over stdin. A real .exe (claude's native installer, git) is spawned directly, exactly as on macOS.
+function winResolve(name, env = process.env) {
+  if (path.isAbsolute(name)) return name
+  const exts = (env.PATHEXT || process.env.PATHEXT || '.COM;.EXE;.BAT;.CMD').split(';').filter(Boolean)
+  const dirs = (env.PATH || env.Path || process.env.PATH || process.env.Path || '').split(path.delimiter).filter(Boolean)
+  for (const d of dirs) for (const e of path.extname(name) ? [''] : exts) {
+    const f = path.join(d, name + e)
+    try { if (fs.statSync(f).isFile()) return f } catch {}
+  }
+  return null
+}
+const isShim = file => /\.(cmd|bat)$/i.test(file || '')
+const META = /([()\][%!^"`<>&|;, *?])/g
+function winArg(arg, twice) {
+  arg = String(arg).replace(/(?=(\\+?)?)\1"/g, '$1$1\\"').replace(/(?=(\\+?)?)\1$/, '$1$1')
+  arg = `"${arg}"`.replace(META, '^$1')
+  return twice ? arg.replace(META, '^$1') : arg
+}
+// What an npm .cmd shim really runs: npm writes `"%dp0%\node_modules\…\target" %*`. claude's npm package ships a
+// native bin/claude.exe (same binary as on macOS, where stdin prompts are verified), codex a .js run by node. Running
+// the target directly skips cmd.exe, which broke Claude on Windows (no output at all). null → unknown shim.
+function shimTarget(file, env = process.env) {
+  let text
+  try { text = fs.readFileSync(file, 'utf8') } catch { return null }
+  const refs = [...text.matchAll(/"%~?dp0%?\\([^"]+)"/g)].map(m => m[1]).filter(r => !/^node\.exe$/i.test(r))
+  if (!refs.length) return null
+  const target = path.join(path.dirname(file), ...refs[refs.length - 1].split('\\'))
+  if (!fs.existsSync(target)) return null
+  if (/\.exe$/i.test(target)) return { file: target, pre: [] }
+  if (!/\.[cm]?js$/i.test(target)) return null
+  const local = path.join(path.dirname(file), 'node.exe')
+  return { file: fs.existsSync(local) ? local : winResolve('node', env) || 'node', pre: [target] }
+}
+
+// macOS/Linux: plain spawn. Windows: resolve PATH, hide the console window, run what a .cmd shim points at
+// directly, and only fall back to cmd.exe for shims we can't read (e.g. npm.cmd itself).
+function spawnCli(name, args, options) {
+  if (!isWin) return spawn(name, args, options)
+  const file = winResolve(name, options.env) || name, opts = { ...options, windowsHide: true }
+  if (!isShim(file)) return spawn(file, args, opts)
+  const direct = shimTarget(file, options.env)
+  if (direct) return spawn(direct.file, [...direct.pre, ...args], opts)
+  const twice = /node_modules[\\/]\.bin[\\/][^\\/]+\.cmd$/i.test(file) // npm's local shims re-expand %*
+  const line = [path.normalize(file).replace(META, '^$1'), ...args.map(a => winArg(a, twice))].join(' ')
+  return spawn(process.env.comspec || 'cmd.exe', ['/d', '/s', '/c', `"${line}"`], { ...opts, windowsVerbatimArguments: true })
+}
+// Windows: always stdin. A command line is capped at 32,767 chars (cmd.exe: 8,191) and a fresh session's briefing is far
+// longer (~80k chars for a PM with summary + task board): the spawn fails before the CLI runs, so no output at all.
+const promptViaStdin = () => isWin
 
 const HISTORY = 30 // messages sent to an agent starting a fresh session; resumed sessions only get what's new
 const DEFAULT_SESSION_TOKEN_LIMIT = 150000
@@ -49,7 +103,7 @@ const shownPath = (dir, file) => {
   if (typeof file !== 'string') return ''
   if (!path.isAbsolute(file)) return clean(file)
   const root = path.resolve(dir), absolute = path.resolve(file), prefix = root + path.sep
-  if (process.platform === 'darwin' && absolute.toLowerCase().startsWith(prefix.toLowerCase())) return clean(absolute.slice(prefix.length))
+  if ((process.platform === 'darwin' || isWin) && absolute.toLowerCase().startsWith(prefix.toLowerCase())) return clean(absolute.slice(prefix.length))
   const relative = path.relative(root, absolute)
   return clean(relative && !relative.startsWith('..' + path.sep) && relative !== '..' ? relative : file)
 }
@@ -114,6 +168,7 @@ const CLI = {
     // prompt right after -p: --add-dir is variadic and would swallow a trailing prompt ("Input must be provided…")
     args: (p, id, a = {}) => ['-p', p, '--output-format', 'stream-json', '--verbose', ...claudePermissionArgs(a),
       ...opt('--add-dir', a.sharedChat), ...opt('--model', a.model), ...opt('--effort', a.effort), ...opt('--resume', id)],
+    stdinArgs: (id, a) => { const v = CLI.claude.args('', id, a); v.splice(1, 1); return v }, // `-p` with no prompt reads stdin
     state: () => ({ id: null, text: null, usage: null, rawCostUsd: null, permissionDenials: [], error: null, terminal: false }),
     event(e, s, { dir }) {
       s.id ||= e.session_id
@@ -148,6 +203,7 @@ const CLI = {
     // `exec resume` has no -s flag, so the sandbox goes through -c for both
     args: (p, id, a = {}) => ['exec', ...opt('--add-dir', a.sharedChat), ...(id ? ['resume'] : []), '--json', '--skip-git-repo-check', ...codexPermissionArgs(a),
       ...opt('-m', a.model), ...opt('-c', a.effort && `model_reasoning_effort="${a.effort}"`), ...(id ? [id] : []), p],
+    stdinArgs: (id, a) => CLI.codex.args('-', id, a), // "-" = read the prompt from stdin
     state: () => ({ id: null, text: null, usage: null, error: null, terminal: false }),
     event(e, s, context) {
       if (e.type === 'thread.started') s.id = e.thread_id
@@ -299,7 +355,41 @@ const accounts = () => ['agy', ...fs.readdirSync(os.homedir())
   .filter(f => /^\.(claude|codex)\d*$/.test(f) && fs.statSync(path.join(os.homedir(), f)).isDirectory())
   .map(f => f.slice(1))].sort()
 
-const chat = (dir, f = '') => path.join(dir, '.chat', f)
+// Each box of a folder has its own data folder (.chat, .chat2, …). One box per folder is open at a time: main only
+// switches while that folder has no turn, lock or merge running, so every path below follows the open box.
+// ponytail: one open box per folder; key jobs/locks by box if two boxes of one folder must run together
+const CHAT_DIR = /^\.chat\d*$/
+const openBoxes = new Map() // real project folder → '.chat2'; absent = '.chat'
+const realKey = dir => { try { return rawFs.realpathSync(dir) } catch { return path.resolve(dir) } }
+const chatName = dir => openBoxes.size && openBoxes.get(realKey(dir)) || '.chat'
+const chat = (dir, f = '') => path.join(dir, chatName(dir), f)
+function useBox(dir, name) {
+  if (!CHAT_DIR.test(name || '')) throw fail('INVALID_ARGUMENT', 'Box không hợp lệ')
+  if (name === '.chat') openBoxes.delete(realKey(dir)); else openBoxes.set(realKey(dir), name)
+}
+// Prompt templates name .chat/…; agents of another box must read and write that box's files
+const local = (dir, text) => chatName(dir) === '.chat' ? text : text.replaceAll('.chat/', chatName(dir) + '/')
+const boxNumber = name => Number(name.slice(5) || 1)
+function boxes(dir) {
+  let names = []
+  try { names = rawFs.readdirSync(dir, { withFileTypes: true }).filter(e => e.isDirectory() && CHAT_DIR.test(e.name)).map(e => e.name) } catch {}
+  return names.sort((a, b) => boxNumber(a) - boxNumber(b)).map(name => {
+    let custom = ''
+    try { custom = JSON.parse(rawFs.readFileSync(path.join(dir, name, 'project.json'), 'utf8')).name } catch {}
+    return { chat: name, name: typeof custom === 'string' && custom.trim() || path.basename(dir) + (name === '.chat' ? '' : ` ${boxNumber(name)}`) }
+  })
+}
+// New independent box next to the existing ones; copies the team (scopes on .chat/… follow the new folder) if asked
+function createBox(dir, { copyFrom = null } = {}) {
+  const taken = boxes(dir).map(b => boxNumber(b.chat)), name = `.chat${Math.max(1, ...taken) + 1}`, folder = path.join(dir, name)
+  rawFs.mkdirSync(folder)
+  if (copyFrom) {
+    const members = JSON.parse(rawFs.readFileSync(path.join(dir, copyFrom, 'agents.json'), 'utf8'))
+    const move = p => typeof p === 'string' ? p.replace(/^(\s*!?\s*)\.chat\d*\//, `$1${name}/`) : p
+    rawFs.writeFileSync(path.join(folder, 'agents.json'), JSON.stringify(members.map(a => Array.isArray(a.owns) ? { ...a, owns: a.owns.map(move) } : a), null, 2))
+  }
+  return name
+}
 const hasGlob = p => /[*?]/.test(p)
 
 function scopePattern(input, dir) {
@@ -383,7 +473,7 @@ function scopeLocks(scope, dir) {
   return locks.filter((lock, i) => !locks.slice(0, i).some(x => x.path === lock.path && x.tree === lock.tree))
 }
 
-const foldCase = p => process.platform === 'darwin' ? p.toLowerCase() : p
+const foldCase = p => process.platform === 'darwin' || isWin ? p.toLowerCase() : p // both file systems ignore case
 
 // Can one path match both segment globs? Over-approximates when both have wildcards (may say yes, never wrongly no).
 function segmentsOverlap(x, y) {
@@ -462,9 +552,9 @@ async function snapshot(dir, { signal, excludeChat = false, onlyChat = false } =
       if (signal?.aborted) throw abortError()
       const relative = prefix ? `${prefix}/${entry.name}` : entry.name
       if (entry.name === '.DS_Store') continue
-      if (!prefix && onlyChat && entry.name !== '.chat') continue
-      if (!prefix && excludeChat && entry.name === '.chat') continue
-      if (SNAPSHOT_EXCLUDED.has(relative)) continue
+      if (!prefix && onlyChat && entry.name !== chatName(root)) continue
+      if (!prefix && excludeChat && CHAT_DIR.test(entry.name)) continue
+      if (SNAPSHOT_EXCLUDED.has(relative.replace(/^\.chat\d+(?=\/|$)/, '.chat'))) continue
       if (!prefix && entry.isDirectory() && entry.name === 'dist') continue
       if (entry.name === '.git' || (entry.isDirectory() && entry.name === 'node_modules')) continue
       const absolute = path.join(folder, entry.name), stat = await rawFs.promises.lstat(absolute)
@@ -498,7 +588,10 @@ function normalizeProjectSettings(input = {}) {
     worktreesEnabled: input.worktreesEnabled ?? DEFAULT_PROJECT_SETTINGS.worktreesEnabled,
     mergeChecks: input.mergeChecks ?? DEFAULT_PROJECT_SETTINGS.mergeChecks,
     chainLimit: input.chainLimit ?? input.maxHops ?? DEFAULT_PROJECT_SETTINGS.chainLimit,
-    costCeiling: input.costCeiling ?? DEFAULT_PROJECT_SETTINGS.costCeiling }
+    costCeiling: input.costCeiling ?? DEFAULT_PROJECT_SETTINGS.costCeiling, name: input.name ?? '' }
+  if (typeof settings.name !== 'string' || settings.name.length > 80 || /[\0-\x1f\x7f]/.test(settings.name))
+    throw fail('INVALID_ARGUMENT', 'Tên box tối đa 80 ký tự, một dòng')
+  settings.name = settings.name.trim()
   if (settings.version !== 1 || typeof settings.autoSummary !== 'boolean' || typeof settings.worktreesEnabled !== 'boolean')
     throw fail('INVALID_ARGUMENT', 'Cấu hình dự án không hợp lệ')
   if (!Number.isInteger(settings.chainLimit) || settings.chainLimit < 1 || settings.chainLimit > 50
@@ -644,24 +737,25 @@ async function buildLogIndex(root, old) {
   return index
 }
 
+// caches are per box (its data folder), not per project folder: two boxes of one folder have different logs
 async function getLogIndex(dir, { force = false } = {}) {
-  const root = rawFs.realpathSync(dir), cached = logIndexes.get(root)
+  const root = rawFs.realpathSync(dir), key = chat(root), cached = logIndexes.get(key)
   if (cached && !force && !cached.dirty) {
     let stat = null
     try { stat = await rawFs.promises.stat(cached.file) } catch (e) { if (e.code !== 'ENOENT') throw e }
     if ((!stat && !cached.stat) || (stat && cached.stat && stat.dev === cached.stat.dev && stat.ino === cached.stat.ino
       && stat.size === cached.stat.size && stat.mtimeMs === cached.stat.mtimeMs)) return cached
   }
-  if (logLoads.has(root)) return logLoads.get(root)
-  const loading = buildLogIndex(root, cached).then(index => (logIndexes.set(root, index), index)).finally(() => logLoads.delete(root))
-  logLoads.set(root, loading)
+  if (logLoads.has(key)) return logLoads.get(key)
+  const loading = buildLogIndex(root, cached).then(index => (logIndexes.set(key, index), index)).finally(() => logLoads.delete(key))
+  logLoads.set(key, loading)
   return loading
 }
 
 function invalidateLogIndex(dir) {
   let root
   try { root = rawFs.realpathSync(dir) } catch { return }
-  const index = logIndexes.get(root)
+  const index = logIndexes.get(chat(root))
   if (index) index.dirty = true
 }
 
@@ -749,7 +843,7 @@ function appendRecordToIndex(index, raw, msg, start, end, stat) {
 }
 
 async function appendLogIndexed(dir, msg, { taskChanges, actor } = {}) {
-  const root = rawFs.realpathSync(dir), previous = logAppends.get(root) || Promise.resolve()
+  const root = rawFs.realpathSync(dir), key = chat(root), previous = logAppends.get(key) || Promise.resolve()
   const operation = previous.catch(() => {}).then(async () => {
     const index = await getLogIndex(root); logFailure(index)
     let taskError = null
@@ -767,8 +861,8 @@ async function appendLogIndexed(dir, msg, { taskChanges, actor } = {}) {
     appendRecordToIndex(index, raw, msg, start, start + raw.length, stat)
     return { message: { ...msg, seq: index.records.length - 1 }, generation: index.generation, total: index.records.length, totals: logTotals(index), taskError }
   })
-  logAppends.set(root, operation)
-  return operation.finally(() => { if (logAppends.get(root) === operation) logAppends.delete(root) })
+  logAppends.set(key, operation)
+  return operation.finally(() => { if (logAppends.get(key) === operation) logAppends.delete(key) })
 }
 
 function appendLog(dir, msg) {
@@ -957,7 +1051,7 @@ function migrateTaskScope(dir) {
   if (index < 0) return { changed: false, reason: 'MISSING_PM' }
   const pm = normalizeScope(original[index], dir)
   if (pm.readOnly || pm.scopeNeedsReview) return { changed: false, reason: 'REVIEW' }
-  const required = ['.chat/tasks.json', '.chat/tasks.json.tmp']
+  const required = [`${chatName(dir)}/tasks.json`, `${chatName(dir)}/tasks.json.tmp`]
   if (!pm.owns.length || required.every(file => scopeAllows(pm, file))) return { changed: false }
   const next = original.map((agent, i) => i === index ? { ...agent, owns: [...ownsList(pm), ...required.filter(file => !scopeAllows(pm, file))] } : agent)
   const file = chat(dir, 'agents.json'), backup = chat(dir, 'agents.json.pre-sprint-3.bak'), temp = chat(dir, 'agents.json.tmp')
@@ -1024,14 +1118,14 @@ function buildTaskBoardFromEvents(definitions, latest) {
 }
 
 function taskBoard(dir, index = null) {
-  const root = fs.realpathSync(dir), file = chat(root, 'tasks.json'), cached = taskCache.get(root)
+  const root = fs.realpathSync(dir), file = chat(root, 'tasks.json'), cached = taskCache.get(chat(root))
   try {
     if (index?.taskError) throw fail('DATA_ERROR', index.taskError)
     const boardFor = definitions => index ? buildTaskBoardFromEvents(definitions, index.taskEvents) : buildTaskBoard(definitions, readLog(root, { strict: true }))
     if (!rawFs.existsSync(file)) {
       if (cached?.hadFile) throw fail('NOT_FOUND', 'File task đã bị xóa')
       const board = boardFor([])
-      taskCache.set(root, { board, hadFile: false, known: new Map(), maxId: 0n })
+      taskCache.set(chat(root), { board, hadFile: false, known: new Map(), maxId: 0n })
       return board
     }
     const stat = rawFs.statSync(file)
@@ -1055,7 +1149,7 @@ function taskBoard(dir, index = null) {
     const nextKnown = new Map(known)
     for (const task of definitions) nextKnown.set(task.id, { createdAt: task.createdAt, assignee: task.assignee,
       title: task.title, spec: task.spec, updatedAt: task.updatedAt })
-    taskCache.set(root, { board, hadFile: true, known: nextKnown, active, deleted,
+    taskCache.set(chat(root), { board, hadFile: true, known: nextKnown, active, deleted,
       maxId: definitions.reduce((max, task) => taskNumber(task.id) > max ? taskNumber(task.id) : max, cached?.maxId || 0n) })
     return board
   } catch (e) {
@@ -1332,7 +1426,7 @@ function resolveProjectFile(dir, href, fromFile = null) {
     if (!inside(root, fromReal)) throw fail('OUTSIDE_PROJECT', 'File gốc nằm ngoài dự án')
     base = path.dirname(fromReal)
   }
-  const rootRelative = decoded.startsWith('reports/') || decoded.startsWith('.chat/')
+  const rootRelative = decoded.startsWith('reports/') || /^\.chat\d*\//.test(decoded)
   const candidate = path.isAbsolute(decoded) ? path.resolve(decoded) : path.resolve(rootRelative ? root : base, ...decoded.split('/'))
   if (!inside(root, candidate)) throw fail('OUTSIDE_PROJECT', 'File nằm ngoài dự án')
   let real
@@ -1344,7 +1438,7 @@ function resolveProjectFile(dir, href, fromFile = null) {
   if (!stat.isFile()) throw fail('UNSUPPORTED', 'Đường dẫn không phải file')
   const relative = path.relative(root, real).split(path.sep).join('/'), extension = path.extname(real).toLowerCase()
   return { root, real, relative, name: path.basename(real),
-    canOpenExternal: (relative.startsWith('reports/') || relative.startsWith('.chat/')) && EXTERNAL_EXTENSIONS.has(extension) }
+    canOpenExternal: (relative.startsWith('reports/') || /^\.chat\d*\//.test(relative)) && EXTERNAL_EXTENSIONS.has(extension) }
 }
 
 async function readProjectFile(dir, href, fromFile = null) {
@@ -1402,7 +1496,7 @@ function taskContext(dir, agent, board = taskBoard(dir)) {
     : `${isPm ? 'Task chưa xong của nhóm' : 'Task chưa xong của bạn'}: ${JSON.stringify(visible)}\nĐã xong ${done} task.`
   const protocol = `${isPm ? 'PM được đổi trạng thái mọi task' : 'Muốn đổi trạng thái task của mình sau khi làm xong'} (todo/doing/review/done), thêm đúng một block cuối câu trả lời:\n\`\`\`task-status\n[{"id":"T1","status":"review","expectedRevision":"revision ở trên"}]\n\`\`\``
   const pm = isPm
-    ? '\nKhi tạo/sửa task: luôn đọc .chat/tasks.json mới nhất, giữ task cũ, không ghi status; ghi .chat/tasks.json.tmp rồi rename. Task mới dùng ID T tăng dần, đúng schema Sprint 3.' : ''
+    ? local(dir, '\nKhi tạo/sửa task: luôn đọc .chat/tasks.json mới nhất, giữ task cũ, không ghi status; ghi .chat/tasks.json.tmp rồi rename. Task mới dùng ID T tăng dần, đúng schema Sprint 3.') : ''
   return `\n\n## Bảng task\n${data}\n${protocol}${pm}`
 }
 
@@ -1420,7 +1514,7 @@ Không gửi cùng task-status. Block protocol không tính vào giới hạn 5 
 function handoffContext(agent) {
   if (agent.resume === false || !(agent.sessionTokenLimit > 0)) return ''
   return `\n\n## Bàn giao phiên
-Ở kết quả cuối cùng, thêm một block top-level \`\`\`handoff gồm 3–5 dòng không rỗng: việc hiện tại, quyết định/ràng buộc, file/check đã làm, phần còn dở và bước kế. App sẽ lưu block; không tự sửa .chat/handoff. Nếu có task-status, đặt handoff trước task-status. Block protocol không tính vào giới hạn 5 dòng chat.`
+Ở kết quả cuối cùng, thêm một block top-level \`\`\`handoff gồm 3–5 dòng không rỗng: việc hiện tại, quyết định/ràng buộc, file/check đã làm, phần còn dở và bước kế. App sẽ lưu block; không tự sửa thư mục handoff. Nếu có task-status, đặt handoff trước task-status. Block protocol không tính vào giới hạn 5 dòng chat.`
 }
 function handoffNote(handoff) {
   if (!handoff) return ''
@@ -1431,12 +1525,12 @@ function handoffNote(handoff) {
 function prompt(dir, agent, session, log = readLog(dir), board = taskBoard(dir), summary = null, options = {}) {
   agent = { ...agent, projectDir: dir }
   const workspace = agent.cwd && rawFs.realpathSync(agent.cwd) !== rawFs.realpathSync(dir)
-    ? `\nCode của lượt này nằm trong worktree hiện tại (${agent.cwd}); .chat là dữ liệu chung của box. Chỉ sửa code trong cwd này.` : ''
+    ? `\nCode của lượt này nằm trong worktree hiện tại (${agent.cwd}); ${chatName(dir)} là dữ liệu chung của box. Chỉ sửa code trong cwd này.` : ''
   if (session && !session.adopted) return `## Tin nhắn mới trong nhóm
 ${fmt(log.slice(session.seen))}
 
-(Vai hiện tại: ${agent.role}${scope(agent)}. Memory chung có thể đã cập nhật ở .chat/memory.md.)${workspace}
-${RULES}
+(Vai hiện tại: ${agent.role}${scope(agent)}. Memory chung có thể đã cập nhật ở ${chatName(dir)}/memory.md.)${workspace}
+${local(dir, RULES)}
 ${taskContext(dir, agent, board)}
 ${commandContext(agent)}
 ${handoffContext(agent)}
@@ -1450,9 +1544,9 @@ Thành viên:
 ${members}
 @user: End-User (khách hàng)
 
-${RULES}
+${local(dir, RULES)}
 
-## Memory chung (.chat/memory.md)
+## Memory chung (${chatName(dir)}/memory.md)
 ${fs.readFileSync(chat(dir, 'memory.md'), 'utf8')}
 ${summary ? `\n## Tóm tắt lịch sử\n${summary}\n` : ''}
 ${handoffNote(options.handoff)}
@@ -1572,11 +1666,17 @@ async function promptIndexed(dir, agent, session, options = {}) {
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms))
 function groupAlive(pid) {
   if (!pid) return false
-  try { process.kill(-pid, 0); return true }
+  try { process.kill(isWin ? pid : -pid, 0); return true } // Windows has no process groups; stopGroup uses taskkill /T
   catch (e) { if (e.code === 'ESRCH') return false; throw e }
 }
 async function stopGroup(pid) {
   if (!pid) return
+  if (isWin) {
+    await new Promise(done => execFile('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true }, () => done()))
+    for (let i = 0; i < 40 && groupAlive(pid); i++) await delay(50)
+    if (groupAlive(pid)) throw new Error('Không thể dừng hết tiến trình CLI')
+    return
+  }
   try { process.kill(-pid, 'SIGTERM') }
   catch (e) { if (e.code === 'ESRCH') return; throw e }
   await delay(1000)
@@ -1596,16 +1696,22 @@ function exec(dir, agent, session, { signal, onProgress, onSession, onSpawn, cos
   const context = { dir, resumed: !!session, costBaseline }
   const state = cli.state(context)
   return new Promise((resolve, reject) => {
-    // stdin must be closed: codex/claude wait for EOF on a piped stdin
+    // stdin must be closed (or fed and ended): codex/claude wait for EOF on a piped stdin
+    const viaStdin = !!cli.stdinArgs && promptViaStdin()
     let c
-    try { c = spawn(acc.bin, cli.args(p, session?.id, agent), { cwd, env: acc.env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] }) }
+    try {
+      c = spawnCli(acc.bin, viaStdin ? cli.stdinArgs(session?.id, agent) : cli.args(p, session?.id, agent),
+        { cwd, env: acc.env, detached: true, stdio: [viaStdin ? 'pipe' : 'ignore', 'pipe', 'pipe'] })
+      if (viaStdin) { c.stdin.on('error', () => {}); c.stdin.end(p) }
+    }
     catch (e) { return reject(e) }
     let se = '', childError, killError, lastLabel, lastId, termination = Promise.resolve()
+    let events = 0, junk = '' // for diagnosing a CLI that ends without a final result
     c.stdout.setEncoding('utf8')
     const lines = readline.createInterface({ input: c.stdout, crlfDelay: Infinity })
     lines.on('line', line => {
       let event
-      try { event = JSON.parse(line) } catch { return }
+      try { event = JSON.parse(line); events++ } catch { if (line.trim()) junk = (junk + line.trim() + '\n').slice(-400); return }
       try {
         const label = clean(cli.event(event, state, context))
         if (state.id && state.id !== lastId) {
@@ -1641,7 +1747,12 @@ function exec(dir, agent, session, { signal, onProgress, onSession, onSpawn, cos
       if (!signal?.aborted && code && !result.error) result.error = se.trim().slice(-500) || `exit ${code}`
       // parser-level errors ("no final result") hide why the CLI died; stderr usually says
       else if (!signal?.aborted && result.error && se.trim() && !result.error.includes(se.trim().slice(-200))) result.error += ` — ${se.trim().slice(-300)}`
-      if (childError && !result.error) result.error = childError.message
+      // no final result: say how it ended (exit code, events seen, stray stdout), the only clues when stderr is empty
+      if (!signal?.aborted && /^Thiếu kết quả cuối/.test(result.error || ''))
+        result.error = result.error.replace(/^(Thiếu kết quả cuối từ \S+)/, `$1 (mã thoát ${code ?? '?'}, ${events} sự kiện${viaStdin ? ', prompt qua stdin' : ''})`)
+          + (junk ? ` — stdout: ${junk.trim().slice(-300)}` : '')
+      // the CLI could not even start (ENOENT, ENAMETOOLONG…): say that, not just "no final result"
+      if (childError && !result.error?.includes(childError.message)) result.error = result.error ? `${result.error} — ${childError.message}` : childError.message
       if (orphanState && !result.error) result.error = 'Tiến trình con vẫn còn chạy sau khi CLI kết thúc'
       resolve({ ...result, id: result.id || session?.id, seen, rawCostUsd: state.rawCostUsd, killError, orphanState, pgid: c.pid })
     })
@@ -1663,7 +1774,7 @@ function runCommand(dir, command, { signal, onProgress, onSpawn } = {}) {
   onProgress?.(`chạy ${command}…`)
   return new Promise(resolve => {
     let child
-    try { child = spawn(executable, args, { cwd: dir, shell: false, detached: true, stdio: ['ignore', 'pipe', 'pipe'] }) }
+    try { child = spawnCli(executable, args, { cwd: dir, shell: false, detached: true, stdio: ['ignore', 'pipe', 'pipe'] }) }
     catch (e) { return resolve({ command, exitCode: null, signal: null, stdout: '', stderr: '', truncated: false,
       durationMs: Math.max(0, Math.round(performance.now() - started)), error: e.message }) }
     let remaining = 32768, truncated = false, childError, killError, termination = Promise.resolve()
@@ -1716,6 +1827,21 @@ const emptyReply = agent => `Bạn chưa gửi tin trả lời. Hãy gửi tin t
 // What each CLI says when a --resume id it cannot open: claude "No conversation found with session ID",
 // codex "no rollout found for thread id". agy silently starts a new conversation instead.
 const MISSING_SESSION = /no conversation found|no rollout found|conversation not found|session not found/i
+
+// Connection test: one tiny turn through exactly the path a real turn takes (account env, model/effort/permission
+// flags, stdin on Windows, stream parser) in a throwaway session. Catches a missing CLI, a logged-out account, a bad
+// model or a down service before a real task hits it.
+async function probe(dir, agent, { timeoutMs = 120000 } = {}) {
+  const started = performance.now(), signal = AbortSignal.timeout(timeoutMs)
+  let r
+  try { r = await exec(dir, { ...agent, resume: false }, null, { signal, seen: 0, cwd: dir,
+    promptText: 'Kiểm tra kết nối từ Agent Chat. Không làm gì khác, chỉ trả lời đúng một chữ: OK' }) }
+  catch (e) { r = { error: e.message } }
+  const ms = Math.round(performance.now() - started), text = String(r.text || '').trim()
+  if (signal.aborted) return { ok: false, ms, error: `Quá ${timeoutMs / 1000} giây không có trả lời` }
+  if (r.error) return { ok: false, ms, error: r.error }
+  return text ? { ok: true, ms, text: text.slice(0, 80) } : { ok: false, ms, error: 'CLI chạy xong nhưng không trả lời gì' }
+}
 
 async function run(dir, agent, options = {}) {
   const started = performance.now(), { signal, onProgress, onSpawn } = options
@@ -1862,10 +1988,10 @@ async function run(dir, agent, options = {}) {
     orphanState: r.orphanState || orphanState, pgid: r.pgid || pgid }
 }
 
-module.exports = { CLI, account, accounts, cliSessions, models, init, readLog, appendLog, appendLogIndexed, getLogIndex, invalidateLogIndex, logPage, searchLog, logTotals,
+module.exports = { CHAT_DIR, chat, chatName, useBox, boxes, createBox, CLI, account, accounts, cliSessions, models, init, readLog, appendLog, appendLogIndexed, getLogIndex, invalidateLogIndex, logPage, searchLog, logTotals,
   normalizeProjectSettings, projectSettings, writeProjectSettings, summaryBatch, acceptSummary, materializeSummary, recoverSummary,
   team, normalizeTeam, saveTeam, teamRevision, normalizePermissions, permissionRules, normalizePermissionDenials,
   timeoutMinutes, sessionTokenLimit, sessions, setSession, sessionRotationPending, readHandoff, writeHandoff,
-  mentions, files, normalizeScope, ownsList, normalizeAllowedCommands, scopeAllows, scopeLocks, lockConflict, snapshot, changedPaths, prompt, promptIndexed, run, runCommand, groupAlive,
+  mentions, files, normalizeScope, ownsList, probe, winArg, spawnCli, shimTarget, normalizeAllowedCommands, scopeAllows, scopeLocks, lockConflict, snapshot, changedPaths, prompt, promptIndexed, run, runCommand, groupAlive,
   migrateTaskScope, parseTaskDefinitions, buildTaskBoard, taskBoard, taskBoardIndexed, parseTaskStatusBlock, parseRunCommandBlock, parseHandoffBlock, validateTaskChanges,
   resolveProjectFile, readProjectFile }

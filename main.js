@@ -6,8 +6,8 @@ const fs = require('fs'), path = require('path')
 const rawFs = process.versions.electron ? require('original-fs') : fs
 const core = require('./core')
 
-// Apps launched from Finder don't get the shell PATH, so claude/codex/agy wouldn't be found.
-try {
+// Apps launched from Finder don't get the shell PATH, so claude/codex/agy wouldn't be found. (Windows apps inherit PATH.)
+if (process.platform !== 'win32') try {
   const out = execFileSync(process.env.SHELL || '/bin/zsh', ['-ilc', 'printf "__PATH__%s" "$PATH"'], { encoding: 'utf8' })
   process.env.PATH = out.split('__PATH__').pop()
 } catch {}
@@ -46,7 +46,8 @@ const withGitLock = (root, action) => {
   return current.finally(() => { if (gitLocks.get(root) === current) gitLocks.delete(root) })
 }
 const worktreeBase = root => path.join(app.getPath('userData'), 'worktrees', createHash('sha256').update(root).digest('hex'))
-const worktreeFile = root => path.join(root, '.chat', 'worktrees.json')
+const worktreeFile = root => core.chat(root, 'worktrees.json')
+const isChatPath = file => /^\.chat\d*(\/|$)/.test(file) // any box's data folder, never committed or merged
 function readWorktrees(root) {
   try {
     const data = JSON.parse(fs.readFileSync(worktreeFile(root), 'utf8'))
@@ -84,8 +85,8 @@ async function repoProbe(root, { requireClean = false } = {}) {
   if (fs.existsSync(path.join(root, '.gitmodules'))) throw gitError('UNSUPPORTED_REPO', 'Sprint này chưa hỗ trợ submodule')
   const sparse = await git(root, ['config', '--bool', 'core.sparseCheckout']).catch(() => ({ stdout: '' }))
   if (sparse.stdout.trim() === 'true') throw gitError('UNSUPPORTED_REPO', 'Sprint này chưa hỗ trợ sparse checkout')
-  const trackedChat = (await git(root, ['ls-files', '-z', '--', '.chat'])).stdout
-  if (trackedChat) throw gitError('TRACKED_RUNTIME', '.chat đang được Git theo dõi; hãy bỏ khỏi index trước')
+  const trackedChat = (await git(root, ['ls-files', '-z', '--', '.chat', core.chatName(root)])).stdout
+  if (trackedChat) throw gitError('TRACKED_RUNTIME', `${core.chatName(root)} đang được Git theo dõi; hãy bỏ khỏi index trước`)
   for (const marker of ['MERGE_HEAD', 'REBASE_HEAD', 'CHERRY_PICK_HEAD']) {
     const markerPath = (await git(root, ['rev-parse', '--git-path', marker])).stdout.trim()
     if (fs.existsSync(path.resolve(root, markerPath))) throw gitError('UNSUPPORTED_REPO', 'Repo đang có thao tác Git chưa hoàn tất')
@@ -98,13 +99,13 @@ async function ensureRuntimeExclude(root) {
   const relative = (await git(root, ['rev-parse', '--git-path', 'info/exclude'])).stdout.trim(), file = path.resolve(root, relative)
   let text = ''
   try { text = fs.readFileSync(file, 'utf8') } catch {}
-  const existing = new Set(text.split(/\r?\n/)), missing = ['.chat', '.chat/', 'node_modules/', 'dist/', '.DS_Store'].filter(line => !existing.has(line))
+  const existing = new Set(text.split(/\r?\n/)), missing = ['.chat', '.chat/', '.chat[0-9]*', 'node_modules/', 'dist/', '.DS_Store'].filter(line => !existing.has(line))
   if (missing.length) {
     fs.mkdirSync(path.dirname(file), { recursive: true })
     fs.appendFileSync(file, `${text && !text.endsWith('\n') ? '\n' : ''}${text.includes('# agent-chat runtime') ? '' : '# agent-chat runtime\n'}${missing.join('\n')}\n`)
   }
-  const ignored = await git(root, ['check-ignore', '-q', '.chat/log.jsonl']).then(() => true).catch(() => false)
-  if (!ignored) throw gitError('UNSUPPORTED_REPO', 'Không thể loại .chat khỏi Git')
+  const ignored = await git(root, ['check-ignore', '-q', `${core.chatName(root)}/log.jsonl`]).then(() => true).catch(() => false)
+  if (!ignored) throw gitError('UNSUPPORTED_REPO', `Không thể loại ${core.chatName(root)} khỏi Git`)
 }
 
 async function verifyWorkspace(root, record) {
@@ -117,9 +118,9 @@ async function verifyWorkspace(root, record) {
   const workCommonRaw = (await git(expected, ['rev-parse', '--git-common-dir'])).stdout.trim()
   const rootCommon = fs.realpathSync(path.resolve(root, rootCommonRaw)), workCommon = fs.realpathSync(path.resolve(expected, workCommonRaw))
   if (rootCommon !== workCommon) throw gitError('CONFIG_ERROR', 'Workspace không thuộc repo của box')
-  const shared = path.join(expected, '.chat')
+  const shared = path.join(expected, core.chatName(root))
   try {
-    if (!fs.lstatSync(shared).isSymbolicLink() || fs.realpathSync(shared) !== fs.realpathSync(path.join(root, '.chat')))
+    if (!fs.lstatSync(shared).isSymbolicLink() || fs.realpathSync(shared) !== fs.realpathSync(core.chat(root)))
       throw new Error('bad link')
   } catch { throw gitError('CONFIG_ERROR', '.chat trong workspace không trỏ đúng dữ liệu chung') }
   return expected
@@ -159,7 +160,7 @@ async function prepareWorkspace(root, agent) {
       const cwd = managedPath(root, 'agents', id)
       fs.mkdirSync(path.dirname(cwd), { recursive: true })
       await git(root, ['worktree', 'add', '-b', branch, cwd, probe.sha])
-      fs.symlinkSync(path.join(root, '.chat'), path.join(cwd, '.chat'), 'dir')
+      fs.symlinkSync(core.chat(root), path.join(cwd, core.chatName(root)), process.platform === 'win32' ? 'junction' : 'dir') // junction: no admin rights needed
       record = { id, agent: agent.name, branch, path: cwd, baseSha: probe.sha }
       registry.agents.push(record); writeWorktrees(root, registry)
     }
@@ -211,7 +212,7 @@ async function emitWorktreeState(root) {
 }
 
 function initialIgnore(existing = '') {
-  const lines = ['.chat', '.chat/', 'node_modules/', 'dist/', '.DS_Store', '.env*', '*.pem', '*.key', '*.p12']
+  const lines = ['.chat', '.chat/', '.chat[0-9]*', 'node_modules/', 'dist/', '.DS_Store', '.env*', '*.pem', '*.key', '*.p12']
   let text = existing
   for (const line of lines) if (!new RegExp(`(^|\\n)${line.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}($|\\n)`).test(text)) text += `${text && !text.endsWith('\n') ? '\n' : ''}${line}\n`
   return text
@@ -221,7 +222,7 @@ async function gitInitPreview(root) {
   const files = [], fingerprints = []
   async function walk(folder, prefix = '') {
     for (const entry of await rawFs.promises.readdir(folder, { withFileTypes: true })) {
-      if ((!prefix && ['.git', '.chat', 'node_modules', 'dist'].includes(entry.name)) || entry.name === '.DS_Store'
+      if ((!prefix && (['.git', 'node_modules', 'dist'].includes(entry.name) || core.CHAT_DIR.test(entry.name))) || entry.name === '.DS_Store'
         || entry.name.startsWith('.env') || /\.(?:pem|key|p12)$/i.test(entry.name)) continue
       const relative = prefix ? `${prefix}/${entry.name}` : entry.name, absolute = path.join(folder, entry.name)
       if (entry.isDirectory()) await walk(absolute, relative)
@@ -291,7 +292,7 @@ async function commitWorkspace(job, result, changed, auditComplete, outside) {
     const cwd = await verifyWorkspace(job.root, record), beforeHead = await gitHead(cwd)
     if (beforeHead !== job.baseSha) throw gitError('TARGET_CHANGED', 'HEAD workspace đã đổi trong lúc agent chạy')
     const files = await workspaceChanges(cwd)
-    if (!auditComplete || outside.length || files.some(file => !changed.includes(file) || file === '.chat' || file.startsWith('.chat/') || !core.scopeAllows(job.scope, file))) {
+    if (!auditComplete || outside.length || files.some(file => !changed.includes(file) || isChatPath(file) || !core.scopeAllows(job.scope, file))) {
       if (files.length) throw gitError('SCOPE_AUDIT', 'Không tự commit vì thay đổi chưa qua kiểm tra phạm vi', { files })
       return null
     }
@@ -353,7 +354,7 @@ async function processMerge(root, queued) {
     const base = (await git(root, ['merge-base', probe.sha, entry.headSha])).stdout.trim()
     const files = nul((await git(root, ['diff', '--no-renames', '--name-only', '-z', `${base}..${entry.headSha}`])).stdout)
     const scope = core.normalizeScope(owner, root)
-    if (files.some(file => !core.scopeAllows(scope, file) || file === '.chat' || file.startsWith('.chat/')))
+    if (files.some(file => !core.scopeAllows(scope, file) || isChatPath(file)))
       throw gitError('SCOPE_AUDIT', 'Nhánh chứa file ngoài phạm vi', { files })
     entry.baseSha = probe.sha
     fs.mkdirSync(path.dirname(integration), { recursive: true })
@@ -566,7 +567,7 @@ async function route(dir, msg, hops, chain = null) {
 
 // One job at a time per agent; different agents run in parallel.
 function sharedMetadataLocks(scope, root) {
-  const files = ['.chat/memory.md', '.chat/tasks.json', '.chat/tasks.json.tmp']
+  const files = ['memory.md', 'tasks.json', 'tasks.json.tmp'].map(file => `${core.chatName(root)}/${file}`)
   return files.filter(file => scopeAllowsForJob(scope, file)).map(file => ({ path: path.join(root, ...file.split('/')), tree: false }))
 }
 const scopeAllowsForJob = (scope, file) => !scope.readOnly && (!scope.owns.length || core.scopeAllows(scope, file))
@@ -804,11 +805,11 @@ async function executeJob(job) {
         if (result.emptyResponse) throw new Error('PM không trả nội dung tóm tắt')
         const summary = await core.acceptSummary(job.root, job.summaryBatch, result.text, job.runId)
         result.logExtra = { kind: 'summary', summary }
-        result.text = `Đã cập nhật [tóm tắt lịch sử](.chat/summary.md) đến tin ${summary.through}.`
+        result.text = `Đã cập nhật [tóm tắt lịch sử](${core.chatName(job.root)}/summary.md) đến tin ${summary.through}.`
       }
       msg = await terminal(job, result)
       if (result.logExtra?.summary) {
-        try { core.materializeSummary(job.root, result.logExtra.summary); notifyProjectChanged(job.root, { files: true, file: '.chat/summary.md' }) }
+        try { core.materializeSummary(job.root, result.logExtra.summary); notifyProjectChanged(job.root, { files: true, file: `${core.chatName(job.root)}/summary.md` }) }
         catch (e) { console.error('Không ghi được summary.md; sẽ khôi phục khi mở box:', e) }
       }
       if (job.spawned) await warning(job, paths, auditComplete)
@@ -872,7 +873,7 @@ async function executeJob(job) {
   scheduleSummary(job.root).catch(e => console.error(e))
 }
 
-const registryFile = root => path.join(root, '.chat', 'locks.json')
+const registryFile = root => core.chat(root, 'locks.json')
 function registryRecords(root) {
   const live = jobs.filter(j => j.root === root && j.reserved).map(j => ({ runId: j.runId, name: j.name, owns: core.ownsList(j.scope),
     readOnly: j.scope.readOnly, locks: j.locks, pgid: j.pgid, startedAt: j.claimedAt, workspaceId: j.workspaceId || null,
@@ -904,8 +905,9 @@ function keepOrphan(job, state) {
 }
 
 const insideRoot = (root, file) => {
-  const a = process.platform === 'darwin' ? root.toLowerCase() : root
-  const b = process.platform === 'darwin' ? file.toLowerCase() : file
+  const fold = ['darwin', 'win32'].includes(process.platform)
+  const a = fold ? root.toLowerCase() : root
+  const b = fold ? file.toLowerCase() : file
   return b === a || b.startsWith(a + path.sep)
 }
 function orphanState(pgid) {
@@ -1024,7 +1026,7 @@ async function refreshLog(root) {
   if (previous && previous !== index.generation) { clearPending(root); win?.webContents.send('log-reset', root, { generation: index.generation }) }
 }
 function viewerRoot(root, workspaceId, href = '') {
-  if (!workspaceId || String(href).split(/[?#]/, 1)[0].startsWith('.chat/')) return root
+  if (!workspaceId || isChatPath(String(href).split(/[?#]/, 1)[0])) return root
   const record = readWorktrees(root).agents.find(item => item.id === workspaceId)
   if (!record) throw gitError('INVALID_ARGUMENT', 'Workspace không còn tồn tại')
   const expected = managedPath(root, 'agents', record.id)
@@ -1043,7 +1045,7 @@ function watchProject(dir, file = null, workspaceId = null) {
   const folders = new Map(), add = (folder, role) => {
     const roles = folders.get(folder) || new Set(); roles.add(role); folders.set(folder, roles)
   }
-  add(path.join(root, '.chat'), 'chat'); add(path.join(contentRoot, 'reports'), 'reports')
+  add(core.chat(root), 'chat'); add(path.join(contentRoot, 'reports'), 'reports')
   if (current) add(path.dirname(current.real), 'file')
   try {
     for (const [folder, roles] of folders) {
@@ -1143,21 +1145,65 @@ const apiError = error => {
 }
 const apiCall = async action => { try { return { ok: true, ...await action() } } catch (e) { return apiError(e) } }
 
-ipcMain.handle('projects', event => { validSender(event); return projects() })
+// One box per folder is open at a time (core.chatName). Switching while that folder still has turns, locks, merges or a
+// permission grant in flight would land their results in the other box, so it waits until the folder is idle.
+function assertIdle(root) {
+  if ([...jobs, ...orphans].some(x => x.root === root) || mergeWorkers.has(root) || mergeControllers.has(root) || gitLocks.has(root)
+    || [...permissionReservations.keys()].some(key => key.startsWith(root + '\0'))) {
+    const current = core.boxes(root).find(box => box.chat === core.chatName(root))?.name || path.basename(root)
+    throw new Error(`Box «${current}» cùng thư mục còn agent đang chạy hoặc khóa cũ. Chờ xong (hoặc mở lại box đó để Dừng) rồi chuyển.`)
+  }
+}
+function switchBox(root, name) {
+  if (!core.boxes(root).some(box => box.chat === name)) throw new Error('Box không còn tồn tại')
+  assertIdle(root)
+  clearPending(root); loadedRoots.delete(root); summaryUnavailable.delete(root)
+  core.useBox(root, name)
+}
+
+ipcMain.handle('projects', event => {
+  validSender(event)
+  return projects().flatMap(dir => {
+    const found = core.boxes(dir)
+    return (found.length ? found : [{ chat: '.chat', name: path.basename(dir) }]).map(box => ({ dir, ...box }))
+  })
+})
 ipcMain.handle('pick', async event => {
   validSender(event)
   const r = await dialog.showOpenDialog(win, { properties: ['openDirectory', 'createDirectory'] })
   if (r.canceled) return null
-  const dir = rootOf(r.filePaths[0])
+  let picked = r.filePaths[0], chat = null
+  // picked a box's data folder itself (e.g. copied from another machine) → open that box of the folder containing it
+  if (core.CHAT_DIR.test(path.basename(picked).toLowerCase()) && fs.existsSync(path.join(picked, 'log.jsonl'))) {
+    chat = path.basename(picked).toLowerCase(); picked = path.dirname(picked)
+  }
+  const dir = rootOf(picked), existing = core.boxes(dir)
+  if (!chat && existing.length) {
+    const current = existing.find(box => box.chat === core.chatName(dir)) || existing[0]
+    const answer = await dialog.showMessageBox(win, { type: 'question', buttons: ['Huỷ', 'Mở box có sẵn', 'Tạo box mới'], defaultId: 2, cancelId: 0,
+      message: `Thư mục này đã có box: ${existing.map(box => box.name).join(', ')}`,
+      detail: 'Box mới có lịch sử chat, memory, task và phiên agent riêng, không đụng tới box cũ.',
+      checkboxLabel: `Box mới dùng lại thành viên của «${current.name}»`, checkboxChecked: true })
+    if (answer.response === 0) return null
+    chat = current.chat
+    if (answer.response === 2) {
+      assertIdle(dir)
+      chat = core.createBox(dir, { copyFrom: answer.checkboxChecked ? current.chat : null })
+    }
+  }
+  if (chat && chat !== core.chatName(dir)) switchBox(dir, chat)
   core.init(dir)
+  // git repo: keep .chat2… out of `git status`, or the folder looks dirty and worktree merges stop (not a repo → no-op)
+  if (chat && chat !== '.chat') await ensureRuntimeExclude(dir).catch(() => {})
   loadOrphans(dir)
   try { migrateTaskScope(dir) } catch (e) { console.error('Không migrate được quyền task:', e) }
   fs.writeFileSync(projectsFile(), JSON.stringify([dir, ...projects().filter(d => d !== dir)]))
-  return dir
+  return { dir, chat: core.chatName(dir) }
 })
-ipcMain.handle('open', async (event, dir) => {
+ipcMain.handle('open', async (event, dir, chat = null) => {
   validSender(event)
   const root = knownProject(dir)
+  if (chat != null && chat !== core.chatName(root)) switchBox(root, chat) // no chat = stay in the open box (refreshes)
   core.init(root); loadOrphans(root)
   try { migrateTaskScope(root) } catch (e) { console.error('Không migrate được quyền task:', e) }
   await core.recoverSummary(root).catch(e => console.error('Không khôi phục được summary.md:', e))
@@ -1167,7 +1213,7 @@ ipcMain.handle('open', async (event, dir) => {
   if (config.settings.worktreesEnabled) pumpMerge(root).catch(e => console.error(e))
   return { history, totals: core.logTotals(index), settings: config.settings, settingsRevision: config.revision,
     team: core.team(root), teamRevision: core.teamRevision(root), permissionRequests: permissionRequests(root),
-    sessions: sessionMap(root), active: activeFor(root), orphanLocks: orphanFor(root) }
+    sessions: sessionMap(root), active: activeFor(root), orphanLocks: orphanFor(root), chat: core.chatName(root) }
 })
 ipcMain.handle('logPage', (event, dir, options) => { validSender(event); return apiCall(async () => ({ page: await core.logPage(knownProject(dir), options) })) })
 ipcMain.handle('searchLog', (event, dir, options) => { validSender(event); return apiCall(() => core.searchLog(knownProject(dir), options)) })
@@ -1199,6 +1245,17 @@ ipcMain.handle('saveProjectSettings', (event, dir, request) => {
     if (saved.settings.autoSummary) scheduleSummary(root).catch(e => console.error(e))
     if (saved.settings.worktreesEnabled) pumpMerge(root).catch(e => console.error(e))
     return saved
+  })
+})
+// Tests the team as it stands in the ⚙ form (saved or not), all agents in parallel.
+ipcMain.handle('probeAgents', (event, dir, members) => {
+  validSender(event)
+  return apiCall(async () => {
+    const root = knownProject(dir)
+    const team = Array.isArray(members) ? core.normalizeTeam(root, members) : core.team(root)
+    const results = await Promise.all(team.map(async agent =>
+      ({ name: agent.name, cli: agent.cli, model: agent.model || '', ...await core.probe(root, agent) })))
+    return { results }
   })
 })
 ipcMain.handle('worktreeState', (event, dir) => { validSender(event); return apiCall(async () => ({ state: await worktreeState(knownProject(dir)) })) })

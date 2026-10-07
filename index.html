@@ -357,6 +357,11 @@
     box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px var(--ink);
     transform: scale(1.18);
   }
+  .probe-results { padding: 10px 20px; border-top: var(--bw) solid var(--ink); background: var(--bg); max-height: 30vh; overflow-y: auto; display: grid; gap: 6px; font-size: 13px; flex: none; }
+  .probe-row b { margin-right: 6px; }
+  .probe-row.good b { color: #1f8a5b; }
+  .probe-row.bad b { color: #e0284f; }
+  .probe-err { margin-top: 2px; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; color: var(--muted); white-space: pre-wrap; word-break: break-word; }
   .dfoot { display: flex; gap: 10px; align-items: center; padding: 14px 20px; border-top: var(--bw) solid var(--ink); background: var(--surface); flex: none; }
   #err { flex: 1; color: #e0284f; font-weight: 700; font-size: 13px; }
   .none { font-size: 13px; color: var(--muted); padding: 4px 6px; }
@@ -621,6 +626,10 @@
             <small>Cài đặt tiến trình tóm tắt và ghi nhớ của nhóm</small>
           </div>
           <div class="proj-settings-row">
+            <label for="setting-box-name"><b>Tên box:</b></label>
+            <input type="text" id="setting-box-name" class="f" maxlength="80" placeholder="Mặc định: tên thư mục" style="flex:1;min-width:0;">
+          </div>
+          <div class="proj-settings-row">
             <label><input type="checkbox" id="setting-auto-summary" checked> Tự động tóm tắt log cũ (PM) sau ~100 tin mới</label>
           </div>
         </div>
@@ -671,8 +680,10 @@
       <div id="editors" class="settings-editors"></div>
     </div>
   </div>
+  <div id="probe-results" class="probe-results" aria-live="polite" hidden></div>
   <div class="dfoot">
     <button id="add" class="box press btn">+ Thêm agent</button>
+    <button id="probe" class="box press btn" title="Gửi một câu ngắn tới từng agent để kiểm tra CLI, tài khoản, model và dịch vụ (tốn rất ít token)">Kiểm tra kết nối</button>
     <button id="resetAll" class="box press btn danger" title="Mọi agent bắt đầu phiên mới ở lượt tới">Làm mới mọi phiên</button>
     <span id="err"></span>
     <button id="cancel" class="box press btn">Đóng</button>
@@ -719,7 +730,7 @@
 <script>
   const $ = s => document.querySelector(s)
   const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e }
-  const base = p => p.split('/').pop()
+  const base = p => p.split(/[\\/]/).pop() // Windows paths use backslashes
   const PALETTE = ['--pink', '--blue', '--green', '--orange', '--purple', '--yellow']
   const color = name => name === 'user' ? 'var(--yellow)' : `var(${PALETTE[[...name].reduce((h, c) => h * 31 + c.charCodeAt(0), 7) % PALETTE.length]})`
   const SVG_NS = 'http://www.w3.org/2000/svg'
@@ -1013,6 +1024,7 @@
 
   const hhmm = iso => new Date(iso).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' })
   const fileIcon = () => { const s = document.createElementNS('http://www.w3.org/2000/svg', 'svg'); s.setAttribute('viewBox', '0 0 24 24'); s.innerHTML = '<path d="M6 2h8l5 5v15H6z M14 2v5h5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round"/>'; return s }
+  let box = '.chat' // which box of the folder `dir` is shown (.chat, .chat2…); main keeps the same one open
   let dir = null, team = [], currentTeamRevision = null, permissionRequests = [], last = null, boxLog = []
   const activeRuns = new Map()
   let orphanLocks = []
@@ -1038,11 +1050,13 @@
 
   async function loadProjects() {
     const list = await api.projects()
-    $('#projects').replaceChildren(...list.map(d => {
-      const b = el('button', 'space' + (d === dir ? ' on' : ''))
-      b.title = d
-      b.append(avatar(base(d), 'sq'), el('span', '', base(d)))
-      b.onclick = () => openProject(d)
+    $('#projects').replaceChildren(...list.map(p => {
+      const on = p.dir === dir && p.chat === box
+      if (on) $('#title').textContent = p.name
+      const b = el('button', 'space' + (on ? ' on' : ''))
+      b.title = p.chat === '.chat' ? p.dir : `${p.dir} (${p.chat})`
+      b.append(avatar(p.name, 'sq'), el('span', '', p.name))
+      b.onclick = () => openProject(p.dir, p.chat)
       return b
     }))
   }
@@ -1065,8 +1079,8 @@
     }
   }
 
-  async function openProject(d) {
-    const thisSeq = ++openSeq
+  async function openProject(d, c = d === dir ? box : null) {
+    const thisSeq = ++openSeq, prev = { dir, box }
     openingDir = d
     pendingEvents = []
     dir = d; last = null
@@ -1077,7 +1091,7 @@
     groupOpenStates.clear()
     renderBoard()
     $('#title').textContent = base(d)
-    $('#path').textContent = d
+    $('#path').textContent = c && c !== '.chat' ? `${d} · ${c}` : d
     $('#log').replaceChildren()
     $('#stats').hidden = true
     if ($('#stats-sec')) $('#stats-sec').hidden = true
@@ -1102,13 +1116,20 @@
 
     let res
     try {
-      res = await api.open(d)
+      res = await api.open(d, c)
     } catch (err) {
-      if (thisSeq === openSeq) openingDir = null
+      if (thisSeq === openSeq) {
+        openingDir = null
+        showToast(err.message.replace(/^.*?Error: /, ''))
+        // e.g. the other box of this folder is still running: go back to what was shown
+        if (prev.dir && !(prev.dir === d && prev.box === c)) openProject(prev.dir, prev.box)
+      }
       return
     }
     if (thisSeq !== openSeq) return
     openingDir = null
+    box = res.chat || '.chat'
+    $('#path').textContent = box !== '.chat' ? `${d} · ${box}` : d
     team = (res.team || []).map((a, i) => {
       if (!a.avatar || !['male', 'female'].includes(a.avatar.gender) || !AVATAR_PALETTE.includes(a.avatar.color)) {
         a.avatar = getDefaultAvatar(res.team || [], i)
@@ -1742,7 +1763,29 @@
 
   initSettingsNav()
 
+  // Connection test for every agent in the form (unsaved changes included)
+  $('#probe').onclick = async () => {
+    const btn = $('#probe'), out = $('#probe-results'), probeDir = dir
+    btn.disabled = true; btn.textContent = 'Đang kiểm tra…'
+    out.hidden = false
+    out.replaceChildren(el('div', 'probe-row', `Đang gửi câu kiểm tra tới ${draft.length} agent… (có thể mất tới 2 phút)`))
+    try {
+      const res = await api.probeAgents(probeDir, draft)
+      if (dir !== probeDir) return
+      if (!res?.ok) { out.replaceChildren(el('div', 'probe-row bad', res?.error?.message || 'Không kiểm tra được')); return }
+      out.replaceChildren(...res.results.map(r => {
+        const row = el('div', 'probe-row ' + (r.ok ? 'good' : 'bad'))
+        row.append(el('b', '', `${r.ok ? '✓' : '✗'} @${r.name}`),
+          el('span', '', `${r.cli}${r.model ? ' · ' + r.model : ''} · ${(r.ms / 1000).toFixed(1)} giây${r.ok ? ' · trả lời "' + r.text + '"' : ''}`))
+        if (!r.ok) row.append(el('div', 'probe-err', r.error))
+        return row
+      }))
+    } catch (e) { out.replaceChildren(el('div', 'probe-row bad', e.message)) }
+    finally { btn.disabled = false; btn.textContent = 'Kiểm tra kết nối' }
+  }
+
   $('#gear').onclick = async () => {
+    $('#probe-results').hidden = true
     draft = structuredClone(team).map((a, i) => {
       if (!a.avatar || !['male', 'female'].includes(a.avatar.gender) || !AVATAR_PALETTE.includes(a.avatar.color)) {
         a.avatar = getDefaultAvatar(team, i)
@@ -1781,6 +1824,7 @@
       } catch (_) {}
     }
 
+    $('#setting-box-name').value = currentSettings.name || ''
     $('#setting-auto-summary').checked = currentSettings.autoSummary !== false
     $('#setting-worktrees').checked = !!currentSettings.worktreesEnabled
     $('#setting-merge-checks').value = (currentSettings.mergeChecks || ['npm run check']).join('\n')
@@ -2071,7 +2115,11 @@
 
     const saveDir = dir
     try {
-      const saveRes = await api.saveTeam(saveDir, draft, { expectedRevision: currentTeamRevision })
+      // main announces the new team (team-changed) before this call returns; that echo of our own save is not
+      // an outside change, so the warning below must ignore it
+      savingTeam = true
+      let saveRes
+      try { saveRes = await api.saveTeam(saveDir, draft, { expectedRevision: currentTeamRevision }) } finally { savingTeam = false }
       if (saveRes && typeof saveRes === 'object' && 'ok' in saveRes) {
         if (!saveRes.ok) {
           $('#err').textContent = saveRes.error?.message || 'Không thể lưu danh sách thành viên'
@@ -2094,7 +2142,8 @@
             mergeChecks,
             chainLimit,
             maxHops: chainLimit,
-            costCeiling
+            costCeiling,
+            name: $('#setting-box-name').value.trim()
           }
         })
         if (!pRes || !pRes.ok) {
@@ -2119,6 +2168,7 @@
         renderTeam()
         loadWorktreeState(saveDir)
       }
+      loadProjects() // box name may have changed
       $('#settings').close()
     } catch (e) { $('#err').textContent = e.message.replace(/^.*?Error: /, '') }
   }
@@ -3988,7 +4038,10 @@
     } catch {}
   }
 
-  $('#new').onclick = async () => { const d = await api.pick(); if (d) openProject(d) }
+  $('#new').onclick = async () => {
+    try { const p = await api.pick(); if (p) openProject(p.dir, p.chat) }
+    catch (err) { showToast(err.message.replace(/^.*?Error: /, '')) }
+  }
   $('#form').onsubmit = e => {
     e.preventDefault()
     const text = $('#input').value.trim()
@@ -4259,6 +4312,7 @@
     }
   })
 
+  let savingTeam = false
   api.on('team-changed', (d, data) => {
     if (openingDir === d) {
       pendingEvents.push({ type: 'team-changed', data })
@@ -4271,7 +4325,7 @@
         updateAllAgentAvatars()
         renderTeam()
       }
-      if ($('#settings')?.open) {
+      if ($('#settings')?.open && !savingTeam) {
         $('#err').textContent = '⚠️ Cấu hình thành viên đã bị thay đổi bên ngoài. Hãy mở lại Cài đặt trước khi lưu.'
       }
     }

@@ -6,7 +6,8 @@
   "scripts": {
     "start": "electron .",
     "check": "node check.js",
-    "dist": "electron-builder --mac"
+    "dist": "electron-builder --mac",
+    "dist:win": "electron-builder --win nsis --x64"
   },
   "build": {
     "appId": "dev.namanh.agentchat",
@@ -19,6 +20,21 @@
     "mac": {
       "target": "dmg",
       "identity": null
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true
     }
   },
   "devDependencies": {
@@ -27,5 +43,7 @@
   },
   "dependencies": {
     "markdown-it": "15.0.2"
-  }
+  },
+  "description": "Nhóm agent AI (Claude, Codex, agy) làm việc chung trong một box chat theo dự án",
+  "author": "Nam Anh"
 }

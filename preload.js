@@ -3,7 +3,7 @@ const { contextBridge, ipcRenderer } = require('electron')
 contextBridge.exposeInMainWorld('api', {
   projects: () => ipcRenderer.invoke('projects'),
   pick: () => ipcRenderer.invoke('pick'),
-  open: dir => ipcRenderer.invoke('open', dir),
+  open: (dir, chat) => ipcRenderer.invoke('open', dir, chat),
   logPage: (dir, options) => ipcRenderer.invoke('logPage', dir, options),
   searchLog: (dir, options) => ipcRenderer.invoke('searchLog', dir, options),
   projectSettings: dir => ipcRenderer.invoke('projectSettings', dir),
@@ -24,6 +24,7 @@ contextBridge.exposeInMainWorld('api', {
   openFile: (dir, file, workspaceId = null) => ipcRenderer.invoke('openFile', dir, file, workspaceId),
   openLink: (dir, href) => ipcRenderer.invoke('openLink', dir, href),
   releaseLock: (dir, runId) => ipcRenderer.invoke('releaseLock', dir, runId),
+  probeAgents: (dir, members) => ipcRenderer.invoke('probeAgents', dir, members),
   saveTeam: (dir, team, options) => ipcRenderer.invoke('saveTeam', dir, team, options),
   grantPermissionAndRetry: (dir, request) => ipcRenderer.invoke('grantPermissionAndRetry', dir, request),
   accounts: () => ipcRenderer.invoke('accounts'),

@@ -743,12 +743,13 @@ function mainChecks() {
 async function mainHarness() {
   const Module = require('module'), { execFileSync } = require('child_process')
   const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-chat-ud-')), handlers = {}, sent = []
-  let dialogs = 0, dialogAnswer = 0
+  let dialogs = 0, dialogAnswer = 0, pickPath = null
   const webContents = { send: (...a) => sent.push(a), setWindowOpenHandler() {}, on() {} }
   const electron = { app: { getPath: () => userData, requestSingleInstanceLock: () => true, whenReady: () => Promise.resolve(), on() {}, quit() {} },
     BrowserWindow: function () { return { webContents, loadFile: () => Promise.resolve(), isMinimized: () => false } },
     ipcMain: { handle: (name, fn) => { handlers[name] = fn } }, shell: {},
-    dialog: { showMessageBox: async () => { dialogs++; return { response: dialogAnswer } } } }
+    dialog: { showMessageBox: async () => { dialogs++; return { response: dialogAnswer, checkboxChecked: true } },
+      showOpenDialog: async () => ({ canceled: !pickPath, filePaths: [pickPath] }) } }
   const load = Module._load
   Module._load = function (request, ...rest) { return request === 'electron' ? electron : load.call(this, request, ...rest) }
 
@@ -976,6 +977,41 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
   assert.ok((await call('stopMerge', root, { queueId: pending.id })).ok)
   assert.strictEqual(queue().at(-1).state, 'paused')
   assert.deepStrictEqual(queue().slice(0, -1), otherEntries)
+
+  // Boxes: one folder, independent .chat / .chat2; one open at a time, switching or creating waits until the folder is idle
+  {
+    const two = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'agent-boxes-'))), in2 = f => path.join(two, f)
+    const text = f => { try { return fs.readFileSync(in2(f), 'utf8') } catch { return '' } }
+    const whenIdle = async fn => { for (let i = 0; ; i++) try { return await fn() } catch (e) {
+      if (i > 400 || !/còn agent/.test(e.message)) throw e; await new Promise(r => setTimeout(r, 25)) } }
+    pickPath = two; const asked = dialogs
+    assert.deepStrictEqual(await call('pick'), { dir: two, chat: '.chat' }); assert.strictEqual(dialogs, asked) // new folder: no question
+    fs.writeFileSync(in2('.chat/agents.json'), JSON.stringify([{ name: 'pm', cli: 'codex', role: 'PM', owns: ['.chat/memory.md', 'notes/**'] }]))
+    process.env.FAKE_REPLY = JSON.stringify({ pm: 'R1' })
+    await call('send', two, 'chào')
+    dialogAnswer = 2 // "Tạo box mới", keep the team
+    await assert.rejects(call('pick'), /còn agent đang chạy/) // pm still running → nothing created
+    assert.ok(!fs.existsSync(in2('.chat2')))
+    assert.deepStrictEqual(await whenIdle(() => call('pick')), { dir: two, chat: '.chat2' })
+    assert.deepStrictEqual(JSON.parse(text('.chat2/agents.json'))[0].owns, ['.chat2/memory.md', 'notes/**', '.chat2/tasks.json', '.chat2/tasks.json.tmp']) // scope follows the new box
+    const opened = await call('open', two, '.chat2')
+    assert.deepStrictEqual([opened.chat, opened.history.total], ['.chat2', 0])
+    assert.ok(core.prompt(two, core.team(two)[0]).includes('.chat2/memory.md') && !core.prompt(two, core.team(two)[0]).includes('.chat/'))
+    process.env.FAKE_REPLY = JSON.stringify({ pm: 'R2' }); await call('send', two, 'chào')
+    await waitFor('pm ở box 2', () => text('.chat2/log.jsonl').includes('"text":"R2"'))
+    assert.ok(text('.chat/log.jsonl').includes('"text":"R1"') && !text('.chat/log.jsonl').includes('R2') && !text('.chat2/log.jsonl').includes('R1'))
+    assert.ok(Object.keys(JSON.parse(text('.chat2/sessions.json'))).includes('pm'))
+    const snap = await core.snapshot(two); core.appendLog(two, { from: 'user', text: 'x' }) // runtime files of any box are not "changes"
+    assert.deepStrictEqual(core.changedPaths(snap, await core.snapshot(two)), [])
+    const cfg = await call('projectSettings', two)
+    assert.ok((await call('saveProjectSettings', two, { expectedRevision: cfg.revision, settings: { ...cfg.settings, name: '  Review ' } })).ok)
+    assert.deepStrictEqual((await call('projects')).filter(b => b.dir === two).map(b => [b.chat, b.name]), [['.chat', path.basename(two)], ['.chat2', 'Review']])
+    const back = await whenIdle(() => call('open', two, '.chat'))
+    assert.deepStrictEqual([back.chat, back.history.messages.some(m => m.text === 'R1'), back.history.messages.some(m => m.text === 'R2')], ['.chat', true, false])
+    pickPath = in2('.chat2'); assert.deepStrictEqual(await call('pick'), { dir: two, chat: '.chat2' }) // picking a box's folder opens that box
+    delete process.env.FAKE_REPLY; pickPath = null; dialogAnswer = 0
+    console.log('ok (boxes)')
+  }
 }
 auditChecks().then(viewerChecks).then(runChecks).then(sprint7Checks).then(sprint8Checks).then(sprint6Checks).then(rendererChecks).then(mainChecks).then(() => console.log('ok'), e => { console.error(e); process.exit(1) })
 
@@ -1002,4 +1038,28 @@ console.log('ok (claude cache tokens)')
   assert.deepStrictEqual(core.team(d)[0].owns, ['src/**', '!src/gen/**'])
   assert.ok(!core.scopeAllows(core.normalizeScope(core.team(d)[0], d), 'src/gen/a.js'))
   console.log('ok (exclusions persist)')
+}
+// Windows .cmd shims: args are escaped for cmd.exe the way cross-spawn does it (prompt itself goes over stdin)
+assert.strictEqual(core.winArg('a b'), '^"a^ b^"')
+assert.strictEqual(core.winArg('x"y'), '^"x\\^"y^"')
+assert.strictEqual(core.winArg('model_reasoning_effort="high"'), '^"model_reasoning_effort=\\^"high\\^"^"')
+assert.strictEqual(core.winArg('C:\\dir\\'), '^"C:\\dir\\\\^"') // trailing backslash doubled so it can't eat the closing quote
+assert.deepStrictEqual(core.CLI.claude.stdinArgs('S1', {}).slice(0, 2), ['-p', '--output-format']) // no prompt argument
+assert.ok(core.CLI.claude.stdinArgs('S1', {}).includes('S1') && core.CLI.codex.stdinArgs('T1', {}).slice(-2).join(' ') === 'T1 -')
+console.log('ok (windows args)')
+// npm .cmd shims on Windows: find the real target so we can run it without cmd.exe
+{
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'shim-'))
+  const put = (rel, text = '') => { const f = path.join(d, ...rel.split('/')); fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, text); return f }
+  const head = '@ECHO off\r\nGOTO start\r\n:find_dp0\r\nSET dp0=%~dp0\r\nEXIT /b\r\n:start\r\nSETLOCAL\r\nCALL :find_dp0\r\n'
+  const exe = put('node_modules/@anthropic-ai/claude-code/bin/claude.exe')
+  const claude = put('claude.cmd', head + '"%dp0%\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe"   %*\r\n')
+  assert.deepStrictEqual(core.shimTarget(claude), { file: exe, pre: [] }) // native binary → run directly
+  const js = put('node_modules/@openai/codex/bin/codex.js'), node = put('node.exe')
+  const codex = put('codex.cmd', head + 'IF EXIST "%dp0%\\node.exe" (\r\n  SET "_prog=%dp0%\\node.exe"\r\n) ELSE (\r\n  SET "_prog=node"\r\n)\r\n'
+    + 'endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\\node_modules\\@openai\\codex\\bin\\codex.js" %*\r\n')
+  assert.deepStrictEqual(core.shimTarget(codex), { file: node, pre: [js] }) // JS → node next to the shim + script
+  const npm = put('npm.cmd', '@ECHO OFF\r\nSET "NPM_CLI_JS=%~dp0\\node_modules\\npm\\bin\\npm-cli.js"\r\n"%NODE_EXE%" "%NPM_CLI_JS%" %*\r\n')
+  assert.strictEqual(core.shimTarget(npm), null) // unknown layout → cmd.exe fallback
+  console.log('ok (cmd shims)')
 }
