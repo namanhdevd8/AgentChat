@@ -15,7 +15,8 @@
       "main.js",
       "preload.js",
       "core.js",
-      "index.html"
+      "index.html",
+      "renderer.js"
     ],
     "mac": {
       "target": "dmg",

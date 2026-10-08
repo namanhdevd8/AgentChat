@@ -8,7 +8,7 @@ const core = require('./core')
 
 // Apps launched from Finder don't get the shell PATH, so claude/codex/agy wouldn't be found. (Windows apps inherit PATH.)
 if (process.platform !== 'win32') try {
-  const out = execFileSync(process.env.SHELL || '/bin/zsh', ['-ilc', 'printf "__PATH__%s" "$PATH"'], { encoding: 'utf8' })
+  const out = execFileSync(process.env.SHELL || '/bin/zsh', ['-ilc', 'printf "__PATH__%s" "$PATH"'], { encoding: 'utf8', timeout: 5000 })
   process.env.PATH = out.split('__PATH__').pop()
 } catch {}
 
@@ -31,7 +31,9 @@ const redactManagedPath = value => String(value).split(path.join(app.getPath('us
 const gitError = (code, message, details = {}) => Object.assign(new Error(message), { code, ...details })
 async function git(cwd, args, options = {}) {
   try {
-    const result = await execFileAsync('git', ['-C', cwd, ...args], { encoding: 'utf8', maxBuffer: 2 * 1024 * 1024, ...options })
+    // no repo hooks: an agent may have planted .git/hooks/* and app-run commits/merges must not execute them
+    // ponytail: filter/diff/merge drivers from .git/config still apply; agents' sandboxes keep them out of .git
+    const result = await execFileAsync('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-C', cwd, ...args], { encoding: 'utf8', maxBuffer: 2 * 1024 * 1024, ...options })
     return { stdout: result.stdout || '', stderr: result.stderr || '' }
   } catch (e) {
     if (e.code === 'ENOENT') throw gitError('GIT_MISSING', 'Không tìm thấy Git trong PATH của app')
@@ -46,11 +48,21 @@ const withGitLock = (root, action) => {
   return current.finally(() => { if (gitLocks.get(root) === current) gitLocks.delete(root) })
 }
 const worktreeBase = root => path.join(app.getPath('userData'), 'worktrees', createHash('sha256').update(root).digest('hex'))
-const worktreeFile = root => core.chat(root, 'worktrees.json')
+// Kept in userData, not in the box folder: agents can write .chat, and an entry names whose scope, allowlist and sandbox
+// the merge checks run with.
+const worktreeFile = root => path.join(worktreeBase(root), `registry${core.chatName(root)}.json`)
 const isChatPath = file => /^\.chat\d*(\/|$)/.test(file) // any box's data folder, never committed or merged
 function readWorktrees(root) {
   try {
-    const data = JSON.parse(fs.readFileSync(worktreeFile(root), 'utf8'))
+    let text
+    try { text = fs.readFileSync(worktreeFile(root), 'utf8') }
+    catch (e) { // ponytail: one-time move of the pre-upgrade .chat/worktrees.json, trusted as it is
+      // only for a box already using worktrees: otherwise an agent could plant .chat/worktrees.json to be adopted later
+      if (e.code !== 'ENOENT' || !core.configTrust(root).trusted || !core.projectSettings(root).settings.worktreesEnabled) throw e
+      text = fs.readFileSync(core.chat(root, 'worktrees.json'), 'utf8')
+      writeWorktrees(root, JSON.parse(text)); fs.rmSync(core.chat(root, 'worktrees.json'), { force: true })
+    }
+    const data = JSON.parse(text)
     if (data?.version !== 1 || typeof data.targetRef !== 'string' || !Array.isArray(data.agents) || !Array.isArray(data.queue))
       throw new Error('schema')
     return data
@@ -60,9 +72,16 @@ function readWorktrees(root) {
   }
 }
 function writeWorktrees(root, data) {
-  const file = worktreeFile(root), temp = file + '.tmp'
-  fs.writeFileSync(temp, JSON.stringify(data, null, 2)); fs.renameSync(temp, file)
+  fs.mkdirSync(worktreeBase(root), { recursive: true })
+  core.atomicWrite(worktreeFile(root), JSON.stringify(data, null, 2))
   worktreeRevisions.set(root, (worktreeRevisions.get(root) || 0) + 1)
+}
+// Every write after an await goes through here: read, change and write in one synchronous step (atomic on the event
+// loop). Holding a copy across awaits loses updates, since merge checks write the queue without the git lock.
+function updateRegistry(root, change) {
+  const registry = readWorktrees(root)
+  change(registry); writeWorktrees(root, registry)
+  return registry
 }
 function managedPath(root, kind, id) {
   if (!/^[0-9a-f-]{36}$/i.test(id)) throw gitError('CONFIG_ERROR', 'Workspace ID không hợp lệ')
@@ -102,7 +121,12 @@ async function ensureRuntimeExclude(root) {
   const existing = new Set(text.split(/\r?\n/)), missing = ['.chat', '.chat/', '.chat[0-9]*', 'node_modules/', 'dist/', '.DS_Store'].filter(line => !existing.has(line))
   if (missing.length) {
     fs.mkdirSync(path.dirname(file), { recursive: true })
-    fs.appendFileSync(file, `${text && !text.endsWith('\n') ? '\n' : ''}${text.includes('# agent-chat runtime') ? '' : '# agent-chat runtime\n'}${missing.join('\n')}\n`)
+    // no symlink or hard link: appending would write into whatever it points at
+    const fd = fs.openSync(file, fs.constants.O_WRONLY | fs.constants.O_APPEND | fs.constants.O_CREAT | (fs.constants.O_NOFOLLOW || 0))
+    try {
+      if (fs.fstatSync(fd).nlink > 1) throw gitError('UNSUPPORTED_REPO', 'info/exclude là hard link')
+      fs.writeSync(fd, `${text && !text.endsWith('\n') ? '\n' : ''}${text.includes('# agent-chat runtime') ? '' : '# agent-chat runtime\n'}${missing.join('\n')}\n`)
+    } finally { fs.closeSync(fd) }
   }
   const ignored = await git(root, ['check-ignore', '-q', `${core.chatName(root)}/log.jsonl`]).then(() => true).catch(() => false)
   if (!ignored) throw gitError('UNSUPPORTED_REPO', `Không thể loại ${core.chatName(root)} khỏi Git`)
@@ -162,7 +186,7 @@ async function prepareWorkspace(root, agent) {
       await git(root, ['worktree', 'add', '-b', branch, cwd, probe.sha])
       fs.symlinkSync(core.chat(root), path.join(cwd, core.chatName(root)), process.platform === 'win32' ? 'junction' : 'dir') // junction: no admin rights needed
       record = { id, agent: agent.name, branch, path: cwd, baseSha: probe.sha }
-      registry.agents.push(record); writeWorktrees(root, registry)
+      updateRegistry(root, latest => latest.agents.push(record))
     }
     const cwd = await verifyWorkspace(root, record), status = (await git(cwd, ['status', '--porcelain=v1', '-z', '--untracked-files=all'])).stdout
     if (status) throw gitError('DIRTY_WORKSPACE', `Workspace của ${agent.name} có thay đổi chưa được app ghi nhận`)
@@ -253,7 +277,7 @@ async function initializeGit(root, request) {
   const allowed = new Set(preview.files), selected = [...new Set(request.files)]
   if (!selected.length || selected.some(file => typeof file !== 'string' || !allowed.has(file)) || !selected.includes('.gitignore'))
     throw gitError('INVALID_ARGUMENT', 'Danh sách file commit đầu không hợp lệ')
-  fs.writeFileSync(path.join(root, '.gitignore'), preview.ignoreText)
+  core.atomicWrite(path.join(root, '.gitignore'), preview.ignoreText) // replaces a planted symlink instead of writing through it
   await execFileAsync('git', ['init', '-b', 'main', root], { encoding: 'utf8' }).catch(e => {
     if (e.code === 'ENOENT') throw gitError('GIT_MISSING', 'Không tìm thấy Git trong PATH của app')
     throw gitError('GIT_ERROR', String(e.stderr || e.message).trim())
@@ -310,12 +334,13 @@ async function commitWorkspace(job, result, changed, auditComplete, outside) {
     const probe = await repoProbe(job.root), ahead = await git(job.root, ['merge-base', '--is-ancestor', headSha, probe.sha]).then(() => false).catch(() => true)
     if (result.outcome === 'success' && ahead) {
       const settings = core.projectSettings(job.root).settings
-      if (!registry.queue.some(entry => entry.runId === job.runId && entry.headSha === headSha)) registry.queue.push({ id: randomUUID(), agent: job.name,
-        runId: job.runId, workspaceId: job.workspaceId, headSha, checks: [...settings.mergeChecks], state: job.depsReady === false ? 'needs-deps' : 'queued',
-        baseSha: probe.sha, candidateSha: null, error: job.depsReady === false ? { code: 'NEEDS_DEPS', message: 'Workspace chưa có dependency phù hợp', files: [], log: '' } : null,
-        pgid: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() })
-      registry.targetSha = probe.sha
-      writeWorktrees(job.root, registry)
+      updateRegistry(job.root, latest => {
+        if (!latest.queue.some(entry => entry.runId === job.runId && entry.headSha === headSha)) latest.queue.push({ id: randomUUID(), agent: job.name,
+          runId: job.runId, workspaceId: job.workspaceId, headSha, checks: [...settings.mergeChecks], state: job.depsReady === false ? 'needs-deps' : 'queued',
+          baseSha: probe.sha, candidateSha: null, error: job.depsReady === false ? { code: 'NEEDS_DEPS', message: 'Workspace chưa có dependency phù hợp', files: [], log: '' } : null,
+          pgid: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() })
+        latest.targetSha = probe.sha
+      })
       pumpMerge(job.root).catch(e => console.error(e))
     }
     return { id: record.id, branch: record.branch, headSha }
@@ -323,7 +348,7 @@ async function commitWorkspace(job, result, changed, auditComplete, outside) {
 }
 
 function mergeError(entry, code, message, files = [], log = '') {
-  entry.state = code === 'DIRTY_ROOT' ? 'blocked-dirty' : code === 'CHECK_NOT_ALLOWED' || code === 'TARGET_CHANGED' || code === 'SCOPE_AUDIT'
+  entry.state = code === 'DIRTY_ROOT' ? 'blocked-dirty' : code === 'CHECK_NOT_ALLOWED' || code === 'TARGET_CHANGED' || code === 'SCOPE_AUDIT' || code === 'CONFIG_UNTRUSTED'
     ? 'blocked-config' : code === 'NEEDS_DEPS' ? 'needs-deps' : code === 'CONFLICT' ? 'conflict' : code === 'CHECK_FAILED' || code === 'CHECK_MUTATED_TREE'
       ? 'check-failed' : code === 'PAUSED' ? 'paused' : 'error'
   entry.error = { code, message: redactManagedPath(message), files: files.slice(0, 50), log: redactManagedPath(String(log).slice(-32768)) }
@@ -335,72 +360,108 @@ async function removeIntegration(root, entry) {
   if (fs.existsSync(cwd)) await git(root, ['worktree', 'remove', '--force', cwd]).catch(() => {})
 }
 
-async function processMerge(root, queued) {
-  const registry = readWorktrees(root), entry = registry.queue.find(item => item.id === queued.id), settings = core.projectSettings(root).settings
-  if (!entry || entry.state !== 'queued' || entry.supersededBy) return
-  if (!settings.worktreesEnabled) return
+function updateEntry(root, id, change) {
+  let entry
+  updateRegistry(root, registry => {
+    entry = registry.queue.find(item => item.id === id)
+    if (!entry) throw gitError('CONFIG_ERROR', 'Mục gộp không còn trong hàng chờ')
+    change(entry, registry)
+  })
+  return entry
+}
+const isAncestor = (root, sha, of) => git(root, ['merge-base', '--is-ancestor', sha, of]).then(() => true).catch(() => false)
+
+async function processMerge(root, id) {
+  let entry = readWorktrees(root).queue.find(item => item.id === id)
+  if (!entry || entry.state !== 'queued' || entry.supersededBy || !core.projectSettings(root).settings.worktreesEnabled) return
+  const now = () => new Date().toISOString()
+  // re-checked at every state change: the user may stop (paused) or retry the entry while we wait for the dialog or the lock
+  const stillQueued = item => item.state === 'queued' && !item.supersededBy
+  const refuse = async (code, message) => { updateEntry(root, id, item => { if (stillQueued(item)) mergeError(item, code, message) }); await emitWorktreeState(root).catch(() => {}) }
+  try { await ensureTrustedConfig(root) } catch (e) { return refuse('CONFIG_UNTRUSTED', e.message) }
   const owner = core.team(root).find(agent => agent.name === entry.agent)
-  if (!owner) { mergeError(entry, 'CHECK_NOT_ALLOWED', 'Agent sở hữu nhánh không còn trong nhóm'); writeWorktrees(root, registry); return }
-  for (const command of entry.checks) if (!owner.allowedCommands.includes(command)) {
-    mergeError(entry, 'CHECK_NOT_ALLOWED', `Lệnh "${command}" không còn được phép`); writeWorktrees(root, registry); return
-  }
-  let integration = managedPath(root, 'integration', entry.id)
+  if (!owner) return refuse('CHECK_NOT_ALLOWED', 'Agent sở hữu nhánh không còn trong nhóm')
+  for (const command of entry.checks) if (!owner.allowedCommands.includes(command)) return refuse('CHECK_NOT_ALLOWED', `Lệnh "${command}" không còn được phép`)
+  const integration = managedPath(root, 'integration', id)
+  let probe, requeued = false
   try {
-    entry.state = 'merging'; entry.error = null; entry.updatedAt = new Date().toISOString(); writeWorktrees(root, registry); await emitWorktreeState(root)
-    const probe = await repoProbe(root, { requireClean: true })
-    if (probe.branch !== registry.targetRef) throw gitError('TARGET_CHANGED', 'Nhánh chính đã đổi ngoài app')
-    const included = await git(root, ['merge-base', '--is-ancestor', entry.headSha, probe.sha]).then(() => true).catch(() => false)
-    if (included) { entry.state = 'merged'; entry.updatedAt = new Date().toISOString(); registry.targetSha = probe.sha; writeWorktrees(root, registry); return }
-    const base = (await git(root, ['merge-base', probe.sha, entry.headSha])).stdout.trim()
-    const files = nul((await git(root, ['diff', '--no-renames', '--name-only', '-z', `${base}..${entry.headSha}`])).stdout)
-    const scope = core.normalizeScope(owner, root)
-    if (files.some(file => !core.scopeAllows(scope, file) || isChatPath(file)))
-      throw gitError('SCOPE_AUDIT', 'Nhánh chứa file ngoài phạm vi', { files })
-    entry.baseSha = probe.sha
-    fs.mkdirSync(path.dirname(integration), { recursive: true })
-    await git(root, ['worktree', 'add', '--detach', integration, probe.sha])
-    if (!await bootstrapDependencies(root, integration)) throw gitError('NEEDS_DEPS', 'Integration worktree chưa có dependency phù hợp')
-    try { await git(integration, ['merge', '--no-ff', '--no-commit', entry.headSha]) }
-    catch (e) {
-      const conflicts = nul((await git(integration, ['diff', '--name-only', '--diff-filter=U', '-z'])).stdout)
-      if (conflicts.length) throw gitError('CONFLICT', 'Nhánh xung đột với thay đổi đã gộp', { files: conflicts })
-      throw e
-    }
-    await git(integration, ['-c', 'user.name=Agent Chat', '-c', 'user.email=agent-chat@local', 'commit', '-m', `merge agent ${entry.agent}`, '-m', `Agent-Chat-Queue: ${entry.id}`])
-    entry.candidateSha = await gitHead(integration); entry.state = 'checking'; entry.updatedAt = new Date().toISOString(); writeWorktrees(root, registry); await emitWorktreeState(root)
+    // 1. under the git lock: merge the branch into a throwaway integration worktree
+    const done = await withGitLock(root, async () => {
+      let stopped = false
+      entry = updateEntry(root, id, item => { if (!stillQueued(item)) stopped = true; else { item.state = 'merging'; item.error = null; item.updatedAt = now() } })
+      if (stopped) return true
+      await emitWorktreeState(root)
+      probe = await repoProbe(root, { requireClean: true })
+      if (probe.branch !== readWorktrees(root).targetRef) throw gitError('TARGET_CHANGED', 'Nhánh chính đã đổi ngoài app')
+      if (await isAncestor(root, entry.headSha, probe.sha)) {
+        updateEntry(root, id, (item, registry) => { item.state = 'merged'; item.updatedAt = now(); registry.targetSha = probe.sha })
+        return true
+      }
+      const base = (await git(root, ['merge-base', probe.sha, entry.headSha])).stdout.trim()
+      const files = nul((await git(root, ['diff', '--no-renames', '--name-only', '-z', `${base}..${entry.headSha}`])).stdout)
+      const scope = core.normalizeScope(owner, root)
+      if (files.some(file => !core.scopeAllows(scope, file) || isChatPath(file)))
+        throw gitError('SCOPE_AUDIT', 'Nhánh chứa file ngoài phạm vi', { files })
+      updateEntry(root, id, item => { item.baseSha = probe.sha })
+      fs.mkdirSync(path.dirname(integration), { recursive: true })
+      await git(root, ['worktree', 'add', '--detach', integration, probe.sha])
+      if (!await bootstrapDependencies(root, integration)) throw gitError('NEEDS_DEPS', 'Integration worktree chưa có dependency phù hợp')
+      try { await git(integration, ['merge', '--no-ff', '--no-commit', entry.headSha]) }
+      catch (e) {
+        const conflicts = nul((await git(integration, ['diff', '--name-only', '--diff-filter=U', '-z'])).stdout)
+        if (conflicts.length) throw gitError('CONFLICT', 'Nhánh xung đột với thay đổi đã gộp', { files: conflicts })
+        throw e
+      }
+      await git(integration, ['-c', 'user.name=Agent Chat', '-c', 'user.email=agent-chat@local', 'commit', '-m', `merge agent ${entry.agent}`, '-m', `Agent-Chat-Queue: ${entry.id}`])
+      const candidateSha = await gitHead(integration)
+      entry = updateEntry(root, id, item => { item.candidateSha = candidateSha; item.state = 'checking'; item.updatedAt = now() })
+      return false
+    })
+    if (done) return
+    await emitWorktreeState(root)
+    // 2. no lock: checks can take minutes, and agent turns need the lock to start (prepareWorkspace) and to commit
     const controller = new AbortController(); mergeControllers.set(root, { entry, controller })
     persistRegistry(root)
     try {
       for (const command of entry.checks) {
         const timer = setTimeout(() => controller.abort('timeout'), core.timeoutMinutes(owner) * 60000)
-        const result = await core.runCommand(integration, command, { signal: controller.signal, onSpawn: pid => {
-          entry.pgid = pid; entry.updatedAt = new Date().toISOString(); writeWorktrees(root, registry); persistRegistry(root)
-        } })
-        clearTimeout(timer); entry.pgid = null; writeWorktrees(root, registry); persistRegistry(root)
+        let result
+        try {
+          result = await core.runCommand(integration, command, { signal: controller.signal, agent: owner, onSpawn: pid => {
+            entry.pgid = pid; entry.updatedAt = now(); updateEntry(root, id, item => { item.pgid = pid; item.updatedAt = entry.updatedAt }); persistRegistry(root)
+          } })
+        } finally { clearTimeout(timer) }
+        entry.pgid = null; updateEntry(root, id, item => { item.pgid = null }); persistRegistry(root)
         if (controller.signal.aborted) throw gitError('PAUSED', controller.signal.reason === 'timeout' ? 'Kiểm tra gộp quá giờ' : 'Đã dừng kiểm tra gộp')
         if (result.error || result.exitCode !== 0) throw gitError('CHECK_FAILED', `Lệnh kiểm tra lỗi: ${command}`, { log: `${result.stdout}\n${result.stderr}` })
       }
     } finally { mergeControllers.delete(root) }
     if ((await git(integration, ['status', '--porcelain=v1', '-z', '--untracked-files=all'])).stdout)
       throw gitError('CHECK_MUTATED_TREE', 'Lệnh kiểm tra đã sửa cây source')
-    entry.state = 'publishing'; entry.updatedAt = new Date().toISOString(); writeWorktrees(root, registry); await emitWorktreeState(root)
-    const latest = await repoProbe(root, { requireClean: true })
-    if (latest.branch !== registry.targetRef) throw gitError('TARGET_CHANGED', 'Nhánh chính đã đổi ngoài app')
-    if (latest.sha !== probe.sha) {
+    // 3. under the lock again: publish only if the target branch hasn't moved since step 1
+    await withGitLock(root, async () => {
+      entry = updateEntry(root, id, item => { item.state = 'publishing'; item.updatedAt = now() }); await emitWorktreeState(root)
+      const latest = await repoProbe(root, { requireClean: true })
+      if (latest.branch !== readWorktrees(root).targetRef) throw gitError('TARGET_CHANGED', 'Nhánh chính đã đổi ngoài app')
+      if (latest.sha !== probe.sha) {
+        await removeIntegration(root, entry)
+        updateEntry(root, id, (item, registry) => {
+          item.state = 'queued'; item.baseSha = latest.sha; item.candidateSha = null; item.error = null; item.pgid = null
+          item.updatedAt = now(); registry.targetSha = latest.sha
+        })
+        requeued = true
+        return
+      }
+      await git(root, ['merge', '--ff-only', '--no-edit', '--no-overwrite-ignore', '--no-autostash', entry.candidateSha])
+      const published = await gitHead(root)
+      if (published !== entry.candidateSha) throw gitError('TARGET_CHANGED', 'Không xác minh được commit đã xuất bản')
+      updateEntry(root, id, (item, registry) => { item.state = 'merged'; item.error = null; item.updatedAt = now(); registry.targetSha = published })
       await removeIntegration(root, entry)
-      entry.state = 'queued'; entry.baseSha = latest.sha; entry.candidateSha = null; entry.error = null; entry.pgid = null
-      entry.updatedAt = new Date().toISOString(); registry.targetSha = latest.sha; writeWorktrees(root, registry)
-      return
-    }
-    await git(root, ['merge', '--ff-only', '--no-edit', '--no-overwrite-ignore', '--no-autostash', entry.candidateSha])
-    const published = await gitHead(root)
-    if (published !== entry.candidateSha) throw gitError('TARGET_CHANGED', 'Không xác minh được commit đã xuất bản')
-    entry.state = 'merged'; entry.error = null; entry.updatedAt = new Date().toISOString(); registry.targetSha = published; writeWorktrees(root, registry)
-    await removeIntegration(root, entry)
-    await post(root, 'system', `Đã gộp nhánh của ${entry.agent} sau khi kiểm tra đạt.`, { kind: 'merge', queueId: entry.id, owner: entry.agent, headSha: entry.headSha })
+    })
+    if (!requeued) await post(root, 'system', `Đã gộp nhánh của ${entry.agent} sau khi kiểm tra đạt.`, { kind: 'merge', queueId: entry.id, owner: entry.agent, headSha: entry.headSha })
   } catch (e) {
-    mergeError(entry, e.code || 'GIT_ERROR', e.message, e.files || [], e.log || '')
-    writeWorktrees(root, registry)
+    entry = updateEntry(root, id, item => mergeError(item, e.code || 'GIT_ERROR', e.message, e.files || [], e.log || '')) // throws → pump stops, no endless retry
+    await removeIntegration(root, entry) // a retry gets a new id; don't leave this attempt's worktree (and node_modules) behind
     await post(root, 'system', `@${entry.agent} chưa gộp được nhánh: ${e.message}`, { kind: 'merge', queueId: entry.id, owner: entry.agent,
       headSha: entry.headSha, error: entry.error })
   } finally {
@@ -415,9 +476,9 @@ async function pumpMerge(root) {
   mergeWorkers.add(root)
   try {
     while (core.projectSettings(root).settings.worktreesEnabled) {
-      const registry = readWorktrees(root), entry = registry.queue.find(item => item.state === 'queued')
+      const entry = readWorktrees(root).queue.find(item => item.state === 'queued' && !item.supersededBy)
       if (!entry) break
-      await withGitLock(root, () => processMerge(root, entry))
+      await processMerge(root, entry.id)
     }
   } finally { mergeWorkers.delete(root) }
 }
@@ -500,7 +561,6 @@ async function terminal(job, result, waiting = false) {
     result.taskChanges ? { taskChanges: result.taskChanges, actor: job.name } : {})
   if (msg.taskUpdates) result.taskUpdates = msg.taskUpdates
   if (msg.taskError) result.taskError = msg.taskError
-  win?.webContents.send('usage', job.dir, job.name, { runId: job.runId, usage: result.usage })
   return msg
 }
 
@@ -545,7 +605,15 @@ async function haltChain(dir, chain, reason, targets) {
   return post(dir, 'system', reason, { kind: 'chain-stop', canContinue: true, runId: chain.id, targets: names,
     continuationTarget: names.map(name => `@${name}`).join(' ') })
 }
+// routes in flight per folder: a box switch waits for them, or their turns would read and post into the other box
+const routing = new Map()
 async function route(dir, msg, hops, chain = null) {
+  const root = rootOf(dir)
+  routing.set(root, (routing.get(root) || 0) + 1)
+  try { return await routeTargets(dir, msg, hops, chain) }
+  finally { if (routing.get(root) > 1) routing.set(root, routing.get(root) - 1); else routing.delete(root) }
+}
+async function routeTargets(dir, msg, hops, chain) {
   const members = core.team(dir)
   let targets = core.mentions(msg.text, members, msg.from)
   if (msg.from === 'user' && !targets.length) // no @ → PM, whatever order the team is listed in
@@ -559,9 +627,10 @@ async function route(dir, msg, hops, chain = null) {
     if (chain.turns >= chain.chainLimit)
       return haltChain(dir, chain, `Dừng sau ${chain.chainLimit} lượt agent liên tiếp.`, targets.slice(i))
     chain.turns++
-    await ask(dir, targets[i], hops, null, chain, msg)
+    // one target failing (busy granting a permission, config not trusted…) must not drop the others or vanish silently
+    try { await ask(dir, targets[i], hops, null, chain, msg) }
+    catch (e) { chain.turns--; await post(dir, 'system', `Chưa gọi được @${targets[i].name}: ${e.message}`, { kind: 'route-error', agent: targets[i].name }) }
     for (const job of jobs) if (job.chain === chain && job.headStarted && !job.finished) progress(job) // refresh "chuỗi x/y"
-
   }
 }
 
@@ -576,20 +645,26 @@ async function ask(dir, agent, hops, special = null, chain = null, trigger = nul
   const root = rootOf(dir)
   // An agent that already has a turn waiting to start gets nothing from a second one: that turn builds its prompt
   // from the latest log when it starts. Without this, each extra @ ran a stale turn ("Chưa có tin mới nào gọi …").
-  if (!special && !retryContext && !grantRequestId) {
+  // Checked again right before the push: the awaits below let a second @ for the same agent slip in meanwhile.
+  const waitingTurn = () => {
+    if (special || retryContext || grantRequestId) return null
     const waiting = jobs.find(job => job.key === runKey(root, agent.name) && !job.finished && job.phase === 'queued' && !job.kind)
-    if (waiting) { if (chain && chain.turns > 0) chain.turns--; return waiting } // merged, so not an extra turn
+    if (waiting && chain && chain.turns > 0) chain.turns-- // merged, so not an extra turn
+    return waiting
   }
+  let waiting = waitingTurn()
+  if (waiting) return waiting
   const reserved = permissionReservations.get(permissionKey(root, agent.name))
   if (reserved && reserved.id !== grantRequestId) throw gitError('BUSY', `@${agent.name} đang cấp quyền`)
   if (!grantRequestId) clearPending(root, agent.name)
   let setupError
-  try { if (!special) migrateTaskScope(dir) } catch (e) { if (String(agent.name).toLowerCase() === 'pm') setupError = `Không nâng được quyền task cho PM: ${e.message}` }
+  try { await ensureTrustedConfig(root) } catch (e) { setupError = e.message }
+  try { if (!special && !setupError) migrateTaskScope(dir) } catch (e) { if (String(agent.name).toLowerCase() === 'pm') setupError ||= `Không nâng được quyền task cho PM: ${e.message}` }
   agent = core.team(dir).find(a => a.name === agent.name) || agent
   if (special?.kind === 'summary') agent = { ...agent, resume: false, allowedCommands: [], permissions: { mode: 'edit', allowTools: [], networkAccess: false }, owns: [], readOnly: true }
   const scope = core.normalizeScope(agent, root)
   let workspace = { cwd: root, workspaceId: null, branch: null, worktree: false }
-  if (!special) try { workspace = await prepareWorkspace(root, agent) } catch (e) { setupError ||= e.message }
+  if (!special && !setupError) try { workspace = await prepareWorkspace(root, agent) } catch (e) { setupError ||= e.message } // unconfirmed config creates no worktrees
   let taskIds = []
   if (!special) try { taskIds = (await core.taskBoardIndexed(root)).tasks.filter(task => task.assignee === agent.name && task.status !== 'done').map(task => task.id) } catch {}
   if (grantRequestId) {
@@ -609,6 +684,7 @@ async function ask(dir, agent, hops, special = null, chain = null, trigger = nul
     finished: false, headStarted: false, reserved: false, spawned: false, pgid: null, setupError,
     controller: new AbortController(), auditController: new AbortController(), timer: null, taskIds, chain, trigger: capturedTrigger,
     retryContext, ...workspace, ...(special || {}) }
+  if ((waiting = waitingTurn())) return waiting
   jobs.push(job)
   if (heads().includes(job)) startHead(job)
   return job
@@ -617,6 +693,7 @@ async function ask(dir, agent, hops, special = null, chain = null, trigger = nul
 async function scheduleSummary(dir) {
   const root = rootOf(dir)
   if (jobs.some(job => job.root === root && job.kind === 'summary')) return
+  if (!core.configTrust(root).trusted) return // background work never pops the config dialog; the next agent turn will
   let batch
   try { batch = await core.summaryBatch(root) } catch (e) { console.error('Không kiểm tra được tóm tắt:', e); return }
   if (!batch || jobs.some(job => job.root === root && job.kind === 'summary')) return
@@ -778,10 +855,14 @@ async function executeJob(job) {
       const after = await core.snapshot(job.cwd || job.root, { signal: job.auditController.signal, excludeChat: job.worktree })
       changed = core.changedPaths(before, after)
       paths = changed.filter(file => !core.scopeAllows(job.scope, file))
+      // a file still being written (e.g. by a leftover child process) can't be audited, so it is never auto-committed
+      const settled = snap => ![...snap.values()].some(value => value.startsWith('changing:'))
+      if (!settled(before) || !settled(after)) auditComplete = false
       if (job.worktree) {
         if (!metadataBefore) throw new Error('Không có snapshot metadata ban đầu')
         const metadataAfter = await core.snapshot(job.root, { signal: job.auditController.signal, onlyChat: true })
         metadataChanged = core.changedPaths(metadataBefore, metadataAfter)
+        if (!settled(metadataBefore) || !settled(metadataAfter)) auditComplete = false
         paths.push(...metadataChanged.filter(file => !core.scopeAllows(job.scope, file)))
       }
     } catch { auditComplete = false }
@@ -798,7 +879,7 @@ async function executeJob(job) {
     if (workspace) result.logExtra = { ...(result.logExtra || {}), workspace }
   } catch (e) { workspaceError = e }
 
-  let msg, taskError
+  let msg, taskError, routeNext = false
   if (job.kind === 'summary') {
     try {
       if (result.outcome === 'success') {
@@ -860,12 +941,14 @@ async function executeJob(job) {
         { kind: 'permission-denied', relatedRunId: job.runId, agent: job.name, cli: job.agent.cli, workspaceId: job.workspaceId || null,
           permissionRequestId: pendingPermission?.id || null, denials: result.permissionDenials })
     }
-    if (result.outcome === 'success') await route(job.dir, msg, job.hops + 1, job.chain)
+    routeNext = result.outcome === 'success'
   } finally {
     if (result.orphanState) keepOrphan(job, result.orphanState)
     else releaseReservation(job)
     removeJob(job)
   }
+  // after releasing: routing may wait on the config dialog, and this finished turn must not hold its locks meanwhile
+  if (routeNext) await route(job.dir, msg, job.hops + 1, job.chain).catch(e => console.error(e))
   if (pendingPermission && pendingValid(pendingPermission)) {
     pendingPermissions.set(permissionKey(job.root, job.name), pendingPermission)
     emitPermissions(job.root)
@@ -887,9 +970,7 @@ function registryRecords(root) {
   return [...live, ...old, ...integration]
 }
 function persistRegistry(root) {
-  const file = registryFile(root), temp = file + '.tmp'
-  fs.writeFileSync(temp, JSON.stringify({ version: 2, runs: registryRecords(root) }, null, 2))
-  fs.renameSync(temp, file)
+  core.atomicWrite(registryFile(root), JSON.stringify({ version: 2, runs: registryRecords(root) }, null, 2))
 }
 function releaseReservation(job) {
   job.reserved = false
@@ -1069,6 +1150,33 @@ function watchProject(dir, file = null, workspaceId = null) {
   }
 }
 
+// agents.json/project.json hold permissions, commands and merge checks, but live in the box folder agents can write.
+// core runs on the text the user last accepted (the pin); a different file on disk is only a proposal, shown here
+// before any agent runs. Accept pins exactly what was shown; "Hoàn tác" writes the accepted text back. A box the app
+// never pinned has nothing to go back to: "Huỷ" holds until the next user message, so a chain of @ asks only once.
+const trustPrompts = new Map(), trustDeclined = new Map()
+function ensureTrustedConfig(root) {
+  const check = core.configTrust(root)
+  if (check.trusted) { trustDeclined.delete(root); return Promise.resolve() }
+  const changes = check.changes.join('\n'), files = `${core.chatName(root)}/agents.json, project.json`
+  const untrusted = () => gitError('CONFIG_UNTRUSTED', `Cấu hình (${files}) chưa được xác nhận. Gửi tin mới để được hỏi lại.`)
+  if (!check.pinned && trustDeclined.get(root) === changes) return Promise.reject(untrusted())
+  if (!trustPrompts.has(root)) trustPrompts.set(root, (async () => {
+    const answer = await dialog.showMessageBox(win, { type: 'warning', defaultId: 0, cancelId: 0,
+      buttons: check.pinned ? ['Hoàn tác thay đổi', 'Chấp nhận thay đổi'] : ['Huỷ', 'Tin cậy cấu hình này'],
+      message: check.pinned ? `Cấu hình box «${path.basename(root)}» đã bị sửa ngoài app` : `Box «${path.basename(root)}» có cấu hình app chưa xác nhận`,
+      detail: `${changes}\n\n${check.pinned ? 'Nếu không phải bạn sửa, có thể agent đã tự đổi quyền, lệnh hoặc phạm vi của mình.'
+        : 'Cấu hình này không do app tạo (repo có sẵn, box cũ trước bản cập nhật, hoặc agent tạo). Chỉ tin nếu bạn đã kiểm tra.'}` })
+    if (answer.response === 1) core.trustConfig(root, check.texts)
+    else if (check.pinned) core.revertConfig(root)
+    else { trustDeclined.set(root, changes); throw untrusted() }
+    trustDeclined.delete(root)
+    emitTeam(root)
+    win?.webContents.send('project-settings', root, core.projectSettings(root))
+  })().finally(() => trustPrompts.delete(root)))
+  return trustPrompts.get(root)
+}
+
 function knownProject(dir) {
   if (typeof dir !== 'string') throw new Error('Dự án không hợp lệ')
   const root = rootOf(dir)
@@ -1148,7 +1256,7 @@ const apiCall = async action => { try { return { ok: true, ...await action() } }
 // One box per folder is open at a time (core.chatName). Switching while that folder still has turns, locks, merges or a
 // permission grant in flight would land their results in the other box, so it waits until the folder is idle.
 function assertIdle(root) {
-  if ([...jobs, ...orphans].some(x => x.root === root) || mergeWorkers.has(root) || mergeControllers.has(root) || gitLocks.has(root)
+  if ([...jobs, ...orphans].some(x => x.root === root) || mergeWorkers.has(root) || mergeControllers.has(root) || gitLocks.has(root) || routing.has(root)
     || [...permissionReservations.keys()].some(key => key.startsWith(root + '\0'))) {
     const current = core.boxes(root).find(box => box.chat === core.chatName(root))?.name || path.basename(root)
     throw new Error(`Box «${current}» cùng thư mục còn agent đang chạy hoặc khóa cũ. Chờ xong (hoặc mở lại box đó để Dừng) rồi chuyển.`)
@@ -1227,7 +1335,7 @@ ipcMain.handle('saveProjectSettings', (event, dir, request) => {
     if (request.expectedRevision !== current.revision) throw gitError('CONFLICT', 'Cấu hình đã thay đổi, hãy tải lại')
     const togglesWorktrees = nextSettings.worktreesEnabled !== current.settings.worktreesEnabled
       || JSON.stringify(nextSettings.mergeChecks) !== JSON.stringify(current.settings.mergeChecks)
-    if (togglesWorktrees && ([...jobs, ...orphans].some(item => item.root === root) || mergeControllers.has(root)
+    if (togglesWorktrees && ([...jobs, ...orphans].some(item => item.root === root) || mergeControllers.has(root) || mergeWorkers.has(root)
       || [...permissionReservations.keys()].some(key => key.startsWith(root + '\0'))))
       throw gitError('BUSY', 'Đang có lượt, khóa hoặc kiểm tra gộp; chưa thể đổi cấu hình worktree')
     if (!current.settings.worktreesEnabled && nextSettings.worktreesEnabled) await enableWorktrees(root, nextSettings)
@@ -1252,6 +1360,7 @@ ipcMain.handle('probeAgents', (event, dir, members) => {
   validSender(event)
   return apiCall(async () => {
     const root = knownProject(dir)
+    await ensureTrustedConfig(root) // a probe runs every CLI with the agents' permission flags
     const team = Array.isArray(members) ? core.normalizeTeam(root, members) : core.team(root)
     const results = await Promise.all(team.map(async agent =>
       ({ name: agent.name, cli: agent.cli, model: agent.model || '', ...await core.probe(root, agent) })))
@@ -1279,10 +1388,13 @@ ipcMain.handle('retryMerge', (event, dir, request) => {
       if (!workspace) throw gitError('CONFIG_ERROR', 'Workspace không còn tồn tại')
       const headSha = await gitHead(await verifyWorkspace(root, workspace)), settings = core.projectSettings(root).settings
       const id = randomUUID()
-      registry.queue.push({ ...old, id, runId: randomUUID(), headSha, checks: [...settings.mergeChecks], state: 'queued',
-        baseSha: probe.sha, candidateSha: null, error: null, pgid: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() })
-      old.supersededBy = id
-      writeWorktrees(root, registry)
+      updateRegistry(root, latest => {
+        const current = latest.queue.find(entry => entry.id === old.id)
+        if (!current || current.supersededBy || !RETRYABLE_MERGE_STATES.includes(current.state)) return // changed while we waited
+        latest.queue.push({ ...current, id, runId: randomUUID(), headSha, checks: [...settings.mergeChecks], state: 'queued',
+          baseSha: probe.sha, candidateSha: null, error: null, pgid: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() })
+        current.supersededBy = id
+      })
     })
     pumpMerge(root).catch(e => console.error(e))
     return { state: await emitWorktreeState(root) }
@@ -1353,7 +1465,10 @@ ipcMain.handle('continueChain', (event, dir, request) => {
 ipcMain.handle('send', async (event, dir, text) => {
   validSender(event)
   const root = knownProject(dir), msg = await post(root, 'user', text)
-  await route(root, msg, 0); scheduleSummary(root).catch(e => console.error(e))
+  trustDeclined.delete(root) // a new message from the user may answer the config dialog differently
+  // the message is posted: from here on a failure goes into the chat, never back to the input (resending would duplicate it)
+  try { await route(root, msg, 0) } catch (e) { await post(root, 'system', `Chưa gọi được agent: ${e.message}`, { kind: 'route-error' }) }
+  scheduleSummary(root).catch(e => console.error(e))
 })
 ipcMain.handle('tasks', (event, dir) => { validSender(event); return core.taskBoardIndexed(knownProject(dir)) })
 ipcMain.handle('readProjectFile', (event, dir, href, fromFile, workspaceId) => {
@@ -1363,13 +1478,20 @@ ipcMain.handle('readProjectFile', (event, dir, href, fromFile, workspaceId) => {
 })
 ipcMain.handle('watchProject', (event, dir, file, workspaceId) => { validSender(event); return watchProject(dir, file, workspaceId) })
 ipcMain.handle('openFile', async (event, dir, file, workspaceId) => { validSender(event); const error = await shell.openPath(resolveFile(dir, file, workspaceId)); if (error) throw new Error(error) })
-ipcMain.handle('openLink', async (event, dir, href) => {
+ipcMain.handle('openLink', async (event, dir, href, text = null) => {
   validSender(event)
   if (typeof href !== 'string' || !href || /[\0-\x1f\x7f]/.test(href) || href.startsWith('//')) throw new Error('Liên kết không hợp lệ')
   let url
   try { url = new URL(href) } catch {}
   if (url) {
     if (!['http:', 'https:'].includes(url.protocol) || !url.hostname) throw new Error('Chỉ hỗ trợ liên kết http/https')
+    // agent-written markdown can label a link "reports/plan.md" and point it anywhere: show where it really goes
+    const shown = typeof text === 'string' ? text.trim() : ''
+    if (shown && shown !== href && shown !== url.href) {
+      const answer = await dialog.showMessageBox(win, { type: 'question', buttons: ['Huỷ', 'Mở'], defaultId: 1, cancelId: 0,
+        message: `Mở liên kết ngoài ${url.hostname}?`, detail: `Chữ hiển thị: ${shown.slice(0, 200)}\nĐịa chỉ thật: ${url.href.slice(0, 500)}` })
+      if (answer.response !== 1) return
+    }
     return shell.openExternal(url.href)
   }
   const error = await shell.openPath(resolveFile(dir, href))
@@ -1512,8 +1634,20 @@ ipcMain.handle('releaseLock', async (event, dir, runId) => {
 const singleInstance = app.requestSingleInstanceLock()
 if (!singleInstance) app.quit()
 else app.whenReady().then(() => {
+  core.setTrustFile(path.join(app.getPath('userData'), 'trust.json'))
   for (const dir of projects()) loadOrphans(dir)
   win = new BrowserWindow({ width: 1280, height: 820, webPreferences: { preload: path.join(__dirname, 'preload.js') } })
+  // Closing never stops agents (the user chose that): CLIs keep running detached and may still edit files, but their
+  // answers and the queue are lost, so ask first. Cmd+Q closes the window too, so this covers both.
+  win.on('close', event => {
+    const busy = [...new Set(jobs.filter(job => !job.finished).map(job => `@${job.name}`))]
+    if (mergeWorkers.size) busy.push('kiểm tra gộp')
+    if (!busy.length) return
+    const answer = dialog.showMessageBoxSync(win, { type: 'warning', buttons: ['Ở lại', 'Vẫn thoát'], defaultId: 0, cancelId: 0,
+      message: `${busy.join(', ')} vẫn đang chạy hoặc chờ`,
+      detail: 'App không dừng tiến trình: CLI vẫn chạy ngầm và có thể tiếp tục sửa file, nhưng câu trả lời và hàng chờ của lượt này sẽ mất.' })
+    if (answer !== 1) event.preventDefault()
+  })
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
   win.loadFile('index.html').then(() => win.webContents.on('will-navigate', event => event.preventDefault()))
   app.on('second-instance', () => { if (win.isMinimized()) win.restore(); win.show(); win.focus() })

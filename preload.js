@@ -22,7 +22,7 @@ contextBridge.exposeInMainWorld('api', {
   watchProject: (dir, file = null, workspaceId = null) => ipcRenderer.invoke('watchProject', dir, file, workspaceId),
   stop: (dir, name, runId) => ipcRenderer.invoke('stop', dir, name, runId),
   openFile: (dir, file, workspaceId = null) => ipcRenderer.invoke('openFile', dir, file, workspaceId),
-  openLink: (dir, href) => ipcRenderer.invoke('openLink', dir, href),
+  openLink: (dir, href, text = null) => ipcRenderer.invoke('openLink', dir, href, text),
   releaseLock: (dir, runId) => ipcRenderer.invoke('releaseLock', dir, runId),
   probeAgents: (dir, members) => ipcRenderer.invoke('probeAgents', dir, members),
   saveTeam: (dir, team, options) => ipcRenderer.invoke('saveTeam', dir, team, options),

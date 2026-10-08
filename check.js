@@ -10,14 +10,21 @@ assert.deepStrictEqual(core.mentions('email a@devx.com', t, 'pm'), [])
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-chat-'))
 core.init(dir)
-core.appendLog(dir, { from: 'user', text: 'hi' })
-assert.strictEqual(core.readLog(dir).length, 1)
-assert.ok(core.prompt(dir, core.team(dir)[0]).includes('[user] hi'))
-
-// resume: fresh prompt has full context, resumed prompt only what's new
-assert.ok(!core.prompt(dir, core.team(dir)[0], { id: 'x', seen: 1 }).includes('[user] hi'))
-core.appendLog(dir, { from: 'dev', text: 'xong' })
-assert.ok(core.prompt(dir, core.team(dir)[0], { id: 'x', seen: 1 }).includes('[dev] xong'))
+const promptOf = async (d, agent, session = null) => (await core.promptIndexed(d, agent, session)).text
+async function logChecks() {
+  await core.appendLogIndexed(dir, { from: 'user', text: 'hi' })
+  assert.strictEqual((await core.getLogIndex(dir)).records.length, 1)
+  assert.ok((await promptOf(dir, core.team(dir)[0])).includes('[user] hi'))
+  // resume: fresh prompt has full context, resumed prompt only what's new
+  assert.ok(!(await promptOf(dir, core.team(dir)[0], { id: 'x', seen: 1 })).includes('[user] hi'))
+  await core.appendLogIndexed(dir, { from: 'dev', text: 'xong' })
+  assert.ok((await promptOf(dir, core.team(dir)[0], { id: 'x', seen: 1 })).includes('[dev] xong'))
+  // adopted session: first turn resumes it but still sends the full team briefing
+  assert.ok((await promptOf(dir, core.team(dir)[0], { id: 'x', seen: 2, adopted: true })).includes('Quy tắc nhóm'))
+  // no allowedCommands field → default allowlist offered via run-command, fresh and resumed
+  const plain = { name: 'pm', role: 'x' }
+  assert.ok((await promptOf(dir, plain)).includes('run-command') && (await promptOf(dir, plain, { id: 's', seen: 0 })).includes('npm run check'))
+}
 core.setSession(dir, 'pm', { id: 'a', seen: 2 }); core.setSession(dir, 'qa', { id: 'b', seen: 2 })
 core.setSession(dir, 'pm', null); assert.deepStrictEqual(Object.keys(core.sessions(dir)), ['qa'])
 core.setSession(dir, null, null); assert.deepStrictEqual(core.sessions(dir), {})
@@ -87,8 +94,6 @@ assert.deepStrictEqual(core.CLI.codex.args('p', 'T', { model: 'm1', effort: 'hig
 assert.ok(core.CLI.claude.args('p', null, { model: 'opus', effort: 'max' }).join(' ').includes('--model opus --effort max'))
 assert.ok(core.CLI.claude.args('p').join(' ').includes('--output-format stream-json --verbose'))
 assert.throws(() => core.saveTeam(dir, [{ name: 'x', cli: 'codex', effort: 'high"; rm' }]))
-// adopted session: first turn resumes it but still sends the full team briefing
-assert.ok(core.prompt(dir, core.team(dir)[0], { id: 'x', seen: 2, adopted: true }).includes('Quy tắc nhóm'))
 
 // ---- Sprint 2: owns/readOnly scope, locks, audit snapshot, migration ----
 const proj = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'agent-scope-')))
@@ -130,6 +135,9 @@ assert.deepStrictEqual(S(['CL/**', '!**/_review/**']), { owns: ['CL/**'], exclud
 assert.ok(clash((['src/**']), (['src/a/b.js'])) && clash(([]), (['check.js'])))
 assert.ok(!clash((['src/**']), (['src2/a.js']))) // segment boundary
 if (process.platform === 'darwin') assert.ok(clash((['Index.html']), (['index.html'])))
+// * covers dotfiles (config/* ⊇ config/.env) in scopes, exclusions and locks; scopes fold case like locks
+assert.ok(allows(['config/*'], 'config/.env') && !allows(['secrets/**', '!secrets/*'], 'secrets/.env') && clash((['config/*']), (['config/.env'])))
+if (process.platform === 'darwin') assert.ok(allows(['Src/**'], 'src/a.js') && !allows(['a.js', '!A.js'], 'a.js'))
 
 async function auditChecks() {
   const f = n => path.join(proj, n)
@@ -140,12 +148,20 @@ async function auditChecks() {
   fs.writeFileSync(f('a.txt'), 'bbbb'); fs.utimesSync(f('a.txt'), st.atime, st.mtime) // same size + mtime, new content
   fs.rmSync(f('b.txt')); fs.writeFileSync(f('c.txt'), 'c')
   fs.appendFileSync(f('.chat/memory.md'), '- x\n') // memory is audited
-  core.appendLog(proj, { from: 'user', text: 'x' }); fs.writeFileSync(f('node_modules/x.js'), '2'); fs.writeFileSync(f('dist/app.asar'), '2'); fs.writeFileSync(f('src/.DS_Store'), 'x') // excluded
+  await core.appendLogIndexed(proj, { from: 'user', text: 'x' }); fs.writeFileSync(f('node_modules/x.js'), '2'); fs.writeFileSync(f('dist/app.asar'), '2'); fs.writeFileSync(f('src/.DS_Store'), 'x') // excluded
   const changed = core.changedPaths(before, await core.snapshot(proj))
   assert.deepStrictEqual(changed, ['.chat/memory.md', 'a.txt', 'b.txt', 'c.txt'])
   assert.deepStrictEqual(changed.filter(p => !core.scopeAllows(S(['a.txt', 'c.txt']), p)), ['.chat/memory.md', 'b.txt'])
   const c = new AbortController(); c.abort()
   await assert.rejects(core.snapshot(proj, { signal: c.signal }))
+  // a folder vanishing mid-scan (build temp files) is skipped instead of voiding the whole audit
+  fs.mkdirSync(f('vanish')); for (let i = 0; i < 50; i++) fs.writeFileSync(f(`vanish/${i}`), 'x')
+  const scanning = core.snapshot(proj); fs.rmSync(f('vanish'), { recursive: true })
+  assert.ok(!(await scanning).has('vanish/0'))
+  // scope in the prompt (proj's team was migrated above)
+  assert.ok((await promptOf(proj, tm().techlead)).includes('Chỉ sửa: reports/**'))
+  assert.ok((await promptOf(proj, { name: 'r', role: 'x', readOnly: true })).includes('Chỉ đọc'))
+  assert.ok((await promptOf(proj, { name: 'r', role: 'x' }, { id: 's', seen: 0 })).includes('toàn bộ dự án')) // resumed prompt too
 }
 
 // migration: team() normalizes without writing; saveTeam keeps review flag until confirmed, backs up the original once
@@ -163,14 +179,11 @@ saved = core.saveTeam(proj, core.team(proj).map(a => a.name === 'techlead' ? { .
 assert.ok(!('scopeNeedsReview' in saved[1]) && !('scopeConfirmed' in saved[1]))
 assert.ok(!JSON.parse(fs.readFileSync(path.join(proj, '.chat/agents.json'), 'utf8'))[1].scopeConfirmed)
 assert.strictEqual(fs.readFileSync(path.join(proj, '.chat/agents.json.pre-sprint-2.bak'), 'utf8'), legacy) // backup not overwritten
-assert.ok(core.prompt(proj, tm().techlead).includes('Chỉ sửa: reports/**'))
-assert.ok(core.prompt(proj, { name: 'r', role: 'x', readOnly: true }).includes('Chỉ đọc'))
-assert.ok(core.prompt(proj, { name: 'r', role: 'x' }, { id: 's', seen: 0 }).includes('toàn bộ dự án')) // resumed prompt too
 
 // Markdown: pinned parser, html:false → raw HTML shows as text. The renderer itself is smoke-tested in the app.
 assert.strictEqual(require('./package.json').dependencies['markdown-it'], '15.0.2')
-const page = fs.readFileSync(path.join(__dirname, 'index.html'), 'utf8')
-assert.ok(page.includes('node_modules/markdown-it/dist/browser/markdown-it.umd.min.js') && /markdownit\(\{ html: false/.test(page))
+const page = fs.readFileSync(path.join(__dirname, 'index.html'), 'utf8'), rendererJs = fs.readFileSync(path.join(__dirname, 'renderer.js'), 'utf8')
+assert.ok(page.includes('node_modules/markdown-it/dist/browser/markdown-it.umd.min.js') && /markdownit\(\{ html: false/.test(rendererJs))
 const html = require('markdown-it')({ html: false, linkify: false, breaks: true }).disable('image')
   .render('**đạt**\n\n- a\n\n```\n<script>alert(1)</script>\n```\n\n<img src=x onerror=alert(1)>\n\n[x](javascript:alert(1))\n\n| a | b |\n|---|---|\n| 1 | 2 |')
 assert.ok(html.includes('<strong>đạt</strong>') && html.includes('<li>a</li>') && html.includes('<table>'))
@@ -192,88 +205,90 @@ assert.strictEqual(migrate([{ name: 'lead', cli: 'claude', owns: ['reports/**'] 
 
 // ---- Sprint 3: task board = definitions (.chat/tasks.json) + status events (log.jsonl) ----
 const box = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'agent-tasks-'))); core.init(box) // default team: pm, techlead, dev, qa
-const at = '2026-09-27T12:00:00.000Z', later = '2026-09-27T13:00:00.000Z', tasksFile = path.join(box, '.chat/tasks.json')
-const T = (id, x = {}) => ({ id, title: `Việc ${id}`, assignee: 'dev', spec: 'reports/s.md', createdAt: at, updatedAt: at, ...x })
-const writeTasks = (...tasks) => fs.writeFileSync(tasksFile, JSON.stringify({ version: 1, tasks }))
-const board = () => core.taskBoard(box), task = id => board().tasks.find(t => t.id === id)
-const code = fn => { try { fn(); return 'OK' } catch (e) { return e.code } }
-const change = (id, status, actor = 'pm', rev = task(id).revision) => core.validateTaskChanges(board(), [{ id, status, expectedRevision: rev }], actor)
-const commit = (from, taskUpdates) => core.appendLog(box, { from, text: 'x', at: new Date().toISOString(), kind: 'task-status', taskUpdates })
-const statuses = () => board().tasks.map(t => [t.id, t.status])
+async function taskChecks() {
+  const at = '2026-09-27T12:00:00.000Z', later = '2026-09-27T13:00:00.000Z', tasksFile = path.join(box, '.chat/tasks.json')
+  const T = (id, x = {}) => ({ id, title: `Việc ${id}`, assignee: 'dev', spec: 'reports/s.md', createdAt: at, updatedAt: at, ...x })
+  const writeTasks = (...tasks) => fs.writeFileSync(tasksFile, JSON.stringify({ version: 1, tasks }))
+  const board = () => core.taskBoardIndexed(box), task = async id => (await board()).tasks.find(t => t.id === id)
+  const code = async fn => { try { await fn(); return 'OK' } catch (e) { return e.code } }
+  const change = async (id, status, actor = 'pm', rev) => core.validateTaskChanges(await board(), [{ id, status, expectedRevision: rev ?? (await task(id)).revision }], actor)
+  const commit = async (from, taskUpdates) => core.appendLogIndexed(box, { from, text: 'x', at: new Date().toISOString(), kind: 'task-status', taskUpdates: await taskUpdates })
+  const statuses = async () => (await board()).tasks.map(t => [t.id, t.status])
 
-assert.deepStrictEqual(board(), { tasks: [], error: null }) // no file yet = empty board, not an error
-for (const bad of ['{"version":1,"tasks":[', { version: 2, tasks: [] }, { version: 1, tasks: [T('T1'), T('T1')] },
-  { version: 1, tasks: [{ ...T('T1'), status: 'done' }] }, { version: 1, tasks: [T('T0')] }, { version: 1, tasks: [T('T1', { title: '' })] },
-  { version: 1, tasks: [T('T1', { spec: '../x.md' })] }, { version: 1, tasks: [T('T1', { spec: 'https://x.dev' })] }])
-  assert.strictEqual(code(() => core.parseTaskDefinitions(typeof bad === 'string' ? bad : JSON.stringify(bad), box)), 'DATA_ERROR', JSON.stringify(bad))
+  assert.deepStrictEqual(await board(), { tasks: [], error: null }) // no file yet = empty board, not an error
+  for (const bad of ['{"version":1,"tasks":[', { version: 2, tasks: [] }, { version: 1, tasks: [T('T1'), T('T1')] },
+    { version: 1, tasks: [{ ...T('T1'), status: 'done' }] }, { version: 1, tasks: [T('T0')] }, { version: 1, tasks: [T('T1', { title: '' })] },
+    { version: 1, tasks: [T('T1', { spec: '../x.md' })] }, { version: 1, tasks: [T('T1', { spec: 'https://x.dev' })] }])
+    assert.strictEqual(await code(() => core.parseTaskDefinitions(typeof bad === 'string' ? bad : JSON.stringify(bad), box)), 'DATA_ERROR', JSON.stringify(bad))
 
-writeTasks(T('T1'), T('T2', { assignee: 'qa' }))
-assert.deepStrictEqual(statuses(), [['T1', 'todo'], ['T2', 'todo']])
-const r1 = task('T1').revision; assert.strictEqual(task('T1').revision, r1) // stable across reads
-commit('system', change('T1', 'doing'))
-assert.strictEqual(task('T1').status, 'doing')
-assert.strictEqual(code(() => change('T1', 'review', 'pm', r1)), 'CONFLICT') // second request on the same revision loses
-assert.strictEqual(code(() => change('T1', 'doing', 'pm', r1)), 'CONFLICT') // stale even if status is the same
-assert.deepStrictEqual(change('T1', 'doing'), []) // no-op, nothing to append
-assert.strictEqual(code(() => change('T1', 'review', 'qa')), 'INVALID') // agent may only move its own task
-assert.strictEqual(code(() => change('T2', 'done', 'user')), 'INVALID') // S4: End-User has no write path any more
-assert.strictEqual(change('T2', 'doing', 'PM').length, 1) // S4: PM (any case) may move anyone's task
-const b0 = board()
-assert.strictEqual(code(() => core.validateTaskChanges(b0, b0.tasks.map(t => ({ id: t.id, status: 'done', expectedRevision: t.revision })), 'dev')), 'INVALID') // batch is all-or-nothing
-commit('dev', change('T1', 'review', 'dev'))
-assert.strictEqual(task('T1').status, 'review')
-commit('qa', [{ id: 'T1', createdAt: at, assignee: 'qa', status: 'done', eventId: '00000000-0000-4000-8000-000000000000' }])
-assert.strictEqual(task('T1').status, 'review') // forged event for someone else's task is ignored
+  writeTasks(T('T1'), T('T2', { assignee: 'qa' }))
+  assert.deepStrictEqual(await statuses(), [['T1', 'todo'], ['T2', 'todo']])
+  const r1 = (await task('T1')).revision; assert.strictEqual((await task('T1')).revision, r1) // stable across reads
+  await commit('system', change('T1', 'doing'))
+  assert.strictEqual((await task('T1')).status, 'doing')
+  assert.strictEqual(await code(() => change('T1', 'review', 'pm', r1)), 'CONFLICT') // second request on the same revision loses
+  assert.strictEqual(await code(() => change('T1', 'doing', 'pm', r1)), 'CONFLICT') // stale even if status is the same
+  assert.deepStrictEqual(await change('T1', 'doing'), []) // no-op, nothing to append
+  assert.strictEqual(await code(() => change('T1', 'review', 'qa')), 'INVALID') // agent may only move its own task
+  assert.strictEqual(await code(() => change('T2', 'done', 'user')), 'INVALID') // S4: End-User has no write path any more
+  assert.strictEqual((await change('T2', 'doing', 'PM')).length, 1) // S4: PM (any case) may move anyone's task
+  const b0 = await board()
+  assert.strictEqual(await code(() => core.validateTaskChanges(b0, b0.tasks.map(t => ({ id: t.id, status: 'done', expectedRevision: t.revision })), 'dev')), 'INVALID') // batch is all-or-nothing
+  await commit('dev', change('T1', 'review', 'dev'))
+  assert.strictEqual((await task('T1')).status, 'review')
+  await commit('qa', [{ id: 'T1', createdAt: at, assignee: 'qa', status: 'done', eventId: '00000000-0000-4000-8000-000000000000' }])
+  assert.strictEqual((await task('T1')).status, 'review') // forged event for someone else's task is ignored
 
-// broken data keeps the last good board and blocks changes; never resets statuses to todo
-const goodTasks = fs.readFileSync(tasksFile), logFile = path.join(box, '.chat/log.jsonl'), goodLog = fs.readFileSync(logFile)
-fs.writeFileSync(tasksFile, '{"version":1,')
-const broken = board()
-assert.strictEqual(broken.error.code, 'DATA_ERROR'); assert.deepStrictEqual(broken.tasks.map(t => t.status), ['review', 'todo'])
-assert.strictEqual(code(() => core.validateTaskChanges(broken, [{ id: 'T2', status: 'done', expectedRevision: broken.tasks[1].revision }], 'pm')), 'DATA_ERROR')
-fs.writeFileSync(tasksFile, goodTasks)
-fs.appendFileSync(logFile, '{"from":"system","taskUpd\n')
-assert.strictEqual(board().error.code, 'DATA_ERROR'); assert.strictEqual(board().tasks[0].status, 'review')
-fs.writeFileSync(logFile, goodLog)
-assert.strictEqual(board().error, null)
+  // broken data keeps the last good board and blocks changes; never resets statuses to todo
+  const goodTasks = fs.readFileSync(tasksFile), logFile = path.join(box, '.chat/log.jsonl'), goodLog = fs.readFileSync(logFile)
+  fs.writeFileSync(tasksFile, '{"version":1,')
+  const broken = await board()
+  assert.strictEqual(broken.error.code, 'DATA_ERROR'); assert.deepStrictEqual(broken.tasks.map(t => t.status), ['review', 'todo'])
+  assert.strictEqual(await code(() => core.validateTaskChanges(broken, [{ id: 'T2', status: 'done', expectedRevision: broken.tasks[1].revision }], 'pm')), 'DATA_ERROR')
+  fs.writeFileSync(tasksFile, goodTasks)
+  fs.appendFileSync(logFile, '{"from":"system","taskUpdates":[1]}\n') // valid JSON, broken task metadata (a broken JSON line is LOG_CORRUPT)
+  assert.strictEqual((await board()).error.code, 'DATA_ERROR'); assert.strictEqual((await board()).tasks[0].status, 'review')
+  fs.writeFileSync(logFile, goodLog)
+  assert.strictEqual((await board()).error, null)
 
-// deleted task is not revived; PM adding T3 while the user moves T2 keeps both
-writeTasks(T('T2', { assignee: 'qa' }))
-assert.deepStrictEqual(statuses(), [['T2', 'todo']])
-writeTasks(T('T1'), T('T2', { assignee: 'qa' }))
-assert.strictEqual(board().error.code, 'DATA_ERROR')
-writeTasks(T('T2', { assignee: 'qa' }))
-commit('system', change('T2', 'doing'))
-writeTasks(T('T2', { assignee: 'qa' }), T('T3', { title: 'Mới' }))
-assert.deepStrictEqual(statuses(), [['T2', 'doing'], ['T3', 'todo']])
-writeTasks(T('T2', { assignee: 'qa' }), T('T3', { title: 'Mới' }), T('T4', { assignee: 'ghost' }))
-assert.strictEqual(board().error.code, 'DATA_ERROR') // new task must go to a current member
-const r3 = task('T3').revision
-writeTasks(T('T2', { assignee: 'qa' }), T('T3', { title: 'Sửa' }))
-assert.strictEqual(board().error.code, 'DATA_ERROR') // edit without bumping updatedAt
-writeTasks(T('T2', { assignee: 'qa' }), T('T3', { title: 'Sửa', updatedAt: later }))
-assert.strictEqual(board().error, null)
-assert.strictEqual(code(() => change('T3', 'doing', 'pm', r3)), 'CONFLICT') // metadata edit invalidates old revision
-delete require.cache[require.resolve('./core')] // "restart": fresh module, same files
-assert.deepStrictEqual(require('./core').taskBoard(box).tasks.map(t => [t.id, t.status]), [['T2', 'doing'], ['T3', 'todo']])
+  // deleted task is not revived; PM adding T3 while the user moves T2 keeps both
+  writeTasks(T('T2', { assignee: 'qa' }))
+  assert.deepStrictEqual(await statuses(), [['T2', 'todo']])
+  writeTasks(T('T1'), T('T2', { assignee: 'qa' }))
+  assert.strictEqual((await board()).error.code, 'DATA_ERROR')
+  writeTasks(T('T2', { assignee: 'qa' }))
+  await commit('system', change('T2', 'doing'))
+  writeTasks(T('T2', { assignee: 'qa' }), T('T3', { title: 'Mới' }))
+  assert.deepStrictEqual(await statuses(), [['T2', 'doing'], ['T3', 'todo']])
+  writeTasks(T('T2', { assignee: 'qa' }), T('T3', { title: 'Mới' }), T('T4', { assignee: 'ghost' }))
+  assert.strictEqual((await board()).error.code, 'DATA_ERROR') // new task must go to a current member
+  const r3 = (await task('T3')).revision
+  writeTasks(T('T2', { assignee: 'qa' }), T('T3', { title: 'Sửa' }))
+  assert.strictEqual((await board()).error.code, 'DATA_ERROR') // edit without bumping updatedAt
+  writeTasks(T('T2', { assignee: 'qa' }), T('T3', { title: 'Sửa', updatedAt: later }))
+  assert.strictEqual((await board()).error, null)
+  assert.strictEqual(await code(() => change('T3', 'doing', 'pm', r3)), 'CONFLICT') // metadata edit invalidates old revision
+  delete require.cache[require.resolve('./core')] // "restart": fresh module, same files
+  assert.deepStrictEqual((await require('./core').taskBoardIndexed(box)).tasks.map(t => [t.id, t.status]), [['T2', 'doing'], ['T3', 'todo']])
 
-// prompt: own tasks with revision, fresh and resumed
-const rev3 = task('T3').revision
-assert.ok(core.prompt(box, { name: 'dev', role: 'x' }).includes(rev3))
-assert.ok(core.prompt(box, { name: 'dev', role: 'x' }, { id: 's', seen: 0 }).includes(rev3))
-assert.ok(!core.prompt(box, { name: 'qa', role: 'x' }).includes(rev3))
-const pmPrompt = core.prompt(box, { name: 'pm', role: 'x' }, { id: 's', seen: 0 }) // S4: PM sees every task, with revision
-assert.ok(pmPrompt.includes(rev3) && pmPrompt.includes(task('T2').revision))
-for (const f of ['preload.js', 'main.js']) assert.ok(!fs.readFileSync(path.join(__dirname, f), 'utf8').includes('setTaskStatus'), `${f} còn setTaskStatus`)
-// S7 K3: prompt lists only unfinished tasks + "Đã xong N task." (per visible set); board/validator keep done tasks
-assert.ok(pmPrompt.includes('Đã xong 0 task.') && core.prompt(box, { name: 'qa', role: 'x' }).includes('Đã xong 0 task.'))
-commit('pm', change('T3', 'done'))
-const k3 = (name, s) => core.prompt(box, { name, role: 'x' }, s)
-assert.ok(!k3('pm').includes('"T3"') && k3('pm').includes('"T2"') && k3('pm').includes('Đã xong 1 task.'))
-assert.ok(!k3('dev', { id: 's', seen: 0 }).includes('"T3"') && k3('dev', { id: 's', seen: 0 }).includes('Đã xong 1 task.')) // resume too
-assert.ok(k3('qa').includes('"T2"') && k3('qa').includes('Đã xong 0 task.')) // T3 was dev's, not counted for qa
-assert.deepStrictEqual(statuses(), [['T2', 'doing'], ['T3', 'done']]) // full board still has it
-assert.strictEqual(change('T3', 'review')[0].status, 'review') // PM can still reopen via the full board revision
+  // prompt: own tasks with revision, fresh and resumed
+  const rev3 = (await task('T3')).revision, k3 = (name, s) => promptOf(box, { name, role: 'x' }, s)
+  assert.ok((await k3('dev')).includes(rev3))
+  assert.ok((await k3('dev', { id: 's', seen: 0 })).includes(rev3))
+  assert.ok(!(await k3('qa')).includes(rev3))
+  const pmPrompt = await k3('pm', { id: 's', seen: 0 }) // S4: PM sees every task, with revision
+  assert.ok(pmPrompt.includes(rev3) && pmPrompt.includes((await task('T2')).revision))
+  for (const f of ['preload.js', 'main.js']) assert.ok(!fs.readFileSync(path.join(__dirname, f), 'utf8').includes('setTaskStatus'), `${f} còn setTaskStatus`)
+  // S7 K3: prompt lists only unfinished tasks + "Đã xong N task." (per visible set); board/validator keep done tasks
+  assert.ok(pmPrompt.includes('Đã xong 0 task.') && (await k3('qa')).includes('Đã xong 0 task.'))
+  await commit('pm', change('T3', 'done'))
+  const pm3 = await k3('pm'), dev3 = await k3('dev', { id: 's', seen: 0 }), qa3 = await k3('qa')
+  assert.ok(!pm3.includes('"T3"') && pm3.includes('"T2"') && pm3.includes('Đã xong 1 task.'))
+  assert.ok(!dev3.includes('"T3"') && dev3.includes('Đã xong 1 task.')) // resume too
+  assert.ok(qa3.includes('"T2"') && qa3.includes('Đã xong 0 task.')) // T3 was dev's, not counted for qa
+  assert.deepStrictEqual(await statuses(), [['T2', 'doing'], ['T3', 'done']]) // full board still has it
+  assert.strictEqual((await change('T3', 'review'))[0].status, 'review') // PM can still reopen via the full board revision
+}
 
 // task-status block: only a closed ```task-status fence at the very end of the final answer
 const P = core.parseTaskStatusBlock, blk = j => '```task-status\n' + j + '\n```', one = '[{"id":"T1","status":"review","expectedRevision":"r"}]'
@@ -315,7 +330,6 @@ let tv = core.team(av)
 assert.deepStrictEqual(tv.map(a => a.allowedCommands), tv.map(() => ['npm run check'])) // missing field → default
 assert.deepStrictEqual(tv.map(a => [a.avatar.gender, a.avatar.color]), [['male', '#ff8fab'], ['female', '#7cb4ff'], ['male', '#5fe0b0'], ['female', '#ffa94d']])
 assert.strictEqual(fs.readFileSync(avFile, 'utf8'), avRaw) // reading does not write
-assert.ok(core.prompt(av, tv[0]).includes('run-command') && core.prompt(av, tv[0], { id: 's', seen: 0 }).includes('npm run check'))
 let sv = core.saveTeam(av, tv.map((a, i) => i ? a : { ...a, allowedCommands: [], avatar: { gender: 'female', color: '#ffd23f' } }))
 assert.deepStrictEqual([sv[0].allowedCommands, sv[0].avatar], [[], { gender: 'female', color: '#ffd23f' }]) // [] stays off
 sv = core.saveTeam(av, core.team(av).map(({ allowedCommands, ...a }) => a)) // old client without the field
@@ -357,10 +371,16 @@ async function viewerChecks() {
 }
 
 // ---- core.run with a fake `codex` on PATH: stream split mid-UTF-8, Stop kills the process group, session survives ----
-const bin = fs.mkdtempSync(path.join(os.tmpdir(), 'fake-cli-')), argsLog = path.join(bin, 'args'), pidFile = path.join(bin, 'pid')
+const bin = fs.mkdtempSync(path.join(os.tmpdir(), 'fake-cli-')), argsLog = path.join(bin, 'args'), pidFile = path.join(bin, 'pid'), sandboxLog = path.join(bin, 'sandbox')
 fs.writeFileSync(path.join(bin, 'codex'), `#!${process.execPath}
 const fs = require('fs'), out = s => process.stdout.write(s)
-fs.appendFileSync(${JSON.stringify(argsLog)}, JSON.stringify(process.argv.slice(2)) + '\\n')
+if (process.argv[2] === 'sandbox') { // codex sandbox … -C <dir> -- <cmd…>: log it, run the command
+  const argv = process.argv.slice(2), i = argv.indexOf('--')
+  fs.appendFileSync(${JSON.stringify(sandboxLog)}, JSON.stringify(argv) + '\\n')
+  process.exit(require('child_process').spawnSync(argv[i + 1], argv.slice(i + 2), { cwd: argv[argv.indexOf('-C') + 1], stdio: 'inherit' }).status ?? 1)
+}
+const argv = process.argv.slice(2), p = argv.at(-1) === '-' ? fs.readFileSync(0, 'utf8') : argv.at(-1) // "-" = prompt over stdin
+fs.appendFileSync(${JSON.stringify(argsLog)}, JSON.stringify([...argv, p]) + '\\n') // logged with the prompt last
 if (process.env.FAKE_MODE === 'gone' && process.argv.includes('resume')) { process.stderr.write('Error: no rollout found for thread id T1\\n'); process.exit(1) }
 out(JSON.stringify({ type: 'thread.started', thread_id: process.env.FAKE_TID || 'T1' }) + '\\n')
 // like real codex: turn.completed carries the thread's running total, not this turn's tokens
@@ -377,7 +397,7 @@ if (process.env.FAKE_MODE === 'slow') {
   out(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: '@pm làm tiếp' } }) + '\\n')
   setInterval(() => {}, 1000)
 } else if (process.env.FAKE_MODE !== 'ok') { // Sprint 5 modes: cmd:<command>, loop, empty, empty2, task, broken
-  const mode = process.env.FAKE_MODE, argv = process.argv.slice(2), p = argv[argv.length - 1], F = '\\x60'.repeat(3)
+  const mode = process.env.FAKE_MODE, F = '\\x60'.repeat(3)
   const ask = command => 'Chạy\\n' + F + 'run-command\\n' + JSON.stringify({ command }) + '\\n' + F
   const reply = text => { if (text) out(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text } }) + '\\n'); out(JSON.stringify({ type: 'turn.completed', usage: usage(process.env.FAKE_IN === 'null' ? null : Number(process.env.FAKE_IN || 3), 2) }) + '\\n') }
   if (mode === 'broken') process.exit(1)
@@ -409,6 +429,7 @@ async function runChecks() {
   assert.ok(ok.usage.durationMs > 0); assert.ok(labels.includes('đang trả lời…'))
   const seen = core.sessions(dir).dev.seen
   assert.deepStrictEqual(core.sessions(dir).dev.id, 'T1')
+  assert.ok(!('adopted' in core.sessions(dir).dev) && lastArgs().at(-2) === '-') // briefing read → not "adopted"; prompt went over stdin
 
   // Stop mid-turn: ≤2s, whole group gone (incl. child sleep), session T1 and seen kept. No-route of the @mention is main.js's job.
   process.env.FAKE_MODE = 'slow'; fs.rmSync(pidFile, { force: true })
@@ -431,6 +452,7 @@ async function runChecks() {
   process.env.FAKE_MODE = 'ok'
   assert.strictEqual((await core.run(dir, agent)).outcome, 'success')
   const a = lastArgs(); assert.ok(a.includes('resume') && a.includes('T1'), 'lượt sau không resume T1: ' + a.join(' '))
+  assert.ok(a.at(-1).startsWith('## Tin nhắn mới trong nhóm'), 'lượt resume lại gửi cả briefing') // incremental prompt only
 
   // ---- Sprint 5 A: agent asks, app runs the exact allowed command, same session gets the real result ----
   const put = (f, s) => fs.writeFileSync(path.join(dir, f), s)
@@ -446,6 +468,8 @@ async function runChecks() {
   assert.ok(j.commandResults[0].stdout.includes('@pm xanh') && ran() === 1)
   assert.deepStrictEqual([j.usage.inputTokens, j.usage.outputTokens], [6, 4]) // both CLI segments summed into one terminal
   assert.ok(lastArgs().includes('resume') && lastArgs().includes('T1')) // result goes back to the same session
+  const sandboxed = () => fs.existsSync(sandboxLog) ? fs.readFileSync(sandboxLog, 'utf8').trim().split('\n').map(l => JSON.parse(l)) : []
+  assert.deepStrictEqual([sandboxed().at(-1), j.commandResults[0].command], [['sandbox', '--permission-profile', ':workspace', '-C', dir, '--', 'node', 'ok.js'], 'node ok.js']) // codex agent: inside codex's sandbox
   j = await job('cmd:node fail.js'); assert.deepStrictEqual([j.text, j.commandResults[0].exitCode], ['kết quả 1 lỗi', 1]) // red stays red
   for (const bad of ['node ok.js --x', 'node', 'rm -rf x', 'node ok.js; rm x', 'node $(id)']) {
     j = await job('cmd:' + bad)
@@ -453,6 +477,15 @@ async function runChecks() {
   }
   assert.strictEqual(ran(), 1) // nothing outside the allowlist was spawned
   j = await job('cmd:node ok.js', { ...dev5, allowedCommands: [] }); assert.ok(j.commandResults[0].error) // [] = off
+  const nSandbox = sandboxed().length
+  j = await job('cmd:node ok.js', { ...dev5, permissions: { mode: 'full', allowTools: [], networkAccess: false } })
+  assert.deepStrictEqual([j.commandResults[0].exitCode, sandboxed().length], [0, nSandbox]) // full access: runs directly
+  // agy has no sandbox of its own: its commands borrow codex's; without a codex CLI they are refused, never run bare
+  const agyRun = await core.runCommand(dir, 'node ok.js', { agent: { cli: 'agy', permissions: { mode: 'edit', allowTools: [], networkAccess: false } } })
+  assert.deepStrictEqual([agyRun.exitCode, sandboxed().length, sandboxed().at(-1).slice(-3)], [0, nSandbox + 1, ['--', 'node', 'ok.js']])
+  const realPath = process.env.PATH; process.env.PATH = ''
+  const noCodex = await core.runCommand(dir, 'node ok.js', { agent: { cli: 'agy' } }); process.env.PATH = realPath
+  assert.ok(noCodex.error.startsWith('Cần cài codex CLI'), noCodex.error)
   j = await job('loop'); assert.deepStrictEqual([j.outcome, j.calls, j.commandResults.length], ['error', 4, 3]); assert.ok(j.text.includes('3 lần'))
 
   // Stop while the runner is busy: group dies, no resume afterwards
@@ -511,7 +544,7 @@ async function sprint7Checks() {
   assert.ok(!core.sessionRotationPending(k, r.s)) // = limit → no rotation
   r = await go({ FAKE_IN: '150001' }, k, 'run-2'); assert.ok(r.args.includes('resume') && r.args.includes('S1'))
   assert.ok(core.sessionRotationPending(k, r.s))
-  core.appendLog(d, { from: 'user', text: 'tin gần đây K2' }); fs.appendFileSync(path.join(d, '.chat', 'memory.md'), '- nhớ K1\n')
+  await core.appendLogIndexed(d, { from: 'user', text: 'tin gần đây K2' }); fs.appendFileSync(path.join(d, '.chat', 'memory.md'), '- nhớ K1\n')
   // K2 parser: 3–5 lines, may precede task-status, never with run-command
   const F = '`'.repeat(3), ho = body => `Tin cho nhóm @pm.\n${F}handoff\n${body}\n${F}`
   let p = core.parseHandoffBlock(ho('- a\n- b @dev\n- c'))
@@ -551,15 +584,18 @@ async function sprint7Checks() {
   // summary job (trackSession:false) does not touch the session record
   const before = JSON.stringify(core.sessions(d)); process.env.FAKE_TID = 'SX'
   await core.run(d, k, { trackSession: false, initialPrompt: 'tóm tắt' }); assert.strictEqual(JSON.stringify(core.sessions(d)), before)
+  // a temp file planted as a hard link is replaced, never written into
+  const hf = path.join(d, '.chat', 'handoff', 'k.md'), victim = path.join(d, 'victim.txt'); fs.writeFileSync(victim, 'nguyên vẹn'); fs.linkSync(victim, hf + '.tmp')
+  core.writeHandoff(d, 'k', null, 'r', '1\n2\n3'); assert.strictEqual(fs.readFileSync(victim, 'utf8'), 'nguyên vẹn')
   // handoff symlink is refused on read and write
-  const hf = path.join(d, '.chat', 'handoff', 'k.md'); fs.rmSync(hf); fs.symlinkSync('/etc/hosts', hf)
+  fs.rmSync(hf); fs.symlinkSync('/etc/hosts', hf)
   assert.strictEqual(core.readHandoff(d, 'k', null), null)
   assert.throws(() => core.writeHandoff(d, 'k', null, 'r', '1\n2\n3')); assert.strictEqual(fs.readlinkSync(hf), '/etc/hosts')
   for (const key of ['FAKE_TEXT', 'FAKE_TID', 'FAKE_IN']) delete process.env[key]
   // T27 (static; the popup/⚙ still need a manual look): labels from the contract and the sessions event are wired
-  const ui = fs.readFileSync(path.join(__dirname, 'index.html'), 'utf8')
+  const ui = fs.readFileSync(path.join(__dirname, 'renderer.js'), 'utf8')
   for (const s of ['Ngưỡng xoay phiên (token vào)', '0 = tắt. Áp dụng cho lượt kế tiếp.', 'Token vào lượt gần nhất', 'Chưa có số đo',
-    'Tự xoay: tắt', 'Sẽ mở phiên mới ở lượt kế tiếp', 'Không nhớ phiên', "'sessions-changed'"]) assert.ok(ui.includes(s), `index.html thiếu: ${s}`)
+    'Tự xoay: tắt', 'Sẽ mở phiên mới ở lượt kế tiếp', 'Không nhớ phiên', "'sessions-changed'"]) assert.ok(ui.includes(s), `renderer.js thiếu: ${s}`)
 }
 
 // ---- Sprint 8 P core: permissions schema/migration, argv per CLI (fresh + resume), denial normalization ----
@@ -615,6 +651,39 @@ function sprint8Checks() {
   }
   assert.ok(!core.CLI.agy.args('P', null, A('agy', DEF)).includes('--dangerously-skip-permissions'))
   assert.ok(core.CLI.agy.args('P', 'C', A('agy', { ...DEF, mode: 'full' })).includes('--dangerously-skip-permissions'))
+  // readOnly is enforced by each CLI and wins over full: claude never bypasses (default mode, Bash only for its commands,
+  // no edit tools), codex read-only sandbox, agy plan mode
+  const ro = (cli, mode) => A(cli, { ...DEF, mode }, { readOnly: true })
+  args = core.CLI.claude.args('P', 'S', ro('claude', 'full'))
+  assert.deepStrictEqual([args.slice(0, 2), flags(args, '--permission-mode'), flags(args, '--allowedTools'), flags(args, '--disallowedTools'),
+    core.CLI.claude.stdinArgs('S', ro('claude', 'edit')).includes('NotebookEdit')], [['-p', 'P'], ['default'], ['Bash(npm run check)'], ['Edit', 'Write', 'MultiEdit', 'NotebookEdit'], true])
+  assert.deepStrictEqual(toml(core.CLI.codex.args('P', 'T', ro('codex', 'full'))), ['sandbox_mode="read-only"', 'approval_policy="never"'])
+  args = core.CLI.agy.args('P', null, ro('agy', 'full')); assert.ok(flags(args, '--mode')[0] === 'plan' && !args.includes('--dangerously-skip-permissions'))
+  // trust: the text pinned in userData is what the app uses; the disk is only a proposal until the user confirms what they saw
+  const errorCode = fn => { try { fn() } catch (e) { return e.code } }
+  core.setTrustFile(path.join(d, 'trust.json'))
+  let ct = core.configTrust(d) // never-seen box (cloned repo, agent-made .chatN): untrusted, listing what every agent may do
+  assert.deepStrictEqual([ct.trusted, ct.pinned, ct.changes[0].startsWith('@c: {') && ct.changes[0].includes('"cli":"claude"') && ct.changes[0].includes('"mode":"custom"')], [false, false, true])
+  core.saveTeam(d, core.team(d)); ct = core.configTrust(d); assert.strictEqual(ct.pinned, false) // an app write (scope migration…) never confirms a box
+  core.trustConfig(d, ct.texts); assert.ok(core.configTrust(d).trusted)
+  const forged = JSON.parse(ct.texts['agents.json']); forged[0].permissions = { ...DEF, mode: 'full' }
+  fs.writeFileSync(agentsFile, JSON.stringify(forged)); ct = core.configTrust(d)
+  assert.deepStrictEqual([ct.trusted, ct.changes.length, /^@c: permissions \{"mode":"custom".* → \{"mode":"full"/.test(ct.changes[0]), core.team(d)[0].permissions.mode],
+    [false, 1, true, 'custom']) // team() keeps the pinned text while the disk differs
+  fs.writeFileSync(agentsFile, '[]'); core.trustConfig(d, ct.texts)
+  assert.strictEqual(core.team(d)[0].permissions.mode, 'full') // pins the texts the dialog showed, not the disk now
+  core.revertConfig(d); assert.strictEqual(fs.readFileSync(agentsFile, 'utf8'), ct.texts['agents.json']) // revert puts the confirmed text back
+  core.saveTeam(d, core.team(d)); assert.ok(core.configTrust(d).trusted) // an app write pins exactly what it writes
+  // a symlinked box folder is refused: pins are keyed by the box path, a link would swap the config under it
+  const sb = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-sbox-')); fs.mkdirSync(path.join(sb, 'copy')); fs.symlinkSync(path.join(sb, 'copy'), path.join(sb, '.chat'))
+  ct = core.configTrust(sb)
+  assert.deepStrictEqual([ct.trusted, /symlink/.test(ct.changes[0]), errorCode(() => core.init(sb)), errorCode(() => core.trustConfig(sb, ct.texts))], [false, true, 'UNSUPPORTED', 'UNSUPPORTED'])
+  core.setTrustFile(null)
+  // init and temp+rename writes never write through a planted (dangling) symlink
+  const sl = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-link-')), out = path.join(sl, 'outside')
+  fs.mkdirSync(path.join(sl, '.chat')); fs.symlinkSync(out, path.join(sl, '.chat', 'agents.json')); fs.symlinkSync(out, path.join(sl, '.chat', 'sessions.json.tmp'))
+  core.init(sl); core.setSession(sl, 'pm', { id: 'a', seen: 0 })
+  assert.ok(!fs.existsSync(out) && fs.lstatSync(path.join(sl, '.chat', 'agents.json')).isSymbolicLink() && core.sessions(sl).pm.id === 'a')
   assert.deepStrictEqual(core.permissionRules({ cli: 'codex2', allowedCommands: ['npm run check'], permissions: DEF }), []) // suffixed account → codex rules
   assert.deepStrictEqual(core.permissionRules({ cli: 'claude2', allowedCommands: ['npm run check'], permissions: DEF }), ['Bash(npm run check)'])
 
@@ -677,6 +746,18 @@ async function sprint6Checks() {
   await assert.rejects(core.acceptSummary(d, batch, 'x', 'r2')) // stale checkpoint refused
   core.writeProjectSettings(d, { ...st, autoSummary: false }, core.projectSettings(d).revision)
   assert.strictEqual(await core.summaryBatch(d), null) // turned off in ⚙
+  // a crash mid-append (unfinished last line) moves to log.jsonl.bad-* on the next append instead of blocking the log for good
+  const total = (await core.getLogIndex(d)).records.length
+  fs.appendFileSync(log, '{"from":"dev","text":"đứt')
+  const fixed = await core.appendLogIndexed(d, { from: 'user', text: 'sau sự cố', at })
+  const bad = fs.readdirSync(path.join(d, '.chat')).filter(f => f.startsWith('log.jsonl.bad-'))
+  assert.deepStrictEqual([fixed.message.seq, bad.length, fs.readFileSync(path.join(d, '.chat', bad[0]), 'utf8')], [total, 1, '{"from":"dev","text":"đứt'])
+  fs.renameSync(log, log + '.real'); fs.symlinkSync(log + '.real', log) // log.jsonl must be a real file…
+  await assert.rejects(core.appendLogIndexed(d, { from: 'user', text: 'x', at }), { code: 'LOG_CORRUPT' })
+  fs.rmSync(log); fs.renameSync(log + '.real', log)
+  fs.linkSync(log, log + '.link') // …and not a hard link (an agent could link it to a file outside its sandbox)
+  await assert.rejects(core.appendLogIndexed(d, { from: 'user', text: 'x', at }), { code: 'LOG_CORRUPT' })
+  fs.rmSync(log + '.link')
 
   // T23: token & cost panel lives in the right column between the task board and File chung, not in the header
   const ui = fs.readFileSync(path.join(__dirname, 'index.html'), 'utf8'), aside = ui.indexOf('<aside>')
@@ -687,14 +768,18 @@ async function sprint6Checks() {
 
 // Run the real settings/merge handlers with a minimal DOM; no Electron/CLI lookup needed.
 async function rendererChecks() {
-  const ui = fs.readFileSync(path.join(__dirname, 'index.html'), 'utf8'), vm = require('vm'), nodes = new Map(), notices = []
+  const ui = fs.readFileSync(path.join(__dirname, 'renderer.js'), 'utf8'), vm = require('vm'), nodes = new Map(), notices = []
+  const part = (from, to) => ui.slice(ui.indexOf(from), ui.indexOf(to, ui.indexOf(from)))
+  const all = node => [node, ...(node.children || []).flatMap(all)]
   const el = (tag, className = '', textContent = '') => ({ tag, className, textContent, style: {}, children: [],
-    append(...children) { this.children.push(...children) }, replaceChildren(...children) { this.children = children },
-    setAttribute() {}, showModal() { this.open = true } })
+    append(...children) { this.children.push(...children) }, prepend(...children) { this.children.unshift(...children) },
+    replaceChildren(...children) { this.children = children }, focus() { context.document.activeElement = this },
+    querySelectorAll() { return all(this).slice(1).filter(node => ['input', 'textarea', 'select', 'button'].includes(node.tag)) },
+    classList: { toggle() {}, add() {}, remove() {} }, setAttribute() {}, showModal() { this.open = true } })
   const $ = id => { if (!nodes.has(id)) nodes.set(id, el('div')); return nodes.get(id) }
   const session = { id: 'saved-session', cli: 'codex', workspaceId: 'workspace', seen: 42, at: '2026-09-27T00:00:00Z' }
-  const context = vm.createContext({ $, el, structuredClone, dir: '/box', openSeq: 1, notices,
-    team: [{ name: 'dev', cli: 'codex', avatar: { gender: 'male', color: '#abc' } }],
+  const context = vm.createContext({ $, el, structuredClone, dir: '/box', openSeq: 1, openingDir: null, notices, document: { activeElement: null },
+    team: [{ name: 'dev', cli: 'codex', avatar: { gender: 'male', color: '#abc' } }], currentTeamRevision: 'team-r1',
     currentSettings: { worktreesEnabled: true }, currentSettingsRevision: null,
     worktreeState: { enabled: true, agents: [{ name: 'dev', workspaceId: 'workspace' }] }, currentPopoverAgent: null,
     AVATAR_PALETTE: ['#abc'], PALETTE_NAMES: {}, createAvatarSvg: () => el('svg'), avatar: () => el('svg'),
@@ -702,20 +787,73 @@ async function rendererChecks() {
     showToast: message => notices.push(message),
     api: { sessions: async () => ({ dev: session }), accounts: async () => ['codex'],
       models: async () => ({ models: [] }), cliSessions: async () => [],
+      projectSettings: async () => ({ ok: false }), worktreeState: async () => ({ ok: false }),
       retryMerge: async () => ({ ok: false, error: { code: 'BUSY', message: 'merge busy' } }),
       requestMergeRepair: async () => ({ ok: false, error: { code: 'INVALID_ARGUMENT', message: 'repair rejected' } }),
       stopMerge: async () => ({ ok: false, error: { code: 'BUSY', message: 'stop busy' } }) } })
-  vm.runInContext(ui.slice(ui.indexOf('  // ---- settings:'), ui.indexOf('  let gitInitToken')), context)
+  vm.runInContext(part('function validateAllowedCommands', 'const hhmm'), context)
+  vm.runInContext(part('// ---- settings:', 'let toastTimer'), context)
   await $('#gear').onclick()
   assert.strictEqual($('#settings').open, true, 'gear must open settings for agents that remember sessions')
-  const all = node => [node, ...(node.children || []).flatMap(all)]
   let options = all($('#editors')).filter(node => node.value === 'saved-session')
   assert.ok(options.some(node => node.selected), 'current workspace session must be selected')
   vm.runInContext("draft[0].cli = 'claude'; renderEditors()", context)
   options = all($('#editors')).filter(node => node.value === 'saved-session')
   assert.strictEqual(options.length, 0, 'switching CLI must not reuse the previous CLI session')
 
-  vm.runInContext(ui.slice(ui.indexOf('  // --- Sprint 6: Worktree & Merge Queue UI'), ui.indexOf('  function resizeInput()')), context)
+  // Save sends the revision the draft was read at: a team change meanwhile (e.g. a permission just granted) must
+  // come back as CONFLICT, not be overwritten by the stale draft
+  await $('#gear').onclick()
+  context.currentTeamRevision = 'team-r2' // team-changed while the dialog is open
+  $('#setting-chain-limit').value = '12'
+  let sentRevision
+  context.api.saveTeam = async (d, members, opts) => { sentRevision = opts.expectedRevision; return { ok: false, error: { message: 'conflict' } } }
+  await $('#save').onclick()
+  assert.deepStrictEqual([sentRevision, $('#err').textContent], ['team-r1', 'conflict'])
+
+  // ⚙ whose lookups return after a project switch must not open A's team under B
+  let release
+  context.api.accounts = () => new Promise(resolve => { release = resolve })
+  $('#settings').open = false
+  const opening = $('#gear').onclick()
+  context.dir = '/other-box'; context.openSeq++
+  release(['codex']); await opening
+  assert.strictEqual($('#settings').open, false, 'settings opened for the previous project')
+  context.dir = '/box'; context.api.accounts = async () => ['codex']
+  // …nor while a project is still opening (openSeq already moved, `team` is still the old one's)
+  context.openingDir = '/other-box'
+  await $('#gear').onclick()
+  assert.strictEqual($('#settings').open, false, 'settings opened with the previous project\'s team')
+  context.openingDir = null
+
+  // after Xoá, focus must not land on the next member's Xoá (one Enter away from deleting it too)
+  context.team = [...context.team, { name: 'qa', cli: 'codex', avatar: { gender: 'female', color: '#abc' } }]
+  await $('#gear').onclick()
+  const xoa = () => all($('#editors')).filter(node => node.tag === 'button' && node.textContent === 'Xoá')
+  xoa()[0].focus(); xoa()[0].onclick()
+  assert.strictEqual(xoa().length, 1)
+  assert.notStrictEqual(context.document.activeElement, xoa()[0], 'focus moved onto the next member\'s Xoá')
+
+  // a page only moves the edge it extended; a live message past the page end keeps "more after"
+  Object.assign(context, { logGeneration: null, logHasBefore: false, logHasAfter: false, newestLiveSeq: 120, last: null,
+    unreadNewMessagesCount: 0, isPagingLoading: false, msgFragment: () => el('frag') })
+  vm.runInContext(part('let seenMsgs', 'const activeRuns'), context)
+  vm.runInContext(part('let logWindow', "$('#log').addEventListener('scroll'"), context)
+  context.renderLoadedPage({ generation: 'g', hasBefore: true, hasAfter: true, end: 100, messages: [] }, 'prepend')
+  assert.deepStrictEqual([context.logHasBefore, context.logHasAfter], [true, false], 'a `before` page must not mark the end unloaded')
+  context.renderLoadedPage({ generation: 'g', hasBefore: false, hasAfter: false, end: 110, messages: [{ seq: 109 }] }, 'append')
+  assert.deepStrictEqual([context.logHasBefore, context.logHasAfter], [true, true], 'live message 120 is past this page')
+  assert.strictEqual(vm.runInContext("firstSeen('g', 109)", context), false, 'a paged message must not be appended again by its live event')
+  // a paging reply that lands after a jump (replace) belongs to the old window: drop it
+  let reply
+  context.api.logPage = () => new Promise(resolve => { reply = resolve })
+  context.document.querySelectorAll = () => [{ dataset: { seq: '109' } }]
+  const paging = context.loadLaterPage()
+  context.renderLoadedPage({ generation: 'g', hasBefore: true, hasAfter: false, end: 130, messages: [] }, 'replace')
+  reply({ ok: true, page: { generation: 'g', hasBefore: true, hasAfter: true, end: 120, messages: [] } }); await paging
+  assert.deepStrictEqual([$('#log').children.length, context.logHasAfter], [1, false], 'stale paging reply appended after a jump')
+
+  vm.runInContext(part('// --- Sprint 6: Worktree & Merge Queue UI', 'function resizeInput()'), context)
   vm.runInContext("renderMergeQueue([{id:'done',agent:'dev',state:'merged'}, {id:'blocked',agent:'dev',state:'blocked-dirty',canRetry:true,canRepair:true,canStop:true}])", context)
   assert.strictEqual(Number($('#merge-count').textContent), 1, 'merged history is not pending work')
   assert.strictEqual($('#merge-queue').children.length, 1)
@@ -746,7 +884,7 @@ async function mainHarness() {
   let dialogs = 0, dialogAnswer = 0, pickPath = null
   const webContents = { send: (...a) => sent.push(a), setWindowOpenHandler() {}, on() {} }
   const electron = { app: { getPath: () => userData, requestSingleInstanceLock: () => true, whenReady: () => Promise.resolve(), on() {}, quit() {} },
-    BrowserWindow: function () { return { webContents, loadFile: () => Promise.resolve(), isMinimized: () => false } },
+    BrowserWindow: function () { return { webContents, loadFile: () => Promise.resolve(), isMinimized: () => false, on() {} } },
     ipcMain: { handle: (name, fn) => { handlers[name] = fn } }, shell: {},
     dialog: { showMessageBox: async () => { dialogs++; return { response: dialogAnswer, checkboxChecked: true } },
       showOpenDialog: async () => ({ canceled: !pickPath, filePaths: [pickPath] }) } }
@@ -756,7 +894,12 @@ async function mainHarness() {
   // fake codex: agent name from the prompt; FAKE_EDITS {agent: [[file, line, text]]}, FAKE_REPLY {agent: text}, FAKE_PROGRESS → touch a file
   const mbin = fs.mkdtempSync(path.join(os.tmpdir(), 'fake-main-'))
   fs.writeFileSync(path.join(mbin, 'codex'), `#!${process.execPath}
-const fs = require('fs'), p = process.argv[process.argv.length - 1], me = (/Bạn là @([\\w-]+)/.exec(p) || [])[1] || '?'
+const fs = require('fs'), last = process.argv.at(-1)
+if (process.argv[2] === 'sandbox') { // codex sandbox … -C <dir> -- <cmd…> (app-run checks): just run the command there
+  const a = process.argv.slice(2), i = a.indexOf('--')
+  process.exit(require('child_process').spawnSync(a[i + 1], a.slice(i + 2), { cwd: a[a.indexOf('-C') + 1], stdio: 'inherit' }).status ?? 1)
+}
+const p = last === '-' ? fs.readFileSync(0, 'utf8') : last, me = (/Bạn là @([\\w-]+)/.exec(p) || [])[1] || '?' // "-" = prompt over stdin
 const out = o => process.stdout.write(JSON.stringify(o) + '\\n')
 for (const [file, line, text] of JSON.parse(process.env.FAKE_EDITS || '{}')[me] || []) {
   const lines = fs.readFileSync(file, 'utf8').split('\\n'); lines[line] = text; fs.writeFileSync(file, lines.join('\\n'))
@@ -769,7 +912,9 @@ out({ type: 'turn.completed', usage: { input_tokens: Number(process.env.FAKE_IN 
   // fake claude: denies Bash(npm test) unless granted via --allowedTools or full; FAKE_CLAUDE=emptydeny|emptynodeny for the retry rules
   const claudeLog = path.join(mbin, 'claude-args')
   fs.writeFileSync(path.join(mbin, 'claude'), `#!${process.execPath}
-const fs = require('fs'), argv = process.argv.slice(2), p = argv[argv.indexOf('-p') + 1], mode = process.env.FAKE_CLAUDE || ''
+const fs = require('fs'), argv = process.argv.slice(2), mode = process.env.FAKE_CLAUDE || ''
+if (argv[argv.indexOf('-p') + 1].startsWith('--')) argv.splice(argv.indexOf('-p') + 1, 0, fs.readFileSync(0, 'utf8')) // stdin prompt, logged where argv had it
+const p = argv[argv.indexOf('-p') + 1]
 fs.appendFileSync(${JSON.stringify(claudeLog)}, JSON.stringify(argv) + '\\n')
 const out = o => process.stdout.write(JSON.stringify(o) + '\\n'), i = argv.indexOf('--allowedTools')
 const granted = (i >= 0 && argv.slice(i + 1).includes('Bash(npm test)')) || argv.includes('bypassPermissions')
@@ -790,16 +935,20 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
       ...(name === 'dev-r' ? { sessionTokenLimit: 100 } : {}) }))))
   fs.writeFileSync(at('a.txt'), Array.from({ length: 10 }, (_, i) => `l${i}`).join('\n'))
   fs.writeFileSync(at('package.json'), JSON.stringify({ name: 'fixture', private: true, scripts: { check: 'node chk.js' } }))
-  fs.writeFileSync(at('chk.js'), 'if (require("fs").readFileSync("a.txt", "utf8").includes("RED")) { console.error("check đỏ"); process.exit(1) }')
+  fs.writeFileSync(at('chk.js'), 'if (process.env.CHECK_SLOW_MS) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Number(process.env.CHECK_SLOW_MS))\n'
+    + 'if (require("fs").readFileSync("a.txt", "utf8").includes("RED")) { console.error("check đỏ"); process.exit(1) }')
   fs.writeFileSync(at('.gitignore'), '.chat/\nnode_modules/\n'); fs.mkdirSync(at('node_modules')); fs.writeFileSync(at('node_modules/.keep'), '')
   const git = (...args) => execFileSync('git', ['-C', root, '-c', 'user.name=QA', '-c', 'user.email=qa@local', ...args], { encoding: 'utf8' })
   git('init', '-q', '-b', 'main'); git('add', 'a.txt', 'package.json', 'chk.js', '.gitignore'); git('commit', '-q', '-m', 'init')
   fs.writeFileSync(path.join(userData, 'projects.json'), JSON.stringify([root]))
 
   require('./main'); await new Promise(r => setImmediate(r))
+  core.trustConfig(root, core.configTrust(root).texts) // the fixture team is the user's own: pin it as accepted
   const ev = { sender: webContents }, call = (name, ...args) => handlers[name](ev, ...args)
   await call('open', root)
-  const log = () => core.readLog(root), queue = () => { try { return JSON.parse(fs.readFileSync(at('.chat/worktrees.json'), 'utf8')).queue } catch { return [] } }
+  const log = () => { try { return fs.readFileSync(at('.chat/log.jsonl'), 'utf8').split('\n').filter(l => l.trim()).map(l => JSON.parse(l)) } catch { return [] } } // sync, for polling
+  const registryFile = path.join(userData, 'worktrees', require('crypto').createHash('sha256').update(root).digest('hex'), 'registry.chat.json')
+  const queue = () => { try { return JSON.parse(fs.readFileSync(registryFile, 'utf8')).queue } catch { return [] } }
   const waitFor = async (what, test, ms = 60000) => {
     for (const end = Date.now() + ms; Date.now() < end; await new Promise(r => setTimeout(r, 50))) { const v = test(); if (v) return v }
     throw new Error(`Hết giờ chờ: ${what}\n` + log().slice(-8).map(m => `[${m.from}] ${m.text}`).join('\n'))
@@ -917,7 +1066,7 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
   await edit({ 'dev-a': [['a.txt', 0, 'A0']] }, '@dev-a sửa dòng 0')
   entries = await settle(1, 'merge dev-a (thư mục bẩn)')
   assert.deepStrictEqual(entries.map(e => [e.agent, e.state]), [['dev-a', 'blocked-dirty']])
-  assert.ok(log().some(m => m.from === 'system' && m.text.startsWith('@dev-a chưa gộp được nhánh')))
+  await waitFor('tin báo chưa gộp', () => log().some(m => m.from === 'system' && m.text.startsWith('@dev-a chưa gộp được nhánh')))
   assert.strictEqual(lines()[0], 'l0')
   fs.rmSync(at('dirty.tmp'))
   const blockedId = entries[0].id
@@ -929,9 +1078,9 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
   let visible = (await call('worktreeState', root)).state.queue
   assert.strictEqual(visible.filter(e => e.canRetry || e.canRepair).length, 0, 'successful retry must retire the old error')
   // Registry from the previous app version: old error + successful retry for the same SHA.
-  const legacy = JSON.parse(fs.readFileSync(at('.chat/worktrees.json'), 'utf8'))
+  const legacy = JSON.parse(fs.readFileSync(registryFile, 'utf8'))
   delete legacy.queue[0].supersededBy
-  fs.writeFileSync(at('.chat/worktrees.json'), JSON.stringify(legacy))
+  fs.writeFileSync(registryFile, JSON.stringify(legacy))
   visible = (await call('worktreeState', root)).state.queue
   const old = visible.find(e => e.id === blockedId)
   assert.strictEqual(old.state, 'merged'); assert.strictEqual(old.error, null); assert.strictEqual(old.canRetry, false)
@@ -939,7 +1088,7 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
   legacy.queue[0].state = 'check-failed'; legacy.queue[0].error = { code: 'CHECK_FAILED', message: 'old check failure' }
   for (const supersededBy of [legacy.queue[1].id, undefined]) {
     legacy.queue[0].supersededBy = supersededBy
-    fs.writeFileSync(at('.chat/worktrees.json'), JSON.stringify(legacy))
+    fs.writeFileSync(registryFile, JSON.stringify(legacy))
     const beforeRepair = log().length
     const repair = await call('requestMergeRepair', root, { queueId: blockedId })
     assert.strictEqual(repair.ok, false, 'superseded/already-merged failures must reject repair')
@@ -953,12 +1102,23 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
   assert.ok(entries[0].error.log.includes('check đỏ')); assert.strictEqual(lines()[5], 'l5'); clean()
   visible = (await call('worktreeState', root)).state.queue
   assert.ok(visible.find(e => e.id === entries[0].id).canRepair, 'unmerged check failure must remain actionable')
-  assert.ok(log().some(m => m.from === 'system' && m.text.startsWith('@dev-c chưa gộp được nhánh')))
+  await waitFor('tin báo chưa gộp', () => log().some(m => m.from === 'system' && m.text.startsWith('@dev-c chưa gộp được nhánh')))
 
   // two devs edit different lines of the same file in parallel → both merged automatically
   await edit({ 'dev-a': [['a.txt', 2, 'A2']], 'dev-b': [['a.txt', 8, 'B8']] }, '@dev-a @dev-b sửa a.txt')
   entries = await settle(2, 'merge song song khác dòng')
   assert.deepStrictEqual(entries.map(e => e.state), ['merged', 'merged']); assert.deepStrictEqual([lines()[2], lines()[8]], ['A2', 'B8']); clean()
+
+  // a slow merge check runs outside the git lock: another agent's turn still starts (send returns) and both merge
+  process.env.CHECK_SLOW_MS = '4000'
+  await edit({ 'dev-a': [['a.txt', 6, 'A6']] }, '@dev-a sửa dòng 6')
+  await waitFor('check chậm đang chạy', () => queue().slice(q0).some(e => e.state === 'checking'))
+  const sentAt = Date.now()
+  await edit({ 'dev-b': [['a.txt', 9, 'B9']] }, '@dev-b sửa dòng 9') // not next to line 6: adjacent hunks conflict in git
+  assert.ok(Date.now() - sentAt < 3000, 'send waited for the merge check to finish')
+  delete process.env.CHECK_SLOW_MS
+  entries = await settle(2, 'merge khi check chậm')
+  assert.deepStrictEqual(entries.map(e => e.state), ['merged', 'merged']); assert.deepStrictEqual([lines()[6], lines()[9]], ['A6', 'B9']); clean()
 
   // same line → the first merges, the second gets a conflict message naming the file
   await edit({ 'dev-a': [['a.txt', 4, 'A4']], 'dev-b': [['a.txt', 4, 'B4']] }, '@dev-a @dev-b cùng sửa dòng 4')
@@ -966,7 +1126,7 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
   const lost = entries.find(e => e.state === 'conflict'), won = entries.find(e => e.state === 'merged')
   assert.ok(lost && won, JSON.stringify(entries.map(e => [e.agent, e.state])))
   assert.deepStrictEqual(lost.error.files, ['a.txt']); assert.strictEqual(lines()[4], won.agent === 'dev-a' ? 'A4' : 'B4'); clean()
-  assert.ok(log().some(m => m.from === 'system' && m.text.startsWith(`@${lost.agent} chưa gộp được nhánh`)))
+  await waitFor('tin báo chưa gộp', () => log().some(m => m.from === 'system' && m.text.startsWith(`@${lost.agent} chưa gộp được nhánh`)))
 
   // A stopped pending retry stays paused, without overwriting other queue entries.
   const stoppedConfig = core.projectSettings(root)
@@ -986,9 +1146,16 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
       if (i > 400 || !/còn agent/.test(e.message)) throw e; await new Promise(r => setTimeout(r, 25)) } }
     pickPath = two; const asked = dialogs
     assert.deepStrictEqual(await call('pick'), { dir: two, chat: '.chat' }); assert.strictEqual(dialogs, asked) // new folder: no question
-    fs.writeFileSync(in2('.chat/agents.json'), JSON.stringify([{ name: 'pm', cli: 'codex', role: 'PM', owns: ['.chat/memory.md', 'notes/**'] }]))
+    // team written outside the app (an agent could do this): asked before any turn runs; "Hoàn tác" restores the app's copy
+    const appTeam = text('.chat/agents.json'), outside = JSON.stringify([{ name: 'pm', cli: 'codex', role: 'PM', owns: ['.chat/memory.md', 'notes/**'] }])
+    fs.writeFileSync(in2('.chat/agents.json'), outside)
+    dialogAnswer = 0; await call('send', two, 'thử')
+    assert.deepStrictEqual([dialogs, text('.chat/agents.json')], [asked + 1, appTeam])
+    await waitFor('pm của team gốc trả lời', () => text('.chat/log.jsonl').includes('"from":"pm"')) // the reverted team ran
+    fs.writeFileSync(in2('.chat/agents.json'), outside)
     process.env.FAKE_REPLY = JSON.stringify({ pm: 'R1' })
-    await call('send', two, 'chào')
+    dialogAnswer = 1; await call('send', two, 'chào') // accepting pins exactly what was shown
+    assert.deepStrictEqual([dialogs, core.configTrust(two).trusted, core.team(two)[0].cli], [asked + 2, true, 'codex'])
     dialogAnswer = 2 // "Tạo box mới", keep the team
     await assert.rejects(call('pick'), /còn agent đang chạy/) // pm still running → nothing created
     assert.ok(!fs.existsSync(in2('.chat2')))
@@ -996,12 +1163,13 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
     assert.deepStrictEqual(JSON.parse(text('.chat2/agents.json'))[0].owns, ['.chat2/memory.md', 'notes/**', '.chat2/tasks.json', '.chat2/tasks.json.tmp']) // scope follows the new box
     const opened = await call('open', two, '.chat2')
     assert.deepStrictEqual([opened.chat, opened.history.total], ['.chat2', 0])
-    assert.ok(core.prompt(two, core.team(two)[0]).includes('.chat2/memory.md') && !core.prompt(two, core.team(two)[0]).includes('.chat/'))
+    const p2 = (await core.promptIndexed(two, core.team(two)[0], null)).text
+    assert.ok(p2.includes('.chat2/memory.md') && !p2.includes('.chat/'))
     process.env.FAKE_REPLY = JSON.stringify({ pm: 'R2' }); await call('send', two, 'chào')
     await waitFor('pm ở box 2', () => text('.chat2/log.jsonl').includes('"text":"R2"'))
     assert.ok(text('.chat/log.jsonl').includes('"text":"R1"') && !text('.chat/log.jsonl').includes('R2') && !text('.chat2/log.jsonl').includes('R1'))
     assert.ok(Object.keys(JSON.parse(text('.chat2/sessions.json'))).includes('pm'))
-    const snap = await core.snapshot(two); core.appendLog(two, { from: 'user', text: 'x' }) // runtime files of any box are not "changes"
+    const snap = await core.snapshot(two); await core.appendLogIndexed(two, { from: 'user', text: 'x' }) // runtime files of any box are not "changes"
     assert.deepStrictEqual(core.changedPaths(snap, await core.snapshot(two)), [])
     const cfg = await call('projectSettings', two)
     assert.ok((await call('saveProjectSettings', two, { expectedRevision: cfg.revision, settings: { ...cfg.settings, name: '  Review ' } })).ok)
@@ -1013,7 +1181,7 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
     console.log('ok (boxes)')
   }
 }
-auditChecks().then(viewerChecks).then(runChecks).then(sprint7Checks).then(sprint8Checks).then(sprint6Checks).then(rendererChecks).then(mainChecks).then(() => console.log('ok'), e => { console.error(e); process.exit(1) })
+logChecks().then(taskChecks).then(auditChecks).then(viewerChecks).then(runChecks).then(sprint7Checks).then(sprint8Checks).then(sprint6Checks).then(rendererChecks).then(mainChecks).then(() => console.log('ok'), e => { console.error(e); process.exit(1) })
 
 // PM creates a task and moves it in the same turn (no revision yet): "" is accepted only for PM on a todo task
 {
@@ -1062,4 +1230,16 @@ console.log('ok (windows args)')
   const npm = put('npm.cmd', '@ECHO OFF\r\nSET "NPM_CLI_JS=%~dp0\\node_modules\\npm\\bin\\npm-cli.js"\r\n"%NODE_EXE%" "%NPM_CLI_JS%" %*\r\n')
   assert.strictEqual(core.shimTarget(npm), null) // unknown layout → cmd.exe fallback
   console.log('ok (cmd shims)')
+}
+// values from the box folder never become CLI flags: no sharedChat (--add-dir) from the file, no "-…" model or session id
+{
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-argv-'))
+  core.init(d)
+  fs.writeFileSync(path.join(d, '.chat/agents.json'), JSON.stringify([{ name: 'x', cli: 'claude', role: 'r', sharedChat: '/', model: '--dangerously-skip-permissions' }]))
+  const [x] = core.team(d)
+  assert.strictEqual(x.sharedChat, undefined)
+  core.probe(d, x, { timeoutMs: 5000 }).then(r => {
+    assert.ok(!r.ok && /không hợp lệ/.test(r.error), JSON.stringify(r)) // rejected before anything is spawned
+    console.log('ok (argv values)')
+  }).catch(e => { console.error(e); process.exit(1) })
 }

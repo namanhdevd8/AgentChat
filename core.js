@@ -59,9 +59,26 @@ function spawnCli(name, args, options) {
   const line = [path.normalize(file).replace(META, '^$1'), ...args.map(a => winArg(a, twice))].join(' ')
   return spawn(process.env.comspec || 'cmd.exe', ['/d', '/s', '/c', `"${line}"`], { ...opts, windowsVerbatimArguments: true })
 }
-// Windows: always stdin. A command line is capped at 32,767 chars (cmd.exe: 8,191) and a fresh session's briefing is far
-// longer (~80k chars for a PM with summary + task board): the spawn fails before the CLI runs, so no output at all.
-const promptViaStdin = () => isWin
+// What codex runs after `--` in its sandbox: no shell there, so on Windows an npm-style .cmd shim must become its real target
+function sandboxArgv(executable, args, env) {
+  if (!isWin) return [executable, ...args]
+  const file = winResolve(executable, env) || executable
+  if (!isShim(file)) return [file, ...args]
+  const direct = shimTarget(file, env)
+  if (!direct) throw new Error(`Không chạy được ${executable} trong sandbox: không đọc được shim ${path.basename(file)}`)
+  return [direct.file, ...direct.pre, ...args]
+}
+// The prompt goes over stdin for every CLI that has stdinArgs: a fresh session's briefing (~80k chars for a PM with summary
+// + task board) overflows a Windows command line (32,767; cmd.exe 8,191) and Linux's 128 KiB cap on one argv entry.
+
+// temp + rename that never writes through a symlink planted at file.tmp; rename replaces a link at `file` itself, not its target
+function atomicWrite(file, data) {
+  const temp = file + '.tmp', { O_WRONLY, O_CREAT, O_EXCL, O_NOFOLLOW } = rawFs.constants
+  try { rawFs.unlinkSync(temp) } catch (e) { if (e.code !== 'ENOENT') throw e }
+  const fd = rawFs.openSync(temp, O_WRONLY | O_CREAT | O_EXCL | (O_NOFOLLOW || 0))
+  try { rawFs.writeFileSync(fd, data); rawFs.fsyncSync(fd) } finally { rawFs.closeSync(fd) }
+  rawFs.renameSync(temp, file)
+}
 
 const HISTORY = 30 // messages sent to an agent starting a fresh session; resumed sessions only get what's new
 const DEFAULT_SESSION_TOKEN_LIMIT = 150000
@@ -87,6 +104,7 @@ const RULES = `Quy tắc nhóm:
 const jsonLines = out => out.split('\n').flatMap(l => { try { return [JSON.parse(l)] } catch { return [] } })
 
 const opt = (flag, v) => v ? [flag, v] : []
+const validArgValue = v => v == null || v === '' || (typeof v === 'string' && /^[\w.:][\w.:-]{0,199}$/.test(v)) // never starts with "-"
 const value = (v, integer = false) => typeof v === 'number' && Number.isFinite(v) && v >= 0 && (!integer || Number.isInteger(v)) ? v : null
 const emptyUsage = (partial = false) => ({ inputTokens: null, outputTokens: null, costUsd: null, durationMs: 0, partial })
 const rawUsage = (u = {}) => {
@@ -128,12 +146,16 @@ function claudeResult(s, baseline) {
 
 function claudePermissionArgs(agent) {
   const permissions = agent.permissions || DEFAULT_PERMISSIONS
-  if (permissions.mode === 'full') return ['--permission-mode', 'bypassPermissions']
-  const rules = permissionRules({ ...agent, permissions, allowedCommands: agent.allowedCommands || DEFAULT_COMMANDS })
-  return ['--permission-mode', 'acceptEdits', ...(rules.length ? ['--allowedTools', ...rules] : [])]
+  if (permissions.mode === 'full' && !agent.readOnly) return ['--permission-mode', 'bypassPermissions']
+  // readOnly wins over full and custom: no bypass (Bash could write), edit tools removed, Bash only for its allowlisted commands
+  const rules = permissionRules({ ...agent, permissions: agent.readOnly ? { ...permissions, mode: 'edit' } : permissions,
+    allowedCommands: agent.allowedCommands || DEFAULT_COMMANDS })
+  return ['--permission-mode', agent.readOnly ? 'default' : 'acceptEdits', ...(rules.length ? ['--allowedTools', ...rules] : []),
+    ...(agent.readOnly ? ['--disallowedTools', 'Edit', 'Write', 'MultiEdit', 'NotebookEdit'] : [])]
 }
 function codexPermissionArgs(agent) {
   const permissions = agent.permissions || DEFAULT_PERMISSIONS
+  if (agent.readOnly) return ['-c', 'sandbox_mode="read-only"', '-c', 'approval_policy="never"']
   if (permissions.mode === 'full') return ['-c', 'sandbox_mode="danger-full-access"', '-c', 'approval_policy="never"']
   const network = permissions.mode === 'custom' && permissions.networkAccess
   return ['-c', 'sandbox_mode="workspace-write"', '-c', 'approval_policy="never"', '-c', `sandbox_workspace_write.network_access=${network}`]
@@ -216,8 +238,10 @@ const CLI = {
       error: !s.terminal ? 'Thiếu kết quả cuối từ Codex' : s.error }),
   },
   agy: {
-    args: (p, id, a = {}) => ['-p', p, '--output-format', 'stream-json', '--print-timeout', '0', '--mode', 'accept-edits',
-      ...(a.permissions?.mode === 'full' ? ['--dangerously-skip-permissions'] : []), ...opt('--add-dir', a.sharedChat),
+    // ponytail: agy still takes the prompt as one argv entry (its stdin mode is another, NDJSON protocol), so a briefing
+    // over Linux's 128 KiB per-arg cap fails with E2BIG; speak that protocol if agy runs on Linux with long backlogs
+    args: (p, id, a = {}) => ['-p', p, '--output-format', 'stream-json', '--print-timeout', '0', '--mode', a.readOnly ? 'plan' : 'accept-edits',
+      ...(a.permissions?.mode === 'full' && !a.readOnly ? ['--dangerously-skip-permissions'] : []), ...opt('--add-dir', a.sharedChat),
       ...opt('--model', a.model), ...opt('--effort', a.effort), ...opt('--conversation', id)],
     state: context => ({ id: null, text: null, usage: null, error: null, terminal: false, steps: new Map(), afterBoundary: !context.resumed }),
     event(e, s, context) {
@@ -271,38 +295,44 @@ function account(name) {
 }
 
 // ---- existing CLI sessions of a project folder, so an agent can adopt one ----
-function head(file, n = 65536) {
-  const fd = fs.openSync(file, 'r'), b = Buffer.alloc(n)
-  try { return b.toString('utf8', 0, fs.readSync(fd, b, 0, n, 0)) } finally { fs.closeSync(fd) }
+// async + one file at a time: runs on Electron's main thread, and hundreds of open handles at once could hit EMFILE
+async function head(file, n = 65536) {
+  const handle = await fs.promises.open(file, 'r'), b = Buffer.alloc(n)
+  try { return b.toString('utf8', 0, (await handle.read(b, 0, n, 0)).bytesRead) } finally { await handle.close() }
 }
 const textOf = c => typeof c === 'string' ? c : Array.isArray(c) ? c.find(x => x.type === 'text' || x.type === 'input_text')?.text : undefined
 const firstPrompt = texts => (texts.find(t => t && !t.trim().startsWith('<')) || '').trim().replace(/\s+/g, ' ')
 
 const LISTERS = {
-  claude(acc, dir) {
+  async claude(acc, dir) {
     const d = path.join(acc.home, 'projects', dir.replace(/[^a-zA-Z0-9]/g, '-'))
     if (!fs.existsSync(d)) return []
-    return fs.readdirSync(d).filter(f => f.endsWith('.jsonl')).map(f => {
-      const file = path.join(d, f), lines = jsonLines(head(file))
+    const out = []
+    for (const f of (await fs.promises.readdir(d)).filter(f => f.endsWith('.jsonl'))) {
+      const file = path.join(d, f), lines = jsonLines(await head(file))
       const title = lines.find(l => l.type === 'custom-title')?.customTitle || lines.find(l => l.type === 'summary')?.summary
         || firstPrompt(lines.filter(l => l.type === 'user' && !l.isMeta).map(l => textOf(l.message?.content)))
-      return { id: f.slice(0, -6), title, at: fs.statSync(file).mtime.toISOString() }
-    })
+      out.push({ id: f.slice(0, -6), title, at: (await fs.promises.stat(file)).mtime.toISOString() })
+    }
+    return out
   },
-  codex(acc, dir) {
+  async codex(acc, dir) {
     const root = path.join(acc.home, 'sessions')
     if (!fs.existsSync(root)) return []
     const names = {}
-    try { jsonLines(fs.readFileSync(path.join(acc.home, 'session_index.jsonl'), 'utf8')).forEach(e => names[e.id] = e.thread_name) } catch {}
-    const files = fs.readdirSync(root, { recursive: true }).filter(f => f.endsWith('.jsonl'))
-      .sort((a, b) => path.basename(b).localeCompare(path.basename(a)))
+    try { jsonLines(await fs.promises.readFile(path.join(acc.home, 'session_index.jsonl'), 'utf8')).forEach(e => names[e.id] = e.thread_name) } catch {}
+    // by last use (mtime), not by name (= creation): a resumed old session belongs near the top
+    const files = (await Promise.all((await fs.promises.readdir(root, { recursive: true })).filter(f => f.endsWith('.jsonl'))
+      .map(f => fs.promises.stat(path.join(root, f)).then(s => ({ file: path.join(root, f), mtime: s.mtime }), () => null)))).filter(Boolean)
+      .sort((a, b) => b.mtime - a.mtime)
     const out = []
-    for (const f of files.slice(0, 400)) { // ponytail: only the newest 400 rollouts are scanned
-      const file = path.join(root, f), lines = jsonLines(head(file, 262144)) // developer instructions come before the first prompt
+    for (const { file, mtime } of files.slice(0, 400)) { // ponytail: only the 400 most recently used rollouts are scanned
+      const lines = jsonLines(await head(file, 262144)) // developer instructions come before the first prompt
       const meta = lines.find(l => l.type === 'session_meta')?.payload
       if (meta?.cwd !== dir) continue
       const title = names[meta.id] || firstPrompt(lines.filter(l => l.payload?.role === 'user').map(l => textOf(l.payload.content)))
-      out.push({ id: meta.id, title, at: fs.statSync(file).mtime.toISOString() })
+      out.push({ id: meta.id, title, at: mtime.toISOString() })
+      if (out.length === 25) break // most recently used first; cliSessions shows 25
     }
     return out
   },
@@ -375,7 +405,7 @@ function boxes(dir) {
   try { names = rawFs.readdirSync(dir, { withFileTypes: true }).filter(e => e.isDirectory() && CHAT_DIR.test(e.name)).map(e => e.name) } catch {}
   return names.sort((a, b) => boxNumber(a) - boxNumber(b)).map(name => {
     let custom = ''
-    try { custom = JSON.parse(rawFs.readFileSync(path.join(dir, name, 'project.json'), 'utf8')).name } catch {}
+    try { custom = JSON.parse(configRead(dir, 'project.json', name)).name } catch {}
     return { chat: name, name: typeof custom === 'string' && custom.trim() || path.basename(dir) + (name === '.chat' ? '' : ` ${boxNumber(name)}`) }
   })
 }
@@ -383,10 +413,14 @@ function boxes(dir) {
 function createBox(dir, { copyFrom = null } = {}) {
   const taken = boxes(dir).map(b => boxNumber(b.chat)), name = `.chat${Math.max(1, ...taken) + 1}`, folder = path.join(dir, name)
   rawFs.mkdirSync(folder)
-  if (copyFrom) {
-    const members = JSON.parse(rawFs.readFileSync(path.join(dir, copyFrom, 'agents.json'), 'utf8'))
+  if (copyFrom) { // the source box's confirmed team; an unconfirmed one stays unconfirmed in the copy
+    const source = pinned(dir, copyFrom), text = source ? source['agents.json'] ?? null : configText(path.join(dir, copyFrom), 'agents.json')
     const move = p => typeof p === 'string' ? p.replace(/^(\s*!?\s*)\.chat\d*\//, `$1${name}/`) : p
-    rawFs.writeFileSync(path.join(folder, 'agents.json'), JSON.stringify(members.map(a => Array.isArray(a.owns) ? { ...a, owns: a.owns.map(move) } : a), null, 2))
+    if (text != null) {
+      const data = JSON.stringify(JSON.parse(text).map(a => Array.isArray(a.owns) ? { ...a, owns: a.owns.map(move) } : a), null, 2)
+      atomicWrite(path.join(folder, 'agents.json'), data)
+      if (source) pin(dir, { 'agents.json': data }, name)
+    }
   }
   return name
 }
@@ -444,14 +478,30 @@ function normalizeScope(agent, dir) {
   return out
 }
 
+// scopePattern only lets *, ? and whole-segment ** through. Unlike path.matchesGlob, * and ? also match dotfiles
+// (config/* must cover config/.env, both for a scope and for an exclusion like secrets/*).
+const segmentMatch = (name, glob) => new RegExp('^' + glob.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '[^/]*').replace(/\?/g, '[^/]') + '$').test(name)
+function globMatch(file, pattern) {
+  const F = file.split('/'), P = pattern.split('/'), memo = new Map()
+  const go = (i, j) => {
+    const key = i * (P.length + 1) + j
+    if (!memo.has(key)) memo.set(key, j === P.length ? i === F.length
+      : P[j] === '**' ? go(i, j + 1) || (i < F.length && go(i + 1, j)) // ** = zero or more segments
+      : i < F.length && segmentMatch(F[i], P[j]) && go(i + 1, j + 1))
+    return memo.get(key)
+  }
+  return go(0, 0)
+}
+
 function scopeAllows(scope, relative) {
   if (scope.readOnly) return false
   let p = String(relative || '').replace(/^\.\//, '')
   if (!p || path.isAbsolute(p) || p.includes('\\') || p.split('/').includes('..')) return false
-  const matches = pattern => {
+  p = foldCase(p) // same case rule as lockConflict
+  const matches = raw => {
+    const pattern = foldCase(raw)
     if (pattern.endsWith('/**')) { const base = pattern.slice(0, -3); if (p === base || p.startsWith(base + '/')) return true }
-    if (!hasGlob(pattern)) return p === pattern
-    return path.matchesGlob(p, pattern)
+    return hasGlob(pattern) ? globMatch(p, pattern) : p === pattern
   }
   if ((scope.excludes || []).some(matches)) return false
   return !scope.owns.length || scope.owns.some(matches)
@@ -478,8 +528,8 @@ const foldCase = p => process.platform === 'darwin' || isWin ? p.toLowerCase() :
 // Can one path match both segment globs? Over-approximates when both have wildcards (may say yes, never wrongly no).
 function segmentsOverlap(x, y) {
   if (!hasGlob(x) && !hasGlob(y)) return x === y
-  if (!hasGlob(x)) return path.matchesGlob(x, y)
-  if (!hasGlob(y)) return path.matchesGlob(y, x)
+  if (!hasGlob(x)) return segmentMatch(x, y)
+  if (!hasGlob(y)) return segmentMatch(y, x)
   const head = s => s.slice(0, s.search(/[*?]/)), tail = s => s.slice(Math.max(s.lastIndexOf('*'), s.lastIndexOf('?')) + 1)
   const [hx, hy, tx, ty] = [head(x), head(y), tail(x), tail(y)]
   return (hx.startsWith(hy) || hy.startsWith(hx)) && (tx.endsWith(ty) || ty.endsWith(tx))
@@ -526,19 +576,27 @@ const SNAPSHOT_EXCLUDED = new Set(['.chat/log.jsonl', '.chat/sessions.json', '.c
   '.chat/summary.md', '.chat/summary.md.tmp', '.chat/agents.json.pre-sprint-2.bak', '.chat/agents.json.pre-sprint-3.bak'])
 const abortError = () => Object.assign(new Error('Đã hủy kiểm tra file'), { name: 'AbortError' })
 
+// absolute path → { key, value }. An agent can set mtime but not ctime, so an unchanged stat means unchanged content.
+// Files whose ctime is under a second old are re-hashed: a write in the same timestamp tick as our read leaves the stat as is.
+const hashCache = new Map()
 async function fileFingerprint(file, stat, signal) {
+  const key = `${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}:${stat.mode}`, hit = hashCache.get(file)
+  if (hit?.key === key) return hit.value
   const hash = createHash('sha256')
   for await (const chunk of rawFs.createReadStream(file, { signal })) hash.update(chunk)
   if (signal?.aborted) throw abortError()
   const after = await rawFs.promises.lstat(file)
-  if (stat.size !== after.size || stat.mtimeMs !== after.mtimeMs || stat.ino !== after.ino || stat.mode !== after.mode)
-    throw new Error(`File thay đổi trong lúc kiểm tra: ${file}`)
-  return `file:${stat.mode}:${stat.size}:${hash.digest('hex')}`
+  if (stat.size !== after.size || stat.mtimeMs !== after.mtimeMs || stat.ino !== after.ino || stat.mode !== after.mode || stat.ctimeMs !== after.ctimeMs)
+    return `changing:${randomUUID()}` // still being written: always counts as changed
+  const value = `file:${stat.mode}:${stat.size}:${hash.digest('hex')}`
+  if (hashCache.size > 200000) hashCache.clear() // ponytail: drop everything past 200k files; LRU if huge trees re-hash too often
+  if (Date.now() - stat.ctimeMs > 1000) hashCache.set(file, { key, value })
+  return value
 }
 
 async function linkFingerprint(file, stat) {
   const target = await rawFs.promises.readlink(file), after = await rawFs.promises.lstat(file)
-  if (!after.isSymbolicLink() || stat.mtimeMs !== after.mtimeMs || stat.ino !== after.ino) throw new Error(`Symlink thay đổi trong lúc kiểm tra: ${file}`)
+  if (!after.isSymbolicLink() || stat.mtimeMs !== after.mtimeMs || stat.ino !== after.ino) return `changing:${randomUUID()}`
   return `link:${createHash('sha256').update(target).digest('hex')}`
 }
 
@@ -554,14 +612,17 @@ async function snapshot(dir, { signal, excludeChat = false, onlyChat = false } =
       if (entry.name === '.DS_Store') continue
       if (!prefix && onlyChat && entry.name !== chatName(root)) continue
       if (!prefix && excludeChat && CHAT_DIR.test(entry.name)) continue
-      if (SNAPSHOT_EXCLUDED.has(relative.replace(/^\.chat\d+(?=\/|$)/, '.chat'))) continue
+      if (SNAPSHOT_EXCLUDED.has(relative.replace(/^\.chat\d+(?=\/|$)/, '.chat')) || /^\.chat\d*\/log\.jsonl\.bad-/.test(relative)) continue // .bad-*: repairTail's copy
       if (!prefix && entry.isDirectory() && entry.name === 'dist') continue
       if (entry.name === '.git' || (entry.isDirectory() && entry.name === 'node_modules')) continue
-      const absolute = path.join(folder, entry.name), stat = await rawFs.promises.lstat(absolute)
-      if (stat.isDirectory()) await walk(absolute, relative)
-      else if (stat.isFile()) out.set(relative, await fileFingerprint(absolute, stat, signal))
-      else if (stat.isSymbolicLink()) out.set(relative, await linkFingerprint(absolute, stat))
-      else out.set(relative, `other:${stat.mode}:${stat.size}`)
+      const absolute = path.join(folder, entry.name)
+      try {
+        const stat = await rawFs.promises.lstat(absolute)
+        if (stat.isDirectory()) await walk(absolute, relative)
+        else if (stat.isFile()) out.set(relative, await fileFingerprint(absolute, stat, signal))
+        else if (stat.isSymbolicLink()) out.set(relative, await linkFingerprint(absolute, stat))
+        else out.set(relative, `other:${stat.mode}:${stat.size}`)
+      } catch (e) { if (e.code !== 'ENOENT') throw e } // gone since readdir: a temp file must not void the whole audit
     }
   }
   await walk(root)
@@ -573,10 +634,105 @@ function changedPaths(before, after) {
 }
 
 function init(dir) {
+  noLinkBox(dir)
   fs.mkdirSync(chat(dir), { recursive: true })
   fs.mkdirSync(path.join(dir, 'reports'), { recursive: true })
-  if (!fs.existsSync(chat(dir, 'agents.json'))) fs.writeFileSync(chat(dir, 'agents.json'), JSON.stringify(DEFAULT_TEAM, null, 2))
-  if (!fs.existsSync(chat(dir, 'memory.md'))) fs.writeFileSync(chat(dir, 'memory.md'), '# Memory chung\n')
+  // lstat, not exists: a symlink planted here (even a dangling one) counts as present and is never written through
+  const missing = file => { try { rawFs.lstatSync(file); return false } catch (e) { if (e.code === 'ENOENT') return true; throw e } }
+  // only a team the app creates itself is confirmed here; one already on disk waits for the user (configTrust)
+  if (missing(chat(dir, 'agents.json')) && pinned(dir)?.['agents.json'] == null) {
+    const data = JSON.stringify(DEFAULT_TEAM, null, 2)
+    atomicWrite(chat(dir, 'agents.json'), data); pin(dir, { 'agents.json': data })
+  }
+  if (missing(chat(dir, 'memory.md'))) atomicWrite(chat(dir, 'memory.md'), '# Memory chung\n')
+}
+
+// ---- trust pinning: agents.json (permissions, commands, scope) and project.json (merge checks, limits) live where agents
+// can write. The text pinned in userData is what the app uses; the files on disk are only a proposal until the user
+// confirms them (configTrust → trustConfig) or puts the confirmed text back (revertConfig). Nothing is trusted on first use.
+const TRUSTED = ['agents.json', 'project.json']
+let trustFile = null // set by main (userData); unset in unit tests = the disk is used and always trusted
+const setTrustFile = file => { trustFile = file }
+function readTrust() { // ponytail: re-read on every team()/projectSettings() call; cache by mtime if it shows up in profiles
+  try { return JSON.parse(rawFs.readFileSync(trustFile, 'utf8')) || {} }
+  catch (e) { if (e.code && e.code !== 'ENOENT') throw e; return {} } // unparsable store = nothing confirmed, every box asks again
+}
+// keyed by the box's path, not its realpath: a .chat swapped for a symlink to a doctored copy must not find a pin
+const trustKey = (dir, name) => path.join(realKey(dir), name)
+const pinned = (dir, name = chatName(dir)) => trustFile ? readTrust()[trustKey(dir, name)] : undefined
+const configText = (folder, file) => { try { return rawFs.readFileSync(path.join(folder, file), 'utf8') } catch (e) { if (e.code === 'ENOENT') return null; throw e } }
+// what the app uses: the pinned text if there is a pin (null = no file), else the disk (unit tests, a box not yet confirmed)
+const configRead = (dir, file, name = chatName(dir)) => { const entry = pinned(dir, name); return entry ? entry[file] ?? null : configText(path.join(dir, name), file) }
+const isLink = file => { try { return rawFs.lstatSync(file).isSymbolicLink() } catch { return false } }
+function noLinkBox(dir, name = chatName(dir)) {
+  if (isLink(path.join(dir, name))) throw fail('UNSUPPORTED', `Thư mục ${name} là symlink; app không dùng box này`)
+}
+function pin(dir, texts, name = chatName(dir)) {
+  if (!trustFile) return
+  const all = readTrust(), key = trustKey(dir, name)
+  all[key] = { 'agents.json': null, 'project.json': null, ...all[key], ...texts }
+  atomicWrite(trustFile, JSON.stringify(all))
+}
+// App writes start from pinned reads or the user's ⚙ form, so what is written is what gets pinned. A box nobody has
+// confirmed yet stays unconfirmed: its reads came from the disk, and main migrates scope before it asks the user.
+function writeConfig(dir, file, data) {
+  noLinkBox(dir)
+  const confirmed = !!pinned(dir)
+  atomicWrite(chat(dir, file), data)
+  if (confirmed) pin(dir, { [file]: data })
+}
+
+const PROJECT_KEYS = ['mergeChecks', 'worktreesEnabled', 'chainLimit', 'costCeiling']
+const brief = (value, limit = 300) => { const s = value === undefined ? '(không có)' : JSON.stringify(value); return s.length > limit ? s.slice(0, limit - 1) + '…' : s }
+// every key reaches the run (role → prompt, model → argv…), so a new agent is shown whole, minus its avatar
+const picked = value => { const { avatar, ...rest } = value && typeof value === 'object' ? value : {}; return brief(rest, 1500) }
+const differs = (a, b) => [...new Set([...Object.keys(a || {}), ...Object.keys(b || {})])].filter(k => JSON.stringify(a?.[k]) !== JSON.stringify(b?.[k]))
+// texts = exactly the disk texts examined: the dialog shows changes, and trustConfig pins these, not a later re-read
+function configTrust(dir) {
+  const name = chatName(dir), folder = path.join(dir, name), entry = pinned(dir, name)
+  if (isLink(folder)) return { trusted: false, pinned: !!entry, changes: [`${name}: thư mục box là symlink, app không dùng box này`],
+    texts: { 'agents.json': null, 'project.json': null } }
+  const texts = Object.fromEntries(TRUSTED.map(file => [file, configText(folder, file)]))
+  if (!trustFile) return { trusted: true, pinned: false, changes: [], texts }
+  const changes = [], json = text => { try { return text == null ? null : JSON.parse(text) } catch { return undefined } }
+  const agentsOf = list => new Map((Array.isArray(list) ? list : []).map(a => [String(a?.name), a]))
+  for (const file of TRUSTED) {
+    if (entry && texts[file] === (entry[file] ?? null)) continue
+    const is = json(texts[file]), was = entry && json(entry[file] ?? null), before = changes.length
+    if (is === undefined || (file === 'agents.json' && is !== null && !Array.isArray(is))) changes.push(`${file}: không đọc được file`)
+    else if (file === 'project.json') {
+      if (!entry) changes.push(`project.json: ${is ? picked(is, PROJECT_KEYS) : '(không có, dùng mặc định)'}`)
+      else for (const key of differs(was, is)) changes.push(`project.json: ${key} ${brief(was?.[key])} → ${brief(is?.[key])}`)
+    } else {
+      const old = agentsOf(was), current = agentsOf(is)
+      if (is && current.size !== is.length) changes.push('agents.json: có agent trùng tên')
+      if (!entry) changes.push(...(is ? [...current].map(([agent, a]) => `@${agent}: ${picked(a)}`) : ['agents.json: (không có)']))
+      else for (const agent of new Set([...old.keys(), ...current.keys()]))
+        if (!old.has(agent)) changes.push(`@${agent}: agent mới ${picked(current.get(agent))}`)
+        else if (!current.has(agent)) changes.push(`@${agent}: đã xoá ${picked(old.get(agent))}`)
+        else for (const key of differs(old.get(agent), current.get(agent)))
+          changes.push(`@${agent}: ${key} ${brief(old.get(agent)[key])} → ${brief(current.get(agent)[key])}`)
+    }
+    if (changes.length === before) changes.push(`${file}: đổi định dạng hoặc thứ tự`)
+  }
+  if (changes.some(line => line.includes('…'))) changes.push('(Có giá trị bị cắt bớt: mở file trong thư mục box để xem đủ trước khi chấp nhận.)')
+  return { trusted: !!entry && !changes.length, pinned: !!entry, changes, texts }
+}
+// the user confirmed exactly these texts (configTrust().texts, what the dialog showed): pin them, never re-read the disk
+function trustConfig(dir, texts) {
+  noLinkBox(dir)
+  const valid = text => { if (text === null) return true; try { return typeof text === 'string' && (JSON.parse(text), true) } catch { return false } }
+  if (!texts || !TRUSTED.every(file => valid(texts[file]))) throw fail('INVALID_ARGUMENT', 'Cấu hình cần xác nhận không hợp lệ')
+  pin(dir, Object.fromEntries(TRUSTED.map(file => [file, texts[file]])))
+}
+// undo an outside edit: write the confirmed texts back (null = the file did not exist)
+function revertConfig(dir) {
+  noLinkBox(dir)
+  const entry = pinned(dir)
+  if (!entry) throw fail('NOT_FOUND', 'Box chưa có cấu hình đã xác nhận để khôi phục')
+  for (const file of TRUSTED)
+    if (entry[file] != null) atomicWrite(chat(dir, file), entry[file])
+    else try { rawFs.unlinkSync(chat(dir, file)) } catch (e) { if (e.code !== 'ENOENT') throw e }
 }
 
 const DEFAULT_PROJECT_SETTINGS = { version: 1, autoSummary: true, worktreesEnabled: false, mergeChecks: ['npm run check'], chainLimit: 12, costCeiling: null }
@@ -603,9 +759,9 @@ function normalizeProjectSettings(input = {}) {
   return settings
 }
 function projectSettings(dir) {
-  let raw = {}
-  try { raw = JSON.parse(fs.readFileSync(chat(dir, 'project.json'), 'utf8')) }
-  catch (e) { if (e.code !== 'ENOENT') throw fail('CONFIG_ERROR', 'Không đọc được cấu hình dự án') }
+  let raw
+  try { raw = JSON.parse(configRead(dir, 'project.json') ?? '{}') }
+  catch { throw fail('CONFIG_ERROR', 'Không đọc được cấu hình dự án') }
   let settings
   try { settings = normalizeProjectSettings(raw) }
   catch (e) { throw fail('CONFIG_ERROR', e.message) }
@@ -615,8 +771,7 @@ function writeProjectSettings(dir, settings, expectedRevision) {
   const current = projectSettings(dir)
   if (expectedRevision !== current.revision) throw fail('CONFLICT', 'Cấu hình đã thay đổi, hãy tải lại')
   settings = normalizeProjectSettings(settings)
-  const file = chat(dir, 'project.json'), temp = chat(dir, 'project.json.tmp'), data = JSON.stringify(settings, null, 2)
-  fs.writeFileSync(temp, data); fs.renameSync(temp, file)
+  writeConfig(dir, 'project.json', JSON.stringify(settings, null, 2))
   return { settings, revision: settingsRevision(settings) }
 }
 
@@ -633,22 +788,6 @@ const taskUpdateValid = u => sameKeys(u, ['id', 'createdAt', 'assignee', 'status
   && TASK_STATUSES.has(u.status) && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(u.eventId)
 const taskUpdatesValid = updates => Array.isArray(updates) && updates.length && updates.every(taskUpdateValid)
   && new Set(updates.map(update => update.id)).size === updates.length
-
-function readLog(dir, { strict = false } = {}) {
-  try {
-    return fs.readFileSync(chat(dir, 'log.jsonl'), 'utf8').split('\n').filter(line => line.trim()).map(line => {
-      const record = JSON.parse(line)
-      if (strict && Object.hasOwn(record, 'taskUpdates')) {
-        if (!taskUpdatesValid(record.taskUpdates) || !validIso(record.at)) throw new Error('Metadata task trong log không hợp lệ')
-      }
-      return record
-    })
-  } catch (e) {
-    if (e.code === 'ENOENT') return []
-    if (strict) throw fail('DATA_ERROR', 'Lịch sử task không đọc được')
-    return []
-  }
-}
 
 const logIndexes = new Map(), logLoads = new Map(), logAppends = new Map()
 const searchText = value => String(value ?? '').normalize('NFD').replace(/\p{M}/gu, '').toLowerCase().replace(/đ/g, 'd')
@@ -687,19 +826,18 @@ function addIndexedRecord(index, raw, record, start, end) {
     && typeof record.summary.prefixHash === 'string' && typeof record.summary.text === 'string') index.summaries.push({ ...record.summary, runId: record.runId, seq })
 }
 
+const O_NOFOLLOW = rawFs.constants.O_NOFOLLOW || 0 // undefined on Windows
+// Always a full read: the app's own appends update the index in place, so a rebuild means an outside change, and only a
+// full re-hash keeps prefixHashes (seenHash / summary checks) honest about edits to earlier records.
 async function buildLogIndex(root, old) {
-  const file = chat(root, 'log.jsonl'), generation = randomUUID(), index = { root, file, generation, records: [],
+  const file = chat(root, 'log.jsonl'), index = { root, file, generation: randomUUID(), records: [],
     prefixHashes: [createHash('sha256').digest('hex')], recordHash: createHash('sha256'), senders: new Set(), taskEvents: new Map(), taskError: null,
     summaries: [], totals: { turns: 0, tokens: 0, costUsd: 0, hasTokens: false, hasCost: false, tokensIncomplete: false, costIncomplete: false },
-    error: null, fileSize: 0, endsWithNewline: true, dirty: false }
-  let stat
-  try { stat = await rawFs.promises.stat(file) }
-  catch (e) {
-    if (e.code !== 'ENOENT') throw e
-    index.stat = null
-    return index
-  }
-  if (!stat.isFile()) throw fail('LOG_CORRUPT', 'Lịch sử chat không phải file')
+    error: null, fileSize: 0, endsWithNewline: true, dirty: false, stat: null }
+  let stat = null
+  try { stat = await rawFs.promises.lstat(file) } catch (e) { if (e.code !== 'ENOENT') throw e }
+  if (stat && (stat.isSymbolicLink() || !stat.isFile())) throw fail('LOG_CORRUPT', 'Lịch sử chat không phải file thường')
+  if (!stat) return index
   let pending = Buffer.alloc(0), offset = 0, stopped = false
   const parseLine = (line, start, complete) => {
     if (line.length && line[line.length - 1] === 13) line = line.subarray(0, -1)
@@ -712,7 +850,7 @@ async function buildLogIndex(root, old) {
     }
     addIndexedRecord(index, line, record, start, start + line.length)
   }
-  for await (const chunk of rawFs.createReadStream(file)) {
+  for await (const chunk of rawFs.createReadStream(file, { flags: rawFs.constants.O_RDONLY | O_NOFOLLOW })) {
     if (stopped) break
     const data = pending.length ? Buffer.concat([pending, chunk]) : chunk
     let begin = 0, newline
@@ -728,7 +866,7 @@ async function buildLogIndex(root, old) {
   if (!stopped && pending.length) parseLine(pending, stat.size - pending.length, false)
   index.fileSize = stat.size
   index.endsWithNewline = !stat.size || (!pending.length && !index.error)
-  const after = await rawFs.promises.stat(file)
+  const after = await rawFs.promises.lstat(file)
   if (after.dev !== stat.dev || after.ino !== stat.ino || after.size !== stat.size || after.mtimeMs !== stat.mtimeMs)
     return buildLogIndex(root, old)
   index.stat = { dev: stat.dev, ino: stat.ino, size: stat.size, mtimeMs: stat.mtimeMs }
@@ -742,7 +880,7 @@ async function getLogIndex(dir, { force = false } = {}) {
   const root = rawFs.realpathSync(dir), key = chat(root), cached = logIndexes.get(key)
   if (cached && !force && !cached.dirty) {
     let stat = null
-    try { stat = await rawFs.promises.stat(cached.file) } catch (e) { if (e.code !== 'ENOENT') throw e }
+    try { stat = await rawFs.promises.lstat(cached.file) } catch (e) { if (e.code !== 'ENOENT') throw e }
     if ((!stat && !cached.stat) || (stat && cached.stat && stat.dev === cached.stat.dev && stat.ino === cached.stat.ino
       && stat.size === cached.stat.size && stat.mtimeMs === cached.stat.mtimeMs)) return cached
   }
@@ -766,7 +904,7 @@ function logFailure(index) {
 async function readIndexedRecords(index, start, end) {
   if (start >= end) return []
   const first = index.records[start], last = index.records[end - 1], length = last.end - first.start
-  const handle = await rawFs.promises.open(index.file, 'r')
+  const handle = await rawFs.promises.open(index.file, rawFs.constants.O_RDONLY | O_NOFOLLOW)
   try {
     const buffer = Buffer.alloc(length), { bytesRead } = await handle.read(buffer, 0, length, first.start)
     if (bytesRead !== length) throw fail('LOG_CHANGED', 'Lịch sử chat đã thay đổi')
@@ -842,10 +980,28 @@ function appendRecordToIndex(index, raw, msg, start, end, stat) {
   index.fileSize = stat.size; index.endsWithNewline = true; index.stat = { dev: stat.dev, ino: stat.ino, size: stat.size, mtimeMs: stat.mtimeMs }
 }
 
+// One unfinished last line (a crash mid-append) would block every later append: move it to log.jsonl.bad-<time>, keep the rest.
+// A broken line in the middle stays an error for the user to look at.
+// a hard link would make the app write into whatever file an agent linked log.jsonl to
+const oneLink = stat => { if (stat.nlink > 1) throw fail('LOG_CORRUPT', 'Lịch sử chat có hard link; app không ghi vào'); return stat }
+async function repairTail(index) {
+  const handle = await rawFs.promises.open(index.file, rawFs.constants.O_RDWR | O_NOFOLLOW)
+  try {
+    const stat = oneLink(await handle.stat()), from = index.error.byteOffset
+    if (stat.ino !== index.stat?.ino || stat.size !== index.fileSize) return // changed since it was read: the reload decides
+    const tail = Buffer.alloc(stat.size - from)
+    await handle.read(tail, 0, tail.length, from)
+    await rawFs.promises.writeFile(`${index.file}.bad-${new Date().toISOString().replace(/:/g, '')}`, tail, { flag: 'wx' })
+    await handle.truncate(from); await handle.sync()
+  } finally { await handle.close() }
+}
+
 async function appendLogIndexed(dir, msg, { taskChanges, actor } = {}) {
   const root = rawFs.realpathSync(dir), key = chat(root), previous = logAppends.get(key) || Promise.resolve()
   const operation = previous.catch(() => {}).then(async () => {
-    const index = await getLogIndex(root); logFailure(index)
+    let index = await getLogIndex(root)
+    if (index.error?.code === 'LOG_INCOMPLETE') { await repairTail(index); index = await getLogIndex(root, { force: true }) }
+    logFailure(index)
     let taskError = null
     if (taskChanges) {
       try {
@@ -854,25 +1010,21 @@ async function appendLogIndexed(dir, msg, { taskChanges, actor } = {}) {
       } catch (e) { taskError = e.message }
     }
     const raw = Buffer.from(JSON.stringify(msg)), separator = index.fileSize && !index.endsWithNewline ? Buffer.from('\n') : Buffer.alloc(0)
-    const handle = await rawFs.promises.open(index.file, 'a')
-    try { if (separator.length) await handle.write(separator); await handle.write(raw); await handle.write(Buffer.from('\n')); await handle.sync() }
+    const { O_WRONLY, O_APPEND, O_CREAT } = rawFs.constants
+    const handle = await rawFs.promises.open(index.file, O_WRONLY | O_APPEND | O_CREAT | O_NOFOLLOW)
+    let stat // one write: another appender can't land between the separator, the record and its newline
+    try { oneLink(await handle.stat()); await handle.write(Buffer.concat([separator, raw, Buffer.from('\n')])); await handle.sync(); stat = await handle.stat() }
     finally { await handle.close() }
-    const start = index.fileSize + separator.length, stat = await rawFs.promises.stat(index.file)
+    const start = index.fileSize + separator.length
     appendRecordToIndex(index, raw, msg, start, start + raw.length, stat)
+    if (stat.size !== start + raw.length + 1) index.dirty = true // someone else appended too: offsets are guesses, re-read all
     return { message: { ...msg, seq: index.records.length - 1 }, generation: index.generation, total: index.records.length, totals: logTotals(index), taskError }
   })
   logAppends.set(key, operation)
   return operation.finally(() => { if (logAppends.get(key) === operation) logAppends.delete(key) })
 }
 
-function appendLog(dir, msg) {
-  const file = chat(dir, 'log.jsonl')
-  let separator = ''
-  try { const stat = rawFs.statSync(file); if (stat.size) { const fd = rawFs.openSync(file, 'r'), byte = Buffer.alloc(1); rawFs.readSync(fd, byte, 0, 1, stat.size - 1); rawFs.closeSync(fd); if (byte[0] !== 10) separator = '\n' } } catch {}
-  rawFs.appendFileSync(file, separator + JSON.stringify(msg) + '\n')
-  invalidateLogIndex(dir)
-}
-const rawTeam = dir => JSON.parse(fs.readFileSync(chat(dir, 'agents.json'), 'utf8'))
+const rawTeam = dir => JSON.parse(configRead(dir, 'agents.json') ?? '[]') // the confirmed team, not whatever is on disk now
 const commandToken = /^[A-Za-z0-9_./:@=+,%-]+$/
 function normalizeCommand(input) {
   if (typeof input !== 'string' || input.length > 256 || /[\r\n]/.test(input)) throw new Error('Lệnh phải là một dòng tối đa 256 ký tự')
@@ -977,7 +1129,8 @@ function normalizeAvatars(members) {
   })
 }
 function team(dir) {
-  const raw = rawTeam(dir), avatars = normalizeAvatars(raw)
+  // keys the app sets at run time never come from the file: sharedChat would become an extra --add-dir
+  const raw = rawTeam(dir).map(({ sharedChat, cwd, projectDir, ...agent }) => agent), avatars = normalizeAvatars(raw)
   return raw.map((agent, index) => {
     let scope
     try { scope = normalizeScope(agent, dir) }
@@ -1031,20 +1184,19 @@ function normalizeTeam(dir, members) {
     if (!/^[\w-]+$/.test(a.name || '')) throw new Error(`Tên "${a.name}" chỉ được dùng chữ, số, - và _`)
     if (names.has(a.name.toLowerCase())) throw new Error(`Trùng tên @${a.name}`)
     if (!account(a.cli)) throw new Error(`Tài khoản CLI "${a.cli}" không hỗ trợ`)
-    if (!/^[\w.:-]*$/.test(a.model || '') || !/^\w*$/.test(a.effort || '')) throw new Error(`Model/effort của @${a.name} không hợp lệ`)
+    if (!validArgValue(a.model) || !/^\w*$/.test(a.effort || '')) throw new Error(`Model/effort của @${a.name} không hợp lệ`)
     names.add(a.name.toLowerCase())
   }
   return normalized
 }
 function saveTeam(dir, members) {
   const normalized = normalizeTeam(dir, members)
-  const file = chat(dir, 'agents.json'), backup = chat(dir, 'agents.json.pre-sprint-2.bak'), temp = chat(dir, 'agents.json.tmp')
-  if (!fs.existsSync(backup)) fs.copyFileSync(file, backup, fs.constants.COPYFILE_EXCL)
-  fs.writeFileSync(temp, JSON.stringify(normalized, null, 2))
-  fs.renameSync(temp, file)
+  const file = chat(dir, 'agents.json'), backup = chat(dir, 'agents.json.pre-sprint-2.bak')
+  if (!fs.existsSync(backup) && fs.existsSync(file)) fs.copyFileSync(file, backup, fs.constants.COPYFILE_EXCL)
+  writeConfig(dir, 'agents.json', JSON.stringify(normalized, null, 2))
   return normalized
 }
-const teamRevision = dir => createHash('sha256').update(rawFs.readFileSync(chat(dir, 'agents.json'))).digest('hex')
+const teamRevision = dir => createHash('sha256').update(configRead(dir, 'agents.json') ?? '').digest('hex')
 
 function migrateTaskScope(dir) {
   const original = rawTeam(dir), index = original.findIndex(a => String(a.name).toLowerCase() === 'pm')
@@ -1054,9 +1206,9 @@ function migrateTaskScope(dir) {
   const required = [`${chatName(dir)}/tasks.json`, `${chatName(dir)}/tasks.json.tmp`]
   if (!pm.owns.length || required.every(file => scopeAllows(pm, file))) return { changed: false }
   const next = original.map((agent, i) => i === index ? { ...agent, owns: [...ownsList(pm), ...required.filter(file => !scopeAllows(pm, file))] } : agent)
-  const file = chat(dir, 'agents.json'), backup = chat(dir, 'agents.json.pre-sprint-3.bak'), temp = chat(dir, 'agents.json.tmp')
-  if (!fs.existsSync(backup)) fs.copyFileSync(file, backup, fs.constants.COPYFILE_EXCL)
-  fs.writeFileSync(temp, JSON.stringify(next, null, 2)); fs.renameSync(temp, file)
+  const file = chat(dir, 'agents.json'), backup = chat(dir, 'agents.json.pre-sprint-3.bak')
+  if (!fs.existsSync(backup) && fs.existsSync(file)) fs.copyFileSync(file, backup, fs.constants.COPYFILE_EXCL)
+  writeConfig(dir, 'agents.json', JSON.stringify(next, null, 2))
   return { changed: true }
 }
 
@@ -1093,22 +1245,9 @@ function parseTaskDefinitions(input, dir = '.') {
   return tasks
 }
 
-function buildTaskBoard(definitions, log) {
-  const latest = new Map(), defined = new Map(definitions.map(task => [`${task.id}\0${task.createdAt}`, task]))
-  for (const record of log) if (Object.hasOwn(record, 'taskUpdates')) {
-    if (!taskUpdatesValid(record.taskUpdates) || !validIso(record.at))
-      throw fail('DATA_ERROR', 'Metadata task trong log không hợp lệ')
-    for (const update of record.taskUpdates) {
-      const key = `${update.id}\0${update.createdAt}`
-      if (defined.get(key)?.assignee === update.assignee) latest.set(key, { ...update, at: record.at })
-    }
-  }
-  return buildTaskBoardFromEvents(definitions, latest)
-}
-
 function buildTaskBoardFromEvents(definitions, latest) {
   const tasks = definitions.map(definition => {
-    const update = latest.get(`${definition.id}\0${definition.createdAt}`) || latest.get(`${definition.id}\0${definition.createdAt}\0${definition.assignee}`)
+    const update = latest.get(taskEventKey(definition))
     const revision = createHash('sha256').update(JSON.stringify([definition.id, definition.title, definition.assignee,
       definition.spec ?? null, definition.createdAt, definition.updatedAt, update?.eventId || null])).digest('hex')
     return { ...definition, status: update?.status || 'todo', revision,
@@ -1117,11 +1256,11 @@ function buildTaskBoardFromEvents(definitions, latest) {
   return { tasks, error: null }
 }
 
-function taskBoard(dir, index = null) {
+function taskBoard(dir, index) {
   const root = fs.realpathSync(dir), file = chat(root, 'tasks.json'), cached = taskCache.get(chat(root))
   try {
-    if (index?.taskError) throw fail('DATA_ERROR', index.taskError)
-    const boardFor = definitions => index ? buildTaskBoardFromEvents(definitions, index.taskEvents) : buildTaskBoard(definitions, readLog(root, { strict: true }))
+    if (index.taskError) throw fail('DATA_ERROR', index.taskError)
+    const boardFor = definitions => buildTaskBoardFromEvents(definitions, index.taskEvents)
     if (!rawFs.existsSync(file)) {
       if (cached?.hadFile) throw fail('NOT_FOUND', 'File task đã bị xóa')
       const board = boardFor([])
@@ -1287,12 +1426,12 @@ const sessions = (dir, workspaceId = null) => {
 }
 function setSession(dir, name, s, workspaceId = null) {
   if (!workspaceId) {
-    const all = sessions(dir), file = chat(dir, 'sessions.json'), temp = file + '.tmp'
+    const all = sessions(dir)
     if (s) all[name] = s; else if (name) delete all[name]; else for (const k in all) delete all[k]
-    fs.writeFileSync(temp, JSON.stringify(all, null, 2)); fs.renameSync(temp, file)
+    atomicWrite(chat(dir, 'sessions.json'), JSON.stringify(all, null, 2))
     return
   }
-  const file = chat(dir, 'worktree-sessions.json'), temp = file + '.tmp'
+  const file = chat(dir, 'worktree-sessions.json')
   let data
   try { data = JSON.parse(fs.readFileSync(file, 'utf8')) }
   catch (e) { if (e.code !== 'ENOENT') throw fail('CONFIG_ERROR', 'Không đọc được phiên worktree'); data = { version: 1, workspaces: {} } }
@@ -1301,7 +1440,7 @@ function setSession(dir, name, s, workspaceId = null) {
   const all = { ...(data.workspaces[workspaceId] || {}) }
   if (s) all[name] = s; else if (name) delete all[name]; else for (const key in all) delete all[key]
   data.workspaces[workspaceId] = all
-  fs.writeFileSync(temp, JSON.stringify(data, null, 2)); fs.renameSync(temp, file)
+  atomicWrite(file, JSON.stringify(data, null, 2))
 }
 
 function sessionRotationPending(agent, session) {
@@ -1336,10 +1475,7 @@ function readHandoff(dir, name, workspaceId = null) {
       || lines.length < 3 || lines.length > 5 || lines.some(line => !line.trim()) || Buffer.byteLength(body) > 4096)
       throw fail('DATA_ERROR', 'File bàn giao không hợp lệ')
     return { ...header, text: body }
-  } catch (e) {
-    if (e.code === 'ENOENT') return null
-    return null
-  }
+  } catch { return null }
 }
 function writeHandoff(dir, name, workspaceId, runId, body) {
   const { folder, file, temp } = handoffPath(dir, name), lines = String(body).split(/\r?\n/)
@@ -1353,9 +1489,7 @@ function writeHandoff(dir, name, workspaceId, runId, body) {
   for (const target of [file, temp]) try { regularNoLink(target, 'file') } catch (e) { if (e.code !== 'ENOENT') throw e }
   const at = new Date().toISOString(), content = `<!-- ${JSON.stringify({ version: 1, agent: name, workspaceId: workspaceId || null, runId, at })} -->\n${body}\n`
   if (Buffer.byteLength(content) > 8192) throw fail('TOO_LARGE', 'File bàn giao vượt quá 8 KiB')
-  const fd = rawFs.openSync(temp, rawFs.constants.O_WRONLY | rawFs.constants.O_CREAT | rawFs.constants.O_TRUNC | (rawFs.constants.O_NOFOLLOW || 0), 0o600)
-  try { rawFs.writeFileSync(fd, content); rawFs.fsyncSync(fd) } finally { rawFs.closeSync(fd) }
-  rawFs.renameSync(temp, file)
+  atomicWrite(file, content) // fresh temp (never a planted hard link), renamed over the file
   return { version: 1, agent: name, workspaceId: workspaceId || null, runId, at, text: body }
 }
 
@@ -1486,7 +1620,7 @@ const scope = agent => {
   return `\nPhạm vi của bạn: ${rule} Ngoài phạm vi thì gọi người phụ trách.`
 }
 
-function taskContext(dir, agent, board = taskBoard(dir)) {
+function taskContext(dir, agent, board) {
   const isPm = String(agent.name).toLowerCase() === 'pm'
   const selected = isPm ? board.tasks : board.tasks.filter(task => task.assignee === agent.name)
   const done = selected.filter(task => task.status === 'done').length
@@ -1522,7 +1656,7 @@ function handoffNote(handoff) {
   return `\n## ${label}\n${handoff.text}\n\nBàn giao có thể đã cũ; kiểm tra trạng thái task và code hiện tại trước khi sửa.\n`
 }
 
-function prompt(dir, agent, session, log = readLog(dir), board = taskBoard(dir), summary = null, options = {}) {
+function prompt(dir, agent, session, log, board, summary = null, options = {}) {
   agent = { ...agent, projectDir: dir }
   const workspace = agent.cwd && rawFs.realpathSync(agent.cwd) !== rawFs.realpathSync(dir)
     ? `\nCode của lượt này nằm trong worktree hiện tại (${agent.cwd}); ${chatName(dir)} là dữ liệu chung của box. Chỉ sửa code trong cwd này.` : ''
@@ -1625,12 +1759,8 @@ async function acceptSummary(dir, batch, text, runId) {
 }
 
 function materializeSummary(dir, summary) {
-  const file = chat(dir, 'summary.md'), temp = chat(dir, 'summary.md.tmp')
   const header = { version: 1, through: summary.through, prefixHash: summary.prefixHash, runId: summary.runId }
-  const fd = rawFs.openSync(temp, 'w')
-  try { rawFs.writeFileSync(fd, `<!-- ${JSON.stringify(header)} -->\n${summary.text}\n`); rawFs.fsyncSync(fd) }
-  finally { rawFs.closeSync(fd) }
-  rawFs.renameSync(temp, file)
+  atomicWrite(chat(dir, 'summary.md'), `<!-- ${JSON.stringify(header)} -->\n${summary.text}\n`)
 }
 
 async function recoverSummary(dir) {
@@ -1687,17 +1817,18 @@ async function stopGroup(pid) {
   if (groupAlive(pid)) throw new Error('Không thể dừng hết tiến trình CLI')
 }
 
-function exec(dir, agent, session, { signal, onProgress, onSession, onSpawn, costBaseline, promptText, seen: promptSeen, cwd = dir } = {}) {
+function exec(dir, agent, session, { signal, onProgress, onSession, onSpawn, costBaseline, promptText: p, seen = 0, cwd = dir } = {}) {
   const acc = account(agent.cli)
   if (!acc) return Promise.reject(new Error(`Tài khoản CLI "${agent.cli}" không hỗ trợ`))
+  // model/effort/session id come from files agents can write and land in argv: "--…" would be read as a flag
+  if (![agent.model, session?.id].every(validArgValue) || !/^\w*$/.test(agent.effort || ''))
+    return Promise.reject(new Error(`Model, effort hoặc mã phiên của @${agent.name} không hợp lệ`))
   const cli = CLI[acc.bin]
-  const log = promptText == null ? readLog(dir) : null, seen = promptSeen ?? log?.length ?? 0
-  const p = promptText ?? prompt(dir, agent, session, log)
   const context = { dir, resumed: !!session, costBaseline }
   const state = cli.state(context)
   return new Promise((resolve, reject) => {
     // stdin must be closed (or fed and ended): codex/claude wait for EOF on a piped stdin
-    const viaStdin = !!cli.stdinArgs && promptViaStdin()
+    const viaStdin = !!cli.stdinArgs
     let c
     try {
       c = spawnCli(acc.bin, viaStdin ? cli.stdinArgs(session?.id, agent) : cli.args(p, session?.id, agent),
@@ -1767,16 +1898,27 @@ function commandOutput(chunks) {
   return buffer.toString('utf8')
 }
 
-function runCommand(dir, command, { signal, onProgress, onSpawn } = {}) {
+// The app runs the command outside the agent's CLI, yet the agent can edit what it executes (package.json scripts…).
+// So a codex or agy agent's command runs in codex's sandbox (writes only inside dir, no network), never unsandboxed; agy
+// has no sandbox of its own and borrows codex's. readOnly keeps :workspace: the command is the user's allowlisted one, over
+// code the agent itself could not modify. Claude applies the same allowlist through its own Bash rules.
+function runCommand(dir, command, { signal, onProgress, onSpawn, agent } = {}) {
   const [executable, ...args] = command.split(' '), started = performance.now()
-  if (signal?.aborted) return Promise.resolve({ command, exitCode: null, signal: null, stdout: '', stderr: '', truncated: false,
-    durationMs: 0, error: 'Lệnh đã bị dừng' })
+  const failed = error => ({ command, exitCode: null, signal: null, stdout: '', stderr: '', truncated: false,
+    durationMs: Math.max(0, Math.round(performance.now() - started)), error })
+  if (signal?.aborted) return Promise.resolve({ ...failed('Lệnh đã bị dừng'), durationMs: 0 })
   onProgress?.(`chạy ${command}…`)
+  const bin = agent && account(agent.cli)?.bin
+  const sandbox = (bin === 'codex' || bin === 'agy') && agent.permissions?.mode !== 'full' ? account(bin === 'codex' ? agent.cli : 'codex') : null
+  const missingCodex = `Cần cài codex CLI để app chạy lệnh trong sandbox cho ${bin}`
   return new Promise(resolve => {
     let child
-    try { child = spawnCli(executable, args, { cwd: dir, shell: false, detached: true, stdio: ['ignore', 'pipe', 'pipe'] }) }
-    catch (e) { return resolve({ command, exitCode: null, signal: null, stdout: '', stderr: '', truncated: false,
-      durationMs: Math.max(0, Math.round(performance.now() - started)), error: e.message }) }
+    const options = { cwd: dir, shell: false, detached: true, stdio: ['ignore', 'pipe', 'pipe'] }
+    // ponytail: :workspace has no network even for codex agents granted network access; use a network-enabled
+    // permission profile here if checks ever need to download
+    try { child = sandbox ? spawnCli(sandbox.bin, ['sandbox', '--permission-profile', ':workspace', '-C', dir, '--', ...sandboxArgv(executable, args, sandbox.env)],
+      { ...options, env: sandbox.env }) : spawnCli(executable, args, options) }
+    catch (e) { return resolve(failed(sandbox && e.code === 'ENOENT' ? missingCodex : e.message)) }
     let remaining = 32768, truncated = false, childError, killError, termination = Promise.resolve()
     const output = { stdout: [], stderr: [] }
     const collect = stream => chunk => {
@@ -1805,10 +1947,12 @@ function runCommand(dir, command, { signal, onProgress, onSpawn } = {}) {
       const result = { command, exitCode: Number.isInteger(exitCode) ? exitCode : null, signal: exitSignal || null,
         stdout: commandOutput(output.stdout), stderr: commandOutput(output.stderr), truncated,
         durationMs: Math.max(0, Math.round(performance.now() - started)) }
-      if (childError) result.error = childError.message
+      if (childError) result.error = sandbox && childError.code === 'ENOENT' ? missingCodex : childError.message
       else if (killError) result.error = killError.message
       else if (orphanState) result.error = 'Tiến trình con vẫn còn chạy sau khi lệnh kết thúc'
       else if (signal?.aborted) result.error = 'Lệnh đã bị dừng'
+      else if (sandbox && exitCode && /^error: (unrecognized subcommand|unexpected argument) '(sandbox|--permission-profile)'/m.test(result.stderr))
+        result.error = 'codex CLI quá cũ, chưa có `codex sandbox --permission-profile`; hãy cập nhật codex'
       else if (exitCode !== 0) result.error = result.stderr.trim().slice(-500) || `exit ${exitCode}`
       resolve({ ...result, orphanState, pgid: child.pid })
     })
@@ -1829,7 +1973,7 @@ const emptyReply = agent => `Bạn chưa gửi tin trả lời. Hãy gửi tin t
 const MISSING_SESSION = /no conversation found|no rollout found|conversation not found|session not found/i
 
 // Connection test: one tiny turn through exactly the path a real turn takes (account env, model/effort/permission
-// flags, stdin on Windows, stream parser) in a throwaway session. Catches a missing CLI, a logged-out account, a bad
+// flags, prompt over stdin, stream parser) in a throwaway session. Catches a missing CLI, a logged-out account, a bad
 // model or a down service before a real task hits it.
 async function probe(dir, agent, { timeoutMs = 120000 } = {}) {
   const started = performance.now(), signal = AbortSignal.timeout(timeoutMs)
@@ -1850,11 +1994,12 @@ async function run(dir, agent, options = {}) {
     ...(Object.hasOwn(options, 'sessionTokenLimit') ? { sessionTokenLimit: options.sessionTokenLimit } : {}) }) : 0,
     allowedCommands: trackSession ? normalizeAllowedCommands(agent.allowedCommands ?? DEFAULT_COMMANDS) : [],
     permissions: trackSession ? normalizePermissions(agent.permissions, agent.cli, agent.name) : { ...DEFAULT_PERMISSIONS, allowTools: [] }, cwd,
-    ...(workspaceId ? { sharedChat: chat(dir) } : {}) } }
+    sharedChat: workspaceId ? chat(dir) : undefined } }
   catch (e) { return { outcome: 'error', text: e.message, usage: { ...emptyUsage(true), durationMs: Math.max(0, Math.round(performance.now() - started)) },
     commandResults: [], permissionDenials: [], sessionRotation: null, orphanState: null, pgid: null } }
   const record = trackSession ? sessions(dir, workspaceId)[agent.name] : null
-  let session = agent.resume === false || !record?.id || record.cli !== agent.cli ? null : record
+  // an id that couldn't be a CLI's own (sessions.json is agent-writable) → start a fresh session instead of resuming it
+  let session = agent.resume === false || !record?.id || record.cli !== agent.cli || !validArgValue(record.id) ? null : record
   const rotationSource = sessionRotationPending(agent, session) ? session : null
   if (rotationSource) session = null
   const acc = account(agent.cli)
@@ -1939,7 +2084,7 @@ async function run(dir, agent, options = {}) {
       }
       if (request.error || !allowedCommands.includes(request.command)) result = { command: request.command || '', exitCode: null, signal: null,
         stdout: '', stderr: '', truncated: false, durationMs: 0, error: request.error || 'Lệnh không nằm trong danh sách được phép' }
-      else result = await runCommand(cwd, request.command, { signal, onProgress, onSpawn })
+      else result = await runCommand(cwd, request.command, { signal, onProgress, onSpawn, agent })
       commandResults.push(publicCommandResult(result)); pgid = result.pgid || pgid; orphanState = result.orphanState
       if (signal?.aborted || result.orphanState) { r.orphanState = result.orphanState; r.error = result.error; break }
       promptText = commandReply(result, agent)
@@ -1966,8 +2111,10 @@ async function run(dir, agent, options = {}) {
     if (agent.resume !== false && id) {
       const current = sessions(dir, workspaceId)[agent.name]
       saved = current?.id === id ? current : { id, cli: agent.cli, seen: 0, at: new Date().toISOString(), adopted: true }
-      if (outcome === 'success') saved = { ...saved, id, cli: agent.cli, seen: jobSeen, seenHash: initial.seenHash,
-        at: new Date().toISOString() }
+      if (outcome === 'success') { // it has now read the briefing: later turns only get what's new
+        saved = { ...saved, id, cli: agent.cli, seen: jobSeen, seenHash: initial.seenHash, at: new Date().toISOString() }
+        delete saved.adopted
+      }
       if (acc?.bin === 'claude') {
         if (r.rawCostUsd != null && baseline != null) saved.costCheckpoint = { totalUsd: baseline }
         else delete saved.costCheckpoint
@@ -1988,10 +2135,10 @@ async function run(dir, agent, options = {}) {
     orphanState: r.orphanState || orphanState, pgid: r.pgid || pgid }
 }
 
-module.exports = { CHAT_DIR, chat, chatName, useBox, boxes, createBox, CLI, account, accounts, cliSessions, models, init, readLog, appendLog, appendLogIndexed, getLogIndex, invalidateLogIndex, logPage, searchLog, logTotals,
+module.exports = { CHAT_DIR, chat, chatName, useBox, boxes, createBox, CLI, account, accounts, cliSessions, models, init, atomicWrite, setTrustFile, configTrust, trustConfig, revertConfig, appendLogIndexed, getLogIndex, invalidateLogIndex, logPage, searchLog, logTotals,
   normalizeProjectSettings, projectSettings, writeProjectSettings, summaryBatch, acceptSummary, materializeSummary, recoverSummary,
   team, normalizeTeam, saveTeam, teamRevision, normalizePermissions, permissionRules, normalizePermissionDenials,
   timeoutMinutes, sessionTokenLimit, sessions, setSession, sessionRotationPending, readHandoff, writeHandoff,
-  mentions, files, normalizeScope, ownsList, probe, winArg, spawnCli, shimTarget, normalizeAllowedCommands, scopeAllows, scopeLocks, lockConflict, snapshot, changedPaths, prompt, promptIndexed, run, runCommand, groupAlive,
-  migrateTaskScope, parseTaskDefinitions, buildTaskBoard, taskBoard, taskBoardIndexed, parseTaskStatusBlock, parseRunCommandBlock, parseHandoffBlock, validateTaskChanges,
+  mentions, files, normalizeScope, ownsList, probe, winArg, spawnCli, shimTarget, normalizeAllowedCommands, scopeAllows, scopeLocks, lockConflict, snapshot, changedPaths, promptIndexed, run, runCommand, groupAlive,
+  migrateTaskScope, parseTaskDefinitions, taskBoardIndexed, parseTaskStatusBlock, parseRunCommandBlock, parseHandoffBlock, validateTaskChanges,
   resolveProjectFile, readProjectFile }
