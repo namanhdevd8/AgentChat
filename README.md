@@ -27,6 +27,10 @@ npm run dist:win  # Windows, bộ cài NSIS
 
 Bản build chưa ký số: macOS chặn lần mở đầu (chuột phải › Open), Windows SmartScreen cảnh báo (More info › Run anyway).
 
+Mỗi lần phát hành: nâng phiên bản (`npm version minor --no-git-tag-version` cho tính năng mới, `patch` cho bản sửa lỗi),
+thêm mục cho phiên bản đó vào `CHANGELOG.md` (`npm run check` báo lỗi nếu thiếu), rồi mới build. Trong app, danh sách thay
+đổi nằm ở mục Giới thiệu (chân sidebar hoặc menu).
+
 ## Dữ liệu nằm ở đâu
 
 - Trong folder dự án: `.chat/` gồm log, bảng task, `memory.md` (bộ nhớ chung), `agents.json` (nhóm). Box thứ hai của

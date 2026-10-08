@@ -71,7 +71,7 @@
   }
 
   /* left nav */
-  nav { padding: 14px 10px; overflow-y: auto; border-right: 1px solid var(--line); }
+  nav { display: flex; flex-direction: column; padding: 14px 10px; overflow-y: auto; border-right: 1px solid var(--line); }
   .brand { display: flex; align-items: center; gap: 10px; padding: 2px 6px 14px; font-weight: 600; font-size: 15px; letter-spacing: -.01em; }
   .logo { width: 30px; height: 30px; margin: -3px; } /* the icon's own margin around its rounded square */
   /* macOS hidden title bar: room for the traffic lights, and the bars drag the window */
@@ -88,6 +88,21 @@
   .space.on { background: var(--surface); border-color: var(--line); color: var(--ink); font-weight: 500; }
   .space span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .space .space-badge { margin-left: auto; flex: none; overflow: visible; }
+  .nav-foot { margin-top: auto; padding: 14px 6px 0; background: none; border: 0; text-align: left; font: 11.5px/1.6 var(--sans); color: var(--faint); }
+  .nav-foot:hover { color: var(--muted); }
+  .nav-foot span { display: block; }
+
+  /* Giới thiệu: who made it, what changed */
+  .about-dialog { width: min(640px, 92vw); }
+  .about-head { display: flex; align-items: center; gap: 14px; }
+  .about-head img { width: 52px; height: 52px; margin: -4px; }
+  .about-head > div { flex: 1; min-width: 0; }
+  .about-head small { display: block; }
+  .about-body { overflow-y: auto; padding: 4px 20px 20px; }
+  .about-body h1 { display: none; } /* the file's own title; the dialog has one */
+  .about-body h2 { margin: 18px 0 2px; padding-top: 14px; border-top: 1px solid var(--line); font: 600 14px var(--mono); }
+  .about-body h2:first-of-type { margin-top: 14px; padding-top: 0; border-top: 0; } /* the dialog head already rules it off */
+  .about-body h3 { margin: 12px 0 4px; font: 500 11.5px/1.4 var(--mono); text-transform: lowercase; color: var(--muted); }
 
   /* chat */
   main { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--surface); position: relative; }
@@ -475,6 +490,7 @@
   </button>
   <h3>Không gian</h3>
   <div id="projects"></div>
+  <button id="about-btn" class="nav-foot" type="button" title="Giới thiệu và các thay đổi" hidden><span id="foot-version"></span><span id="foot-author"></span></button>
 </nav>
 
 <main class="box">
@@ -689,6 +705,14 @@
 <dialog id="switcher" class="box switcher" aria-label="Chuyển không gian">
   <input id="switcher-input" placeholder="Chuyển tới không gian…" autocomplete="off" spellcheck="false" aria-controls="switcher-list">
   <div id="switcher-list" class="switcher-list" role="listbox"></div>
+</dialog>
+<dialog id="about" class="box about-dialog" aria-labelledby="about-title">
+  <div class="dhead about-head">
+    <img src="build/icon.svg" alt="">
+    <div><h2 id="about-title">Agent Chat</h2><small id="about-sub"></small></div>
+    <button id="about-close" class="box press btn sm" type="button">Đóng</button>
+  </div>
+  <div id="about-body" class="about-body"></div>
 </dialog>
 <dialog id="timeline" class="box timeline-dialog" aria-labelledby="timeline-title">
   <div class="dhead timeline-head">

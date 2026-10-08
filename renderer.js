@@ -3146,8 +3146,27 @@ api.on('menu', action => {
     $('#gear').click()
   } else if (action === 'timeline' && !$('#timeline-btn').hidden) {
     openTimeline()
+  } else if (action === 'about') {
+    $('#about-btn').click()
   }
 })
+
+// Giới thiệu: version and author in the sidebar foot; the dialog adds the changelog
+let about = null
+api.about().then(info => {
+  about = info
+  $('#foot-version').textContent = `v${info.version}`
+  $('#foot-author').textContent = `Developed by ${info.author.replaceAll(' ', '\u00a0')}` // a narrow sidebar breaks after "by", never inside the name
+  $('#about-btn').hidden = false
+}).catch(() => {})
+$('#about-btn').onclick = () => {
+  if (!about) return
+  $('#about-title').textContent = `Agent Chat ${about.version}`
+  $('#about-sub').textContent = `Developed by ${about.author}`
+  $('#about-body').replaceChildren(renderMarkdown(about.changelog || 'Chưa có danh sách thay đổi.'))
+  $('#about').showModal()
+}
+$('#about-close').onclick = () => $('#about').close()
 
 document.addEventListener('keydown', e => {
   // ⌘1…9 / Ctrl+1…9: the nth space in the sidebar

@@ -1604,6 +1604,13 @@ ipcMain.handle('grantPermissionAndRetry', (event, dir, input) => {
   })
 })
 ipcMain.handle('accounts', event => { validSender(event); return core.accounts() })
+// Giới thiệu: version and author from package.json, the changelog shipped beside it
+ipcMain.handle('about', event => {
+  validSender(event)
+  let changelog = ''
+  try { changelog = fs.readFileSync(path.join(__dirname, 'CHANGELOG.md'), 'utf8') } catch {}
+  return { version: app.getVersion(), author: require('./package.json').author, changelog }
+})
 ipcMain.handle('sessions', (event, dir) => {
   validSender(event)
   return sessionMap(knownProject(dir))
@@ -1685,11 +1692,12 @@ function savedBounds() {
 function setMenu() {
   const send = action => () => win?.webContents.send('menu', action)
   const settings = { label: 'Cài đặt nhóm…', accelerator: 'CmdOrCtrl+,', click: send('settings') }
+  const about = { label: 'Giới thiệu Agent Chat', click: send('about') } // own dialog: version, author, changelog on both OSes
   const mac = process.platform === 'darwin'
   Menu.setApplicationMenu(Menu.buildFromTemplate([
-    mac ? { label: app.name, submenu: [{ role: 'about' }, { type: 'separator' }, settings, { type: 'separator' }, { role: 'services' },
+    mac ? { label: app.name, submenu: [about, { type: 'separator' }, settings, { type: 'separator' }, { role: 'services' },
       { type: 'separator' }, { role: 'hide' }, { role: 'hideOthers' }, { role: 'unhide' }, { type: 'separator' }, { role: 'quit' }] }
-      : { label: 'Tệp', submenu: [settings, { type: 'separator' }, { role: 'quit' }] },
+      : { label: 'Tệp', submenu: [about, settings, { type: 'separator' }, { role: 'quit' }] },
     { role: 'editMenu' },
     { label: 'Đi tới', submenu: [
       { label: 'Chuyển không gian…', accelerator: 'CmdOrCtrl+K', click: send('switch') },

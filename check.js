@@ -184,6 +184,8 @@ assert.strictEqual(fs.readFileSync(path.join(proj, '.chat/agents.json.pre-sprint
 assert.strictEqual(require('./package.json').dependencies['markdown-it'], '15.0.2')
 const page = fs.readFileSync(path.join(__dirname, 'index.html'), 'utf8'), rendererJs = fs.readFileSync(path.join(__dirname, 'renderer.js'), 'utf8')
 assert.ok(page.includes('node_modules/markdown-it/dist/browser/markdown-it.umd.min.js') && /markdownit\(\{ html: false/.test(rendererJs))
+// a release bumps package.json and says what changed: the Giới thiệu dialog shows this file
+assert.ok(fs.readFileSync(path.join(__dirname, 'CHANGELOG.md'), 'utf8').includes(`## ${require('./package.json').version} · `), 'CHANGELOG.md thiếu mục cho phiên bản hiện tại')
 const html = require('markdown-it')({ html: false, linkify: false, breaks: true }).disable('image')
   .render('**đạt**\n\n- a\n\n```\n<script>alert(1)</script>\n```\n\n<img src=x onerror=alert(1)>\n\n[x](javascript:alert(1))\n\n| a | b |\n|---|---|\n| 1 | 2 |')
 assert.ok(html.includes('<strong>đạt</strong>') && html.includes('<li>a</li>') && html.includes('<table>'))

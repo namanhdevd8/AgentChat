@@ -31,6 +31,7 @@ contextBridge.exposeInMainWorld('api', {
   saveTeam: (dir, team, options) => ipcRenderer.invoke('saveTeam', dir, team, options),
   grantPermissionAndRetry: (dir, request) => ipcRenderer.invoke('grantPermissionAndRetry', dir, request),
   accounts: () => ipcRenderer.invoke('accounts'),
+  about: () => ipcRenderer.invoke('about'),
   sessions: dir => ipcRenderer.invoke('sessions', dir),
   cliSessions: (cli, dir, agentName = null) => ipcRenderer.invoke('cliSessions', cli, dir, agentName),
   models: cli => ipcRenderer.invoke('models', cli),
