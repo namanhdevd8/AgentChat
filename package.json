@@ -16,7 +16,8 @@
       "preload.js",
       "core.js",
       "index.html",
-      "renderer.js"
+      "renderer.js",
+      "build/icon.svg"
     ],
     "mac": {
       "target": "dmg",

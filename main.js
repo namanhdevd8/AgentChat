@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron')
+const { app, BrowserWindow, ipcMain, dialog, shell, Menu, nativeTheme, screen } = require('electron')
 const { execFileSync, execFile } = require('child_process')
 const { randomUUID, createHash } = require('crypto')
 const { promisify } = require('util')
@@ -1669,12 +1669,56 @@ ipcMain.handle('releaseLock', async (event, dir, runId) => {
   return { released: true }
 })
 
+// size/position survive restarts; a spot on a screen that's gone (unplugged monitor) falls back to the default
+const windowFile = () => path.join(app.getPath('userData'), 'window.json')
+function savedBounds() {
+  try {
+    const b = JSON.parse(fs.readFileSync(windowFile(), 'utf8'))
+    if (![b.x, b.y, b.width, b.height].every(Number.isInteger)) return {}
+    const seen = screen.getAllDisplays().some(({ workArea: a }) =>
+      b.x < a.x + a.width - 100 && b.x + b.width > a.x + 100 && b.y >= a.y - 10 && b.y < a.y + a.height - 100)
+    return seen ? { x: b.x, y: b.y, width: b.width, height: b.height, maximized: b.maximized === true } : {}
+  } catch { return {} }
+}
+
+// menu items only tell the renderer: it owns the dialogs and the open box
+function setMenu() {
+  const send = action => () => win?.webContents.send('menu', action)
+  const settings = { label: 'Cài đặt nhóm…', accelerator: 'CmdOrCtrl+,', click: send('settings') }
+  const mac = process.platform === 'darwin'
+  Menu.setApplicationMenu(Menu.buildFromTemplate([
+    mac ? { label: app.name, submenu: [{ role: 'about' }, { type: 'separator' }, settings, { type: 'separator' }, { role: 'services' },
+      { type: 'separator' }, { role: 'hide' }, { role: 'hideOthers' }, { role: 'unhide' }, { type: 'separator' }, { role: 'quit' }] }
+      : { label: 'Tệp', submenu: [settings, { type: 'separator' }, { role: 'quit' }] },
+    { role: 'editMenu' },
+    { label: 'Đi tới', submenu: [
+      { label: 'Chuyển không gian…', accelerator: 'CmdOrCtrl+K', click: send('switch') },
+      { label: 'Box tiếp theo đang cần bạn', accelerator: 'CmdOrCtrl+J', click: send('next-need') },
+      { label: 'Tìm trong lịch sử', accelerator: 'CmdOrCtrl+F', click: send('search') },
+      { label: 'Timeline agent', accelerator: 'CmdOrCtrl+Shift+T', click: send('timeline') }] },
+    { label: 'Xem', submenu: [{ role: 'resetZoom' }, { role: 'zoomIn' }, { role: 'zoomOut' }, { type: 'separator' }, { role: 'togglefullscreen' },
+      ...(app.isPackaged ? [] : [{ type: 'separator' }, { role: 'reload' }, { role: 'toggleDevTools' }])] },
+    { role: 'windowMenu' },
+  ]))
+}
+
 const singleInstance = app.requestSingleInstanceLock()
 if (!singleInstance) app.quit()
 else app.whenReady().then(() => {
   core.setTrustFile(path.join(app.getPath('userData'), 'trust.json'))
   for (const dir of projects()) loadOrphans(dir)
-  win = new BrowserWindow({ width: 1280, height: 820, minWidth: 960, minHeight: 560, webPreferences: { preload: path.join(__dirname, 'preload.js') } })
+  setMenu()
+  if (!app.isPackaged) app.dock?.setIcon(path.join(__dirname, 'build/icon.png')) // packaged builds carry it in the bundle
+  const { maximized, ...bounds } = savedBounds()
+  win = new BrowserWindow({ width: 1280, height: 820, ...bounds, minWidth: 960, minHeight: 560,
+    backgroundColor: nativeTheme.shouldUseDarkColors ? '#151517' : '#f7f7f8', // --bg: no white flash before the page paints
+    // macOS: the sidebar runs up under the traffic lights (index.html pads body.mac for them)
+    ...(process.platform === 'darwin' && { titleBarStyle: 'hiddenInset', trafficLightPosition: { x: 18, y: 20 } }),
+    webPreferences: { preload: path.join(__dirname, 'preload.js') } })
+  if (maximized) win.maximize()
+  win.on('close', () => {
+    try { core.atomicWrite(windowFile(), JSON.stringify({ ...win.getNormalBounds(), maximized: win.isMaximized() })) } catch {}
+  })
   // Closing never stops agents (the user chose that): CLIs keep running detached and may still edit files, but their
   // answers and the queue are lost, so ask first. Cmd+Q closes the window too, so this covers both.
   win.on('close', event => {

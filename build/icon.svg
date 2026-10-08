@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- app icon: an octopus whose head is a chat bubble typing (…), every arm an agent; flat, in the UI accent.
+       build/icon.png is rendered from this -->
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="#2b59c3"/>
+  <g fill="none" stroke="#fff" stroke-width="62" stroke-linecap="round"><path d="M322 610 V700 A50 50 0 0 1 222 700"/><path d="M450 610 V730 Q450 790 392 800"/><path d="M574 610 V730 Q574 790 632 800"/><path d="M702 610 V700 A50 50 0 0 0 802 700"/></g>
+  <path d="M262 590 V450 A250 200 0 0 1 762 450 V590 Q762 640 712 640 H312 Q262 640 262 590 Z" fill="#fff"/>
+  <circle cx="404" cy="470" r="36" fill="#2b59c3"/><circle cx="512" cy="470" r="36" fill="#2b59c3"/><circle cx="620" cy="470" r="36" fill="#2b59c3"/>
+</svg>

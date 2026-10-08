@@ -1,6 +1,8 @@
 const $ = s => document.querySelector(s)
 const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e }
 const base = p => p.split(/[\\/]/).pop() // Windows paths use backslashes
+const MAC = navigator.userAgent.includes('Mac'), MOD = MAC ? '⌘' : 'Ctrl+'
+document.body.classList.toggle('mac', MAC) // main hides the title bar on macOS only
 const tilde = p => p.replace(/^(?:\/Users|\/home)\/[^/]+(?=\/|$)/, '~') // header only; the full path is in the sidebar tooltip
 
 const AVATAR_PALETTE = [
@@ -230,13 +232,14 @@ let searchDebounceTimer = null
 let unreadNewMessagesCount = 0
 let isPagingLoading = false
 
+let projectList = []
 async function loadProjects() {
-  const list = await api.projects()
-  $('#projects').replaceChildren(...list.map(p => {
+  const list = projectList = await api.projects()
+  $('#projects').replaceChildren(...list.map((p, i) => {
     const on = p.dir === dir && p.chat === box
     if (on) $('#title').textContent = p.name
     const b = el('button', 'space' + (on ? ' on' : ''))
-    b.title = p.chat === '.chat' ? p.dir : `${p.dir} (${p.chat})`
+    b.title = (p.chat === '.chat' ? p.dir : `${p.dir} (${p.chat})`) + (i < 9 ? ` · ${MOD}${i + 1}` : '')
     b.append(el('span', '', p.name))
     if (!on) setSpaceBadge(b, p.needs)
     b.onclick = () => openProject(p.dir, p.chat)
@@ -273,7 +276,11 @@ function syncActive(list) {
   }
 }
 
+// the composer's text per box, so a half-typed message never follows you into another space (memory only)
+const drafts = new Map()
 async function openProject(d, c = d === dir ? box : null) {
+  // the input is disabled while a box opens: its text then isn't that box's draft
+  if (dir && !$('#input').disabled) drafts.set(dir + '\0' + box, $('#input').value)
   const thisSeq = ++openSeq, prev = { dir, box }
   openingDir = d
   pendingEvents = []
@@ -294,6 +301,8 @@ async function openProject(d, c = d === dir ? box : null) {
   $('#timeline-btn').hidden = true
   if ($('#timeline').open) $('#timeline').close()
   $('#input').disabled = true
+  $('#input').value = ''
+  closeMentionPopup()
   $('#search-wrap').hidden = false
   $('#search-input').value = ''
   $('#search-clear').hidden = true
@@ -390,6 +399,7 @@ async function openProject(d, c = d === dir ? box : null) {
 
   last = null
   $('#log').replaceChildren(msgFragment(messages))
+  markDays()
   trimLogWindow('append')
   $('#log').scrollTop = $('#log').scrollHeight
   updateHeaderStats()
@@ -402,6 +412,7 @@ async function openProject(d, c = d === dir ? box : null) {
   updateSearchSenderDropdown()
   api.watchProject(d, null).catch(() => {})
   $('#input').disabled = false
+  $('#input').value = drafts.get(d + '\0' + box) || ''
   $('#input').focus()
   $('#gear').hidden = false
   $('#timeline-btn').hidden = false
@@ -1508,7 +1519,7 @@ function createMsgElement(m) {
     }
     node = sys
   } else {
-    const cont = last && last.from === m.from && new Date(m.at) - new Date(last.at) < 5 * 60e3
+    const cont = last && last.from === m.from && new Date(m.at) - new Date(last.at) < 5 * 60e3 && new Date(m.at).getDate() === new Date(last.at).getDate()
     const row = el('div', 'row' + (m.from === 'user' ? ' me' : '') + (cont ? ' cont' : ''))
     if (cont) row.append(el('div'))
     else {
@@ -1530,6 +1541,7 @@ function createMsgElement(m) {
   if (m.seq != null) {
     node.dataset.seq = m.seq
   }
+  if (m.at) node.dataset.at = m.at
   return node
 }
 
@@ -1546,6 +1558,25 @@ function msgFragment(list) {
 
 // bumped by every full replace of the log window: a paging reply started before one belongs to a window that's gone
 let logWindow = 0
+
+function dayLabel(iso, now = new Date()) {
+  const d = new Date(iso), days = Math.round((new Date(now.toDateString()) - new Date(d.toDateString())) / 864e5)
+  if (days === 0) return 'Hôm nay'
+  if (days === 1) return 'Hôm qua'
+  return d.toLocaleDateString('vi-VN', { weekday: 'long', day: 'numeric', month: 'numeric', ...(d.getFullYear() !== now.getFullYear() && { year: 'numeric' }) })
+}
+// a date rule wherever the day changes; redone after every render (the window holds ≤300 rows), which also keeps
+// "Hôm nay" true past midnight. Callers measure scroll after it.
+function markDays() {
+  const log = $('#log')
+  log.querySelectorAll(':scope > .day').forEach(n => n.remove())
+  let prev = null
+  for (const node of log.querySelectorAll(':scope > [data-at]')) {
+    const day = new Date(node.dataset.at).toDateString()
+    if (day !== prev) { const rule = el('div', 'day'); rule.append(el('span', '', dayLabel(node.dataset.at))); node.before(rule) }
+    prev = day
+  }
+}
 
 function renderLoadedPage(page, mode = 'replace') {
   const log = $('#log')
@@ -1567,6 +1598,7 @@ function renderLoadedPage(page, mode = 'replace') {
     logWindow++
     last = null
     log.replaceChildren(msgFragment(page.messages))
+    markDays()
     if (!logHasAfter) {
       log.scrollTop = log.scrollHeight
       $('#jump-latest').hidden = true
@@ -1580,10 +1612,12 @@ function renderLoadedPage(page, mode = 'replace') {
     const keep = last
     last = null
     log.prepend(msgFragment(page.messages))
+    markDays()
     last = keep
     log.scrollTop = oldScrollTop + (log.scrollHeight - oldScrollHeight)
   } else if (mode === 'append') {
     log.append(msgFragment(page.messages))
+    markDays()
   }
 
   trimLogWindow(mode)
@@ -1591,7 +1625,7 @@ function renderLoadedPage(page, mode = 'replace') {
 
 function trimLogWindow(mode) {
   const log = $('#log')
-  const items = [...log.children].filter(c => c.id !== 'empty')
+  const items = [...log.children].filter(c => c.id !== 'empty' && !c.classList.contains('day'))
   if (items.length <= 300) return
 
   if (mode === 'prepend') {
@@ -1599,6 +1633,7 @@ function trimLogWindow(mode) {
     for (let i = items.length - excess; i < items.length; i++) {
       items[i].remove()
     }
+    markDays()
     logHasAfter = true
     $('#jump-latest').hidden = false
   } else {
@@ -1608,6 +1643,7 @@ function trimLogWindow(mode) {
     for (let i = 0; i < excess; i++) {
       items[i].remove()
     }
+    markDays()
     logHasBefore = true
     log.scrollTop = Math.max(0, oldScrollTop - (oldScrollHeight - log.scrollHeight))
   }
@@ -3053,7 +3089,73 @@ window.addEventListener('focus', () => {
   }
 })
 
+// ⌘K: type to filter the spaces, ↑↓ and Enter to open one
+let switcherPick = 0
+const fold = s => s.normalize('NFD').replace(/\p{M}/gu, '').replace(/đ/gi, 'd').toLowerCase()
+function renderSwitcher() {
+  const q = fold($('#switcher-input').value.trim())
+  const hits = projectList.filter(p => fold(`${p.name} ${p.dir} ${p.chat}`).includes(q))
+  switcherPick = Math.max(0, Math.min(switcherPick, hits.length - 1))
+  $('#switcher-list').replaceChildren(...hits.map((p, i) => {
+    const b = el('button', 'switcher-item' + (i === switcherPick ? ' on' : ''))
+    b.type = 'button'
+    b.setAttribute('role', 'option')
+    b.append(el('span', '', p.name), el('small', '', tilde(p.chat === '.chat' ? p.dir : `${p.dir} · ${p.chat}`)))
+    if (!(p.dir === dir && p.chat === box)) setSpaceBadge(b, p.needs)
+    b.onclick = () => { $('#switcher').close(); openProject(p.dir, p.chat) }
+    return b
+  }))
+  if (!hits.length) $('#switcher-list').append(el('div', 'none', 'Không có không gian phù hợp'))
+  $('#switcher-list .on')?.scrollIntoView({ block: 'nearest' })
+}
+$('#switcher-input').oninput = () => { switcherPick = 0; renderSwitcher() }
+$('#switcher-input').onkeydown = e => {
+  const n = $('#switcher-list').querySelectorAll('.switcher-item').length
+  if (n && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+    e.preventDefault()
+    switcherPick = (switcherPick + (e.key === 'ArrowDown' ? 1 : n - 1)) % n
+    renderSwitcher()
+  } else if (e.key === 'Enter' && !e.isComposing) {
+    e.preventDefault()
+    $('#switcher-list .on')?.click()
+  }
+}
+$('#switcher').onclick = e => { if (e.target === $('#switcher')) $('#switcher').close() } // backdrop
+
+// the app menu (main.js) owns these accelerators; a modal that's open keeps the keyboard
+api.on('menu', action => {
+  if (document.querySelector('dialog[open]:not(#switcher)')) return
+  if (action === 'switch') {
+    if ($('#switcher').open) return $('#switcher').close()
+    $('#switcher-input').value = ''
+    switcherPick = 0
+    renderSwitcher()
+    $('#switcher').showModal()
+    loadProjects().then(() => $('#switcher').open && renderSwitcher()) // fresh badges
+  } else if ($('#switcher').open) {
+    return
+  } else if (action === 'next-need') {
+    const at = projectList.findIndex(p => p.dir === dir && p.chat === box)
+    const next = [...projectList.slice(at + 1), ...projectList.slice(0, Math.max(at, 0))].find(p => p.needs)
+    if (next) openProject(next.dir, next.chat)
+    else showToast('Không box nào khác đang cần bạn')
+  } else if (action === 'search' && !$('#search-wrap').hidden) {
+    $('#search-input').focus()
+    $('#search-input').select()
+  } else if (action === 'settings' && !$('#gear').hidden) {
+    $('#gear').click()
+  } else if (action === 'timeline' && !$('#timeline-btn').hidden) {
+    openTimeline()
+  }
+})
+
 document.addEventListener('keydown', e => {
+  // ⌘1…9 / Ctrl+1…9: the nth space in the sidebar
+  if ((MAC ? e.metaKey : e.ctrlKey) && !e.altKey && !e.shiftKey && /^[1-9]$/.test(e.key) && !document.querySelector('dialog[open]')) {
+    const space = document.querySelectorAll('#projects .space')[e.key - 1]
+    if (space) { e.preventDefault(); space.click() }
+    return
+  }
   if (e.key === 'Escape') {
     if (currentPopoverAgent) {
       const targetAgent = currentPopoverAgent
@@ -3095,6 +3197,7 @@ api.on('message', (d, m, meta) => {
     // would leave a hole that paging (it continues from the last seq shown) never fills, so only count it
     if (!logHasAfter) {
       log.append(msgFragment([m]))
+      markDays()
       trimLogWindow('append')
     }
 

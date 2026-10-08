@@ -73,7 +73,12 @@
   /* left nav */
   nav { padding: 14px 10px; overflow-y: auto; border-right: 1px solid var(--line); }
   .brand { display: flex; align-items: center; gap: 10px; padding: 2px 6px 14px; font-weight: 600; font-size: 15px; letter-spacing: -.01em; }
-  .logo { width: 24px; height: 24px; display: grid; place-items: center; background: var(--ink); color: var(--surface); border-radius: 6px; font: 600 10px/1 var(--mono); }
+  .logo { width: 30px; height: 30px; margin: -3px; } /* the icon's own margin around its rounded square */
+  /* macOS hidden title bar: room for the traffic lights, and the bars drag the window */
+  body.mac nav { padding-top: 0; }
+  body.mac .brand { padding-top: 50px; }
+  body.mac :is(.brand, .head) { -webkit-app-region: drag; }
+  body.mac .head :is(button, input, select, .stack, .search-wrap, .member-popover) { -webkit-app-region: no-drag; }
   #new { display: flex; align-items: center; gap: 8px; width: 100%; padding: 7px 10px; background: var(--surface); font-weight: 500; font-size: 13.5px; }
   #new:hover { background: var(--hover); }
   nav h3 { margin: 18px 8px 6px; }
@@ -165,6 +170,12 @@
   #empty { height: 100%; display: grid; place-items: center; text-align: center; color: var(--muted); }
   #empty .box { padding: 24px 28px; max-width: 360px; border-style: dashed; border-radius: 12px; }
   #empty b { display: block; font-size: 16px; font-weight: 600; margin-bottom: 6px; color: var(--ink); }
+  #empty img { display: block; width: 84px; height: 84px; margin: -8px auto 4px; }
+
+  /* date rule where the day changes */
+  .day { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 10px; margin-top: 22px; font: 500 11.5px/1.6 var(--mono); color: var(--muted); }
+  .day::before, .day::after { content: ''; border-top: 1px solid var(--line); }
+  .day span { padding: 0 10px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface); }
 
   /* markdown */
   .md-content { line-height: 1.6; overflow-wrap: anywhere; }
@@ -291,6 +302,17 @@
   dialog.box { border-radius: 12px; }
   dialog[open] { display: flex; flex-direction: column; }
   dialog::backdrop { background: rgb(0 0 0 / .32); }
+
+  /* ⌘K space switcher */
+  .switcher { width: min(520px, 92vw); margin: 14vh auto auto; }
+  .switcher input { padding: 14px 16px; border: 0; border-bottom: 1px solid var(--line); background: none; color: var(--ink); font: 15px var(--sans); outline: none; }
+  .switcher-list { overflow-y: auto; max-height: 52vh; padding: 6px; }
+  .switcher-list .none { padding: 10px; }
+  .switcher-item { display: flex; align-items: center; gap: 10px; width: 100%; padding: 7px 10px; background: none; border: 0; border-radius: 6px; text-align: left; }
+  .switcher-item span { font-weight: 500; white-space: nowrap; }
+  .switcher-item small { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font: 12px var(--mono); }
+  .switcher-item.on { background: var(--hover); }
+  .switcher-item .space-badge { margin-left: auto; flex: none; }
   #settings { width: min(940px, 94vw); height: min(680px, 90vh); max-height: 90vh; }
   .dhead { padding: 14px 20px; border-bottom: 1px solid var(--line); flex: none; }
   .dhead h2 { margin: 0; font-size: 16px; font-weight: 600; }
@@ -441,11 +463,12 @@
   .git-init-files, .git-init-ignore { margin: 0; max-height: 140px; overflow-y: auto; padding: 8px 12px; background: var(--bg); font: 12px/1.5 var(--mono); }
   .git-init-files { display: flex; flex-direction: column; gap: 2px; }
   .git-init-ignore { max-height: 100px; white-space: pre; }
+  @media (prefers-reduced-motion: reduce) { *, ::before, ::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; } }
 </style>
 </head>
 <body>
 <nav>
-  <div class="brand"><span class="logo">AC</span>Agent Chat</div>
+  <div class="brand"><img class="logo" src="build/icon.svg" alt="">Agent Chat</div>
   <button id="new" class="box press">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
     Không gian mới
@@ -479,7 +502,7 @@
   </div>
   <div id="orphan-banner" class="orphan-banner box" hidden></div>
   <div id="log-error-banner" class="log-error-banner box" hidden></div>
-  <div id="log"><div id="empty"><div class="box"><b>Chào End-User 👋</b>Bấm “Không gian mới” và chọn folder dự án để bắt đầu làm việc với nhóm agent.</div></div></div>
+  <div id="log"><div id="empty"><div class="box"><img src="build/icon.svg" alt=""><b>Chưa mở không gian nào</b>Bấm “Không gian mới” và chọn folder dự án để bắt đầu làm việc với nhóm agent.</div></div></div>
   <button id="jump-latest" class="jump-latest box press" type="button" hidden>
     <span>↓ Về tin mới nhất</span>
     <span id="jump-latest-badge" class="badge" hidden>0</span>
@@ -662,6 +685,10 @@
     </div>
   </div>
   <div id="viewer-body" class="viewer-body"></div>
+</dialog>
+<dialog id="switcher" class="box switcher" aria-label="Chuyển không gian">
+  <input id="switcher-input" placeholder="Chuyển tới không gian…" autocomplete="off" spellcheck="false" aria-controls="switcher-list">
+  <div id="switcher-list" class="switcher-list" role="listbox"></div>
 </dialog>
 <dialog id="timeline" class="box timeline-dialog" aria-labelledby="timeline-title">
   <div class="dhead timeline-head">

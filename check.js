@@ -810,7 +810,7 @@ async function rendererChecks() {
     append(...children) { this.children.push(...children) }, prepend(...children) { this.children.unshift(...children) },
     replaceChildren(...children) { this.children = children }, focus() { context.document.activeElement = this },
     querySelectorAll() { return all(this).slice(1).filter(node => ['input', 'textarea', 'select', 'button'].includes(node.tag)) },
-    classList: { toggle() {}, add() {}, remove() {} }, setAttribute() {}, showModal() { this.open = true } })
+    classList: { toggle() {}, add() {}, remove() {}, contains() { return false } }, setAttribute() {}, showModal() { this.open = true } })
   const $ = id => { if (!nodes.has(id)) nodes.set(id, el('div')); return nodes.get(id) }
   const session = { id: 'saved-session', cli: 'codex', workspaceId: 'workspace', seen: 42, at: '2026-09-27T00:00:00Z' }
   const context = vm.createContext({ $, el, structuredClone, dir: '/box', openSeq: 1, openingDir: null, notices, document: { activeElement: null },
@@ -879,6 +879,11 @@ async function rendererChecks() {
   context.renderLoadedPage({ generation: 'g', hasBefore: false, hasAfter: false, end: 110, messages: [{ seq: 109 }] }, 'append')
   assert.deepStrictEqual([context.logHasBefore, context.logHasAfter], [true, true], 'live message 120 is past this page')
   assert.strictEqual(vm.runInContext("firstSeen('g', 109)", context), false, 'a paged message must not be appended again by its live event')
+  // date rules: calendar days in local time, not 24h spans
+  const noon = new Date(2026, 9, 8, 12)
+  assert.deepStrictEqual([new Date(2026, 9, 8, 0, 5), new Date(2026, 9, 7, 23, 55), new Date(2026, 9, 1)].map(d => context.dayLabel(d.toISOString(), noon)),
+    ['Hôm nay', 'Hôm qua', new Date(2026, 9, 1).toLocaleDateString('vi-VN', { weekday: 'long', day: 'numeric', month: 'numeric' })])
+  assert.match(context.dayLabel(new Date(2025, 9, 1).toISOString(), noon), /2025/, 'another year shows the year')
   // a paging reply that lands after a jump (replace) belongs to the old window: drop it
   let reply
   context.api.logPage = () => new Promise(resolve => { reply = resolve })
@@ -921,6 +926,7 @@ async function mainHarness() {
   const electron = { app: { getPath: () => userData, requestSingleInstanceLock: () => true, whenReady: () => Promise.resolve(), on() {}, quit() {} },
     BrowserWindow: function () { return { webContents, loadFile: () => Promise.resolve(), isMinimized: () => false, on() {} } },
     ipcMain: { handle: (name, fn) => { handlers[name] = fn } }, shell: {},
+    Menu: { setApplicationMenu() {}, buildFromTemplate: t => t }, nativeTheme: {}, screen: { getAllDisplays: () => [] },
     dialog: { showMessageBox: async () => { dialogs++; return { response: dialogAnswer, checkboxChecked: true } },
       showOpenDialog: async () => ({ canceled: !pickPath, filePaths: [pickPath] }) } }
   const load = Module._load
