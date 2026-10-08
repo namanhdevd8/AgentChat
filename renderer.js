@@ -1,9 +1,7 @@
 const $ = s => document.querySelector(s)
 const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e }
 const base = p => p.split(/[\\/]/).pop() // Windows paths use backslashes
-const PALETTE = ['--pink', '--blue', '--green', '--orange', '--purple', '--yellow']
-const color = name => name === 'user' ? 'var(--yellow)' : `var(${PALETTE[[...name].reduce((h, c) => h * 31 + c.charCodeAt(0), 7) % PALETTE.length]})`
-const SVG_NS = 'http://www.w3.org/2000/svg'
+const tilde = p => p.replace(/^(?:\/Users|\/home)\/[^/]+(?=\/|$)/, '~') // header only; the full path is in the sidebar tooltip
 
 const AVATAR_PALETTE = [
   '#ff8fab',
@@ -79,128 +77,31 @@ function getAgentAvatar(target) {
   return getDefaultAvatar(list, idx >= 0 ? idx : 0)
 }
 
-function createAvatarSvg(gender, bgHex) {
-  const svg = document.createElementNS(SVG_NS, 'svg')
-  svg.setAttribute('viewBox', '0 0 64 64')
-  svg.setAttribute('aria-hidden', 'true')
-  svg.style.borderRadius = '50%'
-  svg.style.display = 'block'
-  svg.style.width = '100%'
-  svg.style.height = '100%'
+// "pm" → PM, "dev" → DV, "review" → RV, "dev-fe" → DF, "dev2" → D2
+const initials = name => {
+  const parts = String(name || '?').split(/[-_.\s]+/).filter(Boolean), s = parts[0] || '?'
+  const second = parts.length > 1 ? parts.at(-1)[0] : /\d$/.test(s) ? s.at(-1) : s.slice(1).match(/[b-df-hj-np-tv-z]/i)?.[0] || s[1] || ''
+  return (s[0] + second).toUpperCase()
+}
 
-  const bg = document.createElementNS(SVG_NS, 'rect')
-  bg.setAttribute('width', '64')
-  bg.setAttribute('height', '64')
-  bg.setAttribute('fill', bgHex || '#7cb4ff')
-  svg.append(bg)
-
-  if (gender === 'female') {
-    const backHair = document.createElementNS(SVG_NS, 'path')
-    backHair.setAttribute('d', 'M 14 28 C 13 38, 14 47, 19 49 C 22 47, 21 38, 21 28 Z M 50 28 C 51 38, 50 47, 45 49 C 42 47, 43 38, 43 28 Z')
-    backHair.setAttribute('fill', '#111111')
-    svg.append(backHair)
-  }
-
-  const shirt = document.createElementNS(SVG_NS, 'path')
-  shirt.setAttribute('d', 'M 9 64 C 9 49, 18 43, 32 43 C 46 43, 55 49, 55 64 Z')
-  shirt.setAttribute('fill', '#ffffff')
-  shirt.setAttribute('stroke', '#111111')
-  shirt.setAttribute('stroke-width', '2.5')
-  shirt.setAttribute('stroke-linejoin', 'round')
-  svg.append(shirt)
-
-  const neck = document.createElementNS(SVG_NS, 'rect')
-  neck.setAttribute('x', '27')
-  neck.setAttribute('y', '35')
-  neck.setAttribute('width', '10')
-  neck.setAttribute('height', '10')
-  neck.setAttribute('fill', '#ffe0bd')
-  neck.setAttribute('stroke', '#111111')
-  neck.setAttribute('stroke-width', '2.5')
-  neck.setAttribute('stroke-linejoin', 'round')
-  svg.append(neck)
-
-  const head = document.createElementNS(SVG_NS, 'circle')
-  head.setAttribute('cx', '32')
-  head.setAttribute('cy', '26')
-  head.setAttribute('r', '13.5')
-  head.setAttribute('fill', '#ffe0bd')
-  head.setAttribute('stroke', '#111111')
-  head.setAttribute('stroke-width', '2.5')
-  svg.append(head)
-
-  const leftEye = document.createElementNS(SVG_NS, 'circle')
-  leftEye.setAttribute('cx', '27')
-  leftEye.setAttribute('cy', '26')
-  leftEye.setAttribute('r', '2')
-  leftEye.setAttribute('fill', '#111111')
-
-  const rightEye = document.createElementNS(SVG_NS, 'circle')
-  rightEye.setAttribute('cx', '37')
-  rightEye.setAttribute('cy', '26')
-  rightEye.setAttribute('r', '2')
-  rightEye.setAttribute('fill', '#111111')
-  svg.append(leftEye, rightEye)
-
-  const smile = document.createElementNS(SVG_NS, 'path')
-  smile.setAttribute('d', 'M 29 31 Q 32 34 35 31')
-  smile.setAttribute('fill', 'none')
-  smile.setAttribute('stroke', '#111111')
-  smile.setAttribute('stroke-width', '2')
-  smile.setAttribute('stroke-linecap', 'round')
-  svg.append(smile)
-
-  const hair = document.createElementNS(SVG_NS, 'path')
-  if (gender === 'female') {
-    hair.setAttribute('d', 'M 16 38 C 15 27, 16 11, 32 11 C 48 11, 49 27, 48 38 C 44 36, 43 25, 42 22 C 37 17, 27 17, 22 22 C 21 25, 20 36, 16 38 Z')
-  } else {
-    hair.setAttribute('d', 'M 17 26 C 17 14, 23 11, 32 11 C 41 11, 47 14, 47 26 C 44 19, 38 18, 32 19 C 26 20, 20 19, 17 26 Z')
-  }
-  hair.setAttribute('fill', '#111111')
-  hair.setAttribute('stroke', '#111111')
-  hair.setAttribute('stroke-width', '2')
-  hair.setAttribute('stroke-linejoin', 'round')
-  svg.append(hair)
-
-  return svg
+// ponytail: rounded-square initials on a tint of the identity color; avatar.gender stays in agents.json but no longer shows
+function paintAvatar(node, name, hex) {
+  node.textContent = name === 'user' ? 'B' : initials(name)
+  node.style.setProperty('--agent', hex || '#a1a1aa')
+  return node
 }
 
 const avatar = (target, cls = 'av') => {
-  const isUser = target === 'user' || (target && target.name === 'user')
-  const isSq = cls === 'sq'
   const name = typeof target === 'string' ? target : target?.name || '?'
-
-  const container = el('div', cls)
-  if (isUser) {
-    container.textContent = 'B'
-    container.style.background = 'var(--yellow)'
-    return container
-  }
-  if (isSq) {
-    container.textContent = name.slice(0, 2)
-    container.style.background = color(name)
-    return container
-  }
-
-  const avData = getAgentAvatar(target)
-  if (avData) {
-    container.dataset.agentAvatar = name
-    container.append(createAvatarSvg(avData.gender, avData.color))
-    return container
-  }
-
-  container.textContent = name.slice(0, 2)
-  container.style.background = color(name)
-  return container
+  const node = paintAvatar(el('div', cls), name, getAgentAvatar(target)?.color)
+  if (name !== 'user') node.dataset.agentAvatar = name
+  return node
 }
 
 function updateAllAgentAvatars() {
   for (const a of team) {
-    const avData = getAgentAvatar(a)
-    if (!avData) continue
-    document.querySelectorAll(`[data-agent-avatar="${CSS.escape(a.name)}"]`).forEach(node => {
-      node.replaceChildren(createAvatarSvg(avData.gender, avData.color))
-    })
+    const hex = getAgentAvatar(a)?.color
+    document.querySelectorAll(`[data-agent-avatar="${CSS.escape(a.name)}"]`).forEach(node => node.style.setProperty('--agent', hex))
   }
 }
 
@@ -333,7 +234,7 @@ async function loadProjects() {
     if (on) $('#title').textContent = p.name
     const b = el('button', 'space' + (on ? ' on' : ''))
     b.title = p.chat === '.chat' ? p.dir : `${p.dir} (${p.chat})`
-    b.append(avatar(p.name, 'sq'), el('span', '', p.name))
+    b.append(el('span', '', p.name))
     b.onclick = () => openProject(p.dir, p.chat)
     return b
   }))
@@ -352,7 +253,9 @@ function syncActive(list) {
       stopping: !!r.stopping,
       phase: r.phase || 'running',
       blockedBy: r.blockedBy || [],
-      chain: r.chain || null
+      chain: r.chain || null,
+      startedAt: r.startedAt || Date.now(),
+      activeAt: r.activeAt || Date.now()
     })
   }
 }
@@ -369,7 +272,7 @@ async function openProject(d, c = d === dir ? box : null) {
   groupOpenStates.clear()
   renderBoard()
   $('#title').textContent = base(d)
-  $('#path').textContent = c && c !== '.chat' ? `${d} · ${c}` : d
+  $('#path').textContent = tilde(c && c !== '.chat' ? `${d} · ${c}` : d)
   $('#log').replaceChildren()
   $('#stats-sec').hidden = true
   $('#gear').hidden = true // until this project's team is in
@@ -406,7 +309,7 @@ async function openProject(d, c = d === dir ? box : null) {
   if (thisSeq !== openSeq) return
   openingDir = null
   box = res.chat || '.chat'
-  $('#path').textContent = box !== '.chat' ? `${d} · ${box}` : d
+  $('#path').textContent = tilde(box !== '.chat' ? `${d} · ${box}` : d)
   team = res.team
   currentTeamRevision = res.teamRevision
   permissionRequests = res.permissionRequests
@@ -433,7 +336,7 @@ async function openProject(d, c = d === dir ? box : null) {
     if (ev.type === 'status') {
       const key = runKey(d, ev.name)
       if (ev.on) {
-        activeRuns.set(key, { name: ev.name, runId: ev.runId, label: 'đang khởi động…', stopping: false, phase: 'running', blockedBy: [] })
+        activeRuns.set(key, { name: ev.name, runId: ev.runId, label: 'đang khởi động…', stopping: false, phase: 'running', blockedBy: [], startedAt: Date.now(), activeAt: Date.now() })
       } else {
         const cur = activeRuns.get(key)
         if (cur && (!ev.runId || cur.runId === ev.runId)) activeRuns.delete(key)
@@ -447,6 +350,7 @@ async function openProject(d, c = d === dir ? box : null) {
         if (ev.data.blockedBy) cur.blockedBy = ev.data.blockedBy
         if (ev.data.stopping !== undefined) cur.stopping = !!ev.data.stopping
         if (ev.data.label === 'đang dừng…') cur.stopping = true
+        if (ev.data.startedAt) Object.assign(cur, { startedAt: ev.data.startedAt, activeAt: ev.data.activeAt })
       }
     } else if (ev.type === 'message') {
       // the log was rewritten while opening (e.g. a repaired tail): this history's seqs no longer match, start over
@@ -592,8 +496,7 @@ function renderEditors() {
     btn.setAttribute('role', 'tab')
     btn.setAttribute('aria-selected', currentSettingTab === 'agent:' + i ? 'true' : 'false')
 
-    const navAv = el('span', 'settings-nav-av')
-    navAv.append(createAvatarSvg(a.avatar.gender, a.avatar.color))
+    const navAv = paintAvatar(el('span', 'settings-nav-av'), a.name, a.avatar.color)
 
     const navLabel = el('span', 'settings-nav-label', a.name ? `@${a.name}` : '(chưa có tên)')
     btn.append(navAv, navLabel)
@@ -653,48 +556,20 @@ function renderEditors() {
       renderEditors()
     }
 
-    const topAv = el('div', 'av')
-    topAv.append(createAvatarSvg(a.avatar.gender, a.avatar.color))
+    const topAv = paintAvatar(el('div', 'av'), a.name, a.avatar.color)
+    const repaint = () => {
+      paintAvatar(topAv, a.name, a.avatar.color)
+      paintAvatar(navList.children[i].querySelector('.settings-nav-av'), a.name, a.avatar.color)
+    }
     const nameInp = field('input', a.name, v => {
       a.name = v.trim()
       navList.children[i].querySelector('.settings-nav-label').textContent = a.name ? `@${a.name}` : '(chưa có tên)'
+      repaint()
     }, { className: 'f name', placeholder: 'tên (vd: dev-fe)' })
     top.append(topAv, nameInp, cli, chk, roLabel, del)
 
-    // Avatar editor: live preview + gender toggle + 8 color swatches
+    // identity color: shows on the avatar and the agent's status icons
     const avRow = el('div', 'avatar-row')
-    const avBox = el('div', 'avatar-preview-box')
-    avBox.append(createAvatarSvg(a.avatar.gender, a.avatar.color))
-
-    const avCtrl = el('div', 'avatar-controls')
-
-    function updateNavAvatar() {
-      navList.children[i].querySelector('.settings-nav-av').replaceChildren(createAvatarSvg(a.avatar.gender, a.avatar.color))
-    }
-
-    const genderGroup = el('div', 'avatar-gender-group')
-    const maleBtn = el('button', 'avatar-gender-btn' + (a.avatar.gender === 'male' ? ' active' : ''), 'Nam')
-    maleBtn.type = 'button'
-    maleBtn.onclick = () => {
-      a.avatar.gender = 'male'
-      maleBtn.classList.add('active')
-      femaleBtn.classList.remove('active')
-      avBox.replaceChildren(createAvatarSvg(a.avatar.gender, a.avatar.color))
-      topAv.replaceChildren(createAvatarSvg(a.avatar.gender, a.avatar.color))
-      updateNavAvatar()
-    }
-    const femaleBtn = el('button', 'avatar-gender-btn' + (a.avatar.gender === 'female' ? ' active' : ''), 'Nữ')
-    femaleBtn.type = 'button'
-    femaleBtn.onclick = () => {
-      a.avatar.gender = 'female'
-      femaleBtn.classList.add('active')
-      maleBtn.classList.remove('active')
-      avBox.replaceChildren(createAvatarSvg(a.avatar.gender, a.avatar.color))
-      topAv.replaceChildren(createAvatarSvg(a.avatar.gender, a.avatar.color))
-      updateNavAvatar()
-    }
-    genderGroup.append(maleBtn, femaleBtn)
-
     const palDiv = el('div', 'avatar-palette')
     AVATAR_PALETTE.forEach(c => {
       const sw = el('button', 'avatar-swatch' + (a.avatar.color === c ? ' selected' : ''))
@@ -709,14 +584,11 @@ function renderEditors() {
           s.classList.toggle('selected', s === sw)
           s.setAttribute('aria-pressed', s === sw ? 'true' : 'false')
         })
-        avBox.replaceChildren(createAvatarSvg(a.avatar.gender, a.avatar.color))
-        topAv.replaceChildren(createAvatarSvg(a.avatar.gender, a.avatar.color))
-        updateNavAvatar()
+        repaint()
       }
       palDiv.append(sw)
     })
-    avCtrl.append(genderGroup, palDiv)
-    avRow.append(avBox, avCtrl)
+    avRow.append(el('span', 'avatar-label', 'Màu nhận diện'), palDiv)
 
     const role = el('label', '', 'Vai trò')
     role.append(field('textarea', a.role, v => a.role = v, { className: 'f', placeholder: 'vd: Dev front-end: làm UI theo thiết kế của techlead' }))
@@ -735,20 +607,9 @@ function renderEditors() {
     const isCodex = a.cli.startsWith('codex')
     const isAgy = a.cli.startsWith('agy')
 
-    const permGroup = el('div', 'agent-perm-group box')
-    permGroup.style.padding = '12px'
-    permGroup.style.background = 'var(--surface)'
-    permGroup.style.display = 'grid'
-    permGroup.style.gap = '10px'
-    permGroup.style.border = '2px solid var(--ink)'
-    permGroup.style.borderRadius = '8px'
+    const permGroup = el('div', 'agent-perm-group')
 
     const permHdr = el('div', 'settings-perm-hdr')
-    permHdr.style.fontWeight = '700'
-    permHdr.style.fontSize = '13px'
-    permHdr.style.textTransform = 'uppercase'
-    permHdr.style.letterSpacing = '.06em'
-    permHdr.style.color = 'var(--muted)'
     permHdr.textContent = 'Quyền công cụ của CLI'
     permGroup.append(permHdr)
 
@@ -772,13 +633,6 @@ function renderEditors() {
 
     if (a.permissions.mode === 'full') {
       const fullWarn = el('div', 'task-error-banner')
-      fullWarn.style.background = 'var(--pink)'
-      fullWarn.style.color = 'var(--on-color)'
-      fullWarn.style.padding = '8px 10px'
-      fullWarn.style.border = '2px solid var(--ink)'
-      fullWarn.style.borderRadius = '6px'
-      fullWarn.style.fontSize = '12px'
-      fullWarn.style.fontWeight = '600'
       fullWarn.textContent = '⚠️ Cảnh báo Toàn quyền: Agent có thể chạy lệnh, dùng mạng và tác động tới file ngoài dự án theo quyền tài khoản máy. Phạm vi file của app không phải sandbox bảo vệ hệ điều hành.'
       permGroup.append(fullWarn)
 
@@ -897,13 +751,7 @@ function renderEditors() {
 
     let reviewCard = null
     if (a.scopeNeedsReview) {
-      reviewCard = el('div', 'box')
-      reviewCard.style.padding = '8px 12px'
-      reviewCard.style.background = 'var(--pink)'
-      reviewCard.style.display = 'flex'
-      reviewCard.style.alignItems = 'center'
-      reviewCard.style.justifyContent = 'space-between'
-      reviewCard.style.gap = '10px'
+      reviewCard = el('div', 'review-card')
       const txt = el('span', '', `Phạm vi cũ cần xác nhận: "${a.ownsLegacy || (Array.isArray(a.owns) ? a.owns.join(', ') : a.owns) || '—'}"`)
       const btn = el('button', 'btn-stop box press', 'Xác nhận phạm vi này')
       btn.type = 'button'
@@ -1388,14 +1236,16 @@ function linkifyFiles(root, context = {}) {
     }
     textNodes.push(node)
   }
-  const regex = /((?:reports|\.chat)\/[\w.\/-]+\w)/
+  const regex = /((?:reports|\.chat)\/[\w.\/-]+\w|(?<![\w@])@[\w-]+)/ // file paths, and @mentions (same name rule as core.mentions)
+  const members = new Set(team.map(a => a.name.toLowerCase()))
   for (const tNode of textNodes) {
     const parts = tNode.nodeValue.split(regex)
     if (parts.length <= 1) continue
     const frag = document.createDocumentFragment()
     for (let i = 0; i < parts.length; i++) {
-      if (i % 2 === 0) {
-        if (parts[i]) frag.append(document.createTextNode(parts[i]))
+      if (i % 2 === 0 || parts[i][0] === '@') {
+        if (i % 2 && members.has(parts[i].slice(1).toLowerCase())) frag.append(el('span', 'mention', parts[i]))
+        else if (parts[i]) frag.append(document.createTextNode(parts[i]))
       } else {
         const a = el('a', 'file', parts[i])
         a.setAttribute('href', parts[i])
@@ -1429,56 +1279,37 @@ function renderMarkdown(text, context = {}) {
   return container
 }
 
-function formatUsage(u) {
+// 706295 → "706k", 3200 → "3,2k", 135100000 → "135,1M"; exact values stay in the tooltip
+const short = n => n < 1e3 ? String(n) : n < 1e6 ? (n / 1e3).toLocaleString('vi-VN', { maximumFractionDigits: n < 1e4 ? 1 : 0 }) + 'k'
+  : (n / 1e6).toLocaleString('vi-VN', { maximumFractionDigits: 1 }) + 'M'
+const usd = n => n.toLocaleString('vi-VN', { minimumFractionDigits: 2, maximumFractionDigits: n && n < 0.01 ? 4 : 2 })
+const CLI_COUNT_NOTE = 'Theo bộ đếm của CLI; cách tính cache có thể khác nhau'
+
+function usageEl(u) {
   if (!u) return null
-  const inStr = u.inputTokens != null ? u.inputTokens.toLocaleString('vi-VN') : '—'
-  const outStr = u.outputTokens != null ? u.outputTokens.toLocaleString('vi-VN') : '—'
-  let costStr = '—'
-  if (u.costUsd != null) {
-    costStr = u.costUsd.toLocaleString('vi-VN', { minimumFractionDigits: 2, maximumFractionDigits: 4 })
-  }
-  let timeStr = '—'
-  if (u.durationMs != null) {
-    const sec = u.durationMs / 1000
-    timeStr = sec.toLocaleString('vi-VN', { minimumFractionDigits: 1, maximumFractionDigits: 1 }) + ' giây'
-  }
-  const parts = [
-    `Vào ${inStr}`,
-    `Ra ${outStr}`,
-    `USD ${costStr}`,
-    timeStr
-  ]
-  if (u.partial) {
-    parts.push('chưa đủ dữ liệu')
-  }
-  return parts.join(' · ')
-}
-
-function formatTotals(t) {
-  let tokenText
-  if (!t.hasTokens) {
-    tokenText = t.tokensIncomplete ? 'Token: —' : '0 token'
-  } else {
-    tokenText = `${(t.tokens || 0).toLocaleString('vi-VN')} token` + (t.tokensIncomplete ? ' (chưa đủ dữ liệu)' : '')
-  }
-
-  let costText
-  if (!t.hasCost) {
-    costText = t.costIncomplete ? 'Chi phí CLI: —' : 'Chi phí CLI: USD 0'
-  } else {
-    const costFormatted = (t.costUsd || 0).toLocaleString('vi-VN', { minimumFractionDigits: 2, maximumFractionDigits: 4 })
-    costText = `Chi phí CLI: USD ${costFormatted}` + (t.costIncomplete ? ' (chưa đủ dữ liệu)' : '')
-  }
-
-  if (t.partialLog) {
-    tokenText += ' (log chưa đầy đủ)'
-  }
-  return { tokenText, costText }
+  const n = v => v != null ? v.toLocaleString('vi-VN') : '—', sec = u.durationMs != null ? u.durationMs / 1000 : null
+  const time = sec == null ? '—' : sec < 60 ? sec.toLocaleString('vi-VN', { maximumFractionDigits: sec < 10 ? 1 : 0 }) + 's'
+    : `${Math.floor(sec / 60)}m${String(Math.round(sec % 60)).padStart(2, '0')}s`
+  const node = el('div', 'usage', [
+    `in ${u.inputTokens != null ? short(u.inputTokens) : '—'}`,
+    `out ${u.outputTokens != null ? short(u.outputTokens) : '—'}`,
+    u.costUsd != null ? '$' + usd(u.costUsd) : '$—',
+    time,
+    ...(u.partial ? ['chưa đủ dữ liệu'] : [])
+  ].join(' · '))
+  node.title = `Vào ${n(u.inputTokens)} · Ra ${n(u.outputTokens)} token · USD ${n(u.costUsd)}\n${CLI_COUNT_NOTE}`
+  return node
 }
 
 function updateHeaderStats() {
-  const totals = formatTotals(currentTotals)
-  $('#stats').textContent = `${totals.tokenText} · ${totals.costText}`
+  const t = currentTotals
+  const row = (k, v) => { const r = el('div', 'kv'); r.append(el('span', '', k), el('b', '', v)); return r }
+  const notes = [t.tokensIncomplete && 'token chưa đủ dữ liệu', t.costIncomplete && 'chi phí chưa đủ dữ liệu', t.partialLog && 'log chưa đầy đủ'].filter(Boolean)
+  $('#stats').replaceChildren(
+    row('Token', t.hasTokens ? short(t.tokens || 0) : t.tokensIncomplete ? '—' : '0'),
+    row('USD', t.hasCost ? usd(t.costUsd || 0) : t.costIncomplete ? '—' : '0'),
+    ...(notes.length ? [el('small', '', notes.join(' · '))] : []))
+  $('#stats').title = `${(t.tokens || 0).toLocaleString('vi-VN')} token · USD ${(t.costUsd || 0).toLocaleString('vi-VN')}\n${CLI_COUNT_NOTE}`
   $('#stats-sec').hidden = false
 }
 
@@ -1492,7 +1323,7 @@ function withPreservedScroll(fn) {
 }
 
 function createMsgElement(m) {
-  const usageText = formatUsage(m.usage)
+  const usage = usageEl(m.usage)
   let node = null
 
   if (m.kind === 'task-status') {
@@ -1500,17 +1331,15 @@ function createMsgElement(m) {
     sys.append(el('div', '', m.text))
     node = sys
   } else if (m.kind === 'scope-warning') {
-    const card = el('div', 'scope-warning box')
-    const hdr = el('b', '', '⚠️ Cảnh báo thay đổi file')
-    const txt = el('div', 'scope-warn-text', m.text)
-    card.append(hdr, txt)
-    if (Array.isArray(m.paths) && m.paths.length > 0) {
+    // one thin strip, collapsed: the file list is one click away
+    const card = el('details', 'scope-warning')
+    const paths = Array.isArray(m.paths) ? m.paths : [], who = /@([\w-]+)/.exec(m.text || '')?.[1]
+    const turn = who ? ` trong lượt @${who}` : ''
+    card.append(el('summary', '', paths.length ? `${paths.length} file ngoài phạm vi thay đổi${turn}` : `Chưa kiểm tra đủ thay đổi file${turn}`),
+      el('div', 'scope-warn-text', m.text))
+    if (paths.length) {
       const pEl = el('div', 'scope-paths')
-      pEl.append('File ngoài phạm vi: ')
-      m.paths.forEach((p, idx) => {
-        if (idx > 0) pEl.append(', ')
-        pEl.append(el('code', '', p))
-      })
+      pEl.append(...paths.map(p => el('code', '', p)))
       card.append(pEl)
     }
     node = card
@@ -1521,31 +1350,19 @@ function createMsgElement(m) {
     if (m.queueId && m.owner && ['CONFLICT', 'CHECK_FAILED', 'CHECK_MUTATED_TREE'].includes(m.error?.code)) {
       const repBtn = el('button', 'box press btn sm primary', `Gọi @${m.owner} sửa`)
       repBtn.type = 'button'
-      repBtn.style.marginTop = '6px'
       repBtn.onclick = () => runMergeAction('requestMergeRepair', m.queueId, repBtn, `Đã yêu cầu @${m.owner} sửa xung đột`)
       card.append(repBtn)
     }
     node = card
   } else if (m.kind === 'permission-denied') {
-    const card = el('div', 'sys perm-denied-card box')
-    card.style.border = '2px solid var(--ink)'
-    card.style.background = 'var(--bg)'
-    card.style.padding = '10px 12px'
-    card.style.marginTop = '6px'
+    const card = el('div', 'perm-denied-card')
 
     const hdr = el('div', 'perm-denied-hdr')
-    hdr.style.fontWeight = '700'
-    hdr.style.marginBottom = '6px'
-    hdr.style.display = 'flex'
-    hdr.style.alignItems = 'center'
-    hdr.style.gap = '6px'
     hdr.append('🚫 CLI báo từ chối quyền của @', el('span', '', m.agent || 'agent'))
     card.append(hdr)
 
     if (m.text) {
       const desc = el('div', 'perm-denied-desc', m.text)
-      desc.style.fontSize = '13px'
-      desc.style.marginBottom = '8px'
       card.append(desc)
     }
 
@@ -1553,18 +1370,9 @@ function createMsgElement(m) {
     const reqId = m.permissionRequestId
 
     const listDiv = el('div', 'perm-denied-list')
-    listDiv.style.display = 'flex'
-    listDiv.style.flexDirection = 'column'
-    listDiv.style.gap = '8px'
 
     denials.forEach(dItem => {
-      const itemRow = el('div', 'perm-denied-item box')
-      itemRow.style.padding = '8px'
-      itemRow.style.background = 'var(--surface)'
-      itemRow.style.fontSize = '12px'
-      itemRow.style.display = 'flex'
-      itemRow.style.flexDirection = 'column'
-      itemRow.style.gap = '4px'
+      const itemRow = el('div', 'perm-denied-item')
 
       const infoDiv = el('div')
       const toolB = el('b', '', dItem.tool || 'Công cụ')
@@ -1581,16 +1389,11 @@ function createMsgElement(m) {
       }
 
       if (dItem.reason) {
-        const reasonDiv = el('div', '', dItem.reason)
-        reasonDiv.style.color = 'var(--muted)'
+        const reasonDiv = el('div', 'muted', dItem.reason)
         itemRow.append(reasonDiv)
       }
 
-      const actRow = el('div')
-      actRow.style.display = 'flex'
-      actRow.style.gap = '8px'
-      actRow.style.alignItems = 'center'
-      actRow.style.marginTop = '4px'
+      const actRow = el('div', 'perm-denied-actions')
 
       const isBusy = activeRuns.has(runKey(dir, m.agent))
       const pReq = permissionRequests.find(r => r.id === reqId)
@@ -1652,8 +1455,7 @@ function createMsgElement(m) {
     if (denials.length > 0) {
       card.append(listDiv)
     } else {
-      const noDenials = el('div', '', 'Yêu cầu quyền không có chi tiết.')
-      noDenials.style.color = 'var(--muted)'
+      const noDenials = el('div', 'muted', 'Yêu cầu quyền không có chi tiết.')
       card.append(noDenials)
     }
 
@@ -1661,15 +1463,10 @@ function createMsgElement(m) {
   } else if (m.from === 'system') {
     const sys = el('div', 'sys')
     sys.append(renderMarkdown(m.text, { dir, fromFile: null, workspace: m.workspace || null }))
-    if (usageText) {
-      const uEl = el('div', 'usage', usageText)
-      uEl.title = 'Theo bộ đếm của CLI; cách tính cache có thể khác nhau'
-      sys.append(uEl)
-    }
+    if (usage) sys.append(usage)
     // only main's own chain-stop record: its text is agent-influenced, and main refuses a second continue of the same chain
     if (m.kind === 'chain-stop') {
       const btnWrap = el('div')
-      btnWrap.style.marginTop = '8px'
       const contBtn = el('button', 'box press btn sm primary', 'Tiếp tục')
       contBtn.type = 'button'
       contBtn.title = 'Chạy tiếp chuỗi với bộ đếm mới'
@@ -1698,23 +1495,14 @@ function createMsgElement(m) {
       const meta = el('div', 'meta')
       meta.append(el('b', '', m.from === 'user' ? 'Bạn' : '@' + m.from))
       const agent = team.find(a => a.name === m.from)
-      if (agent) {
-        const c = el('span', 'cli', agent.cli)
-        c.style.background = agent.avatar?.color || color(m.from)
-        c.style.color = 'var(--on-color)'
-        meta.append(c)
-      }
+      if (agent) meta.append(el('span', 'cli', agent.cli))
       meta.append(el('time', '', hhmm(m.at)))
       row.append(avatar(agent || m.from), meta)
       row.firstChild.style.gridRow = 'span 2'
     }
     const body = el('div', 'text')
     body.append(renderMarkdown(m.text, { dir, fromFile: null, workspace: m.workspace || null }))
-    if (usageText) {
-      const uEl = el('div', 'usage', usageText)
-      uEl.title = 'Theo bộ đếm của CLI; cách tính cache có thể khác nhau'
-      body.append(uEl)
-    }
+    if (usage) body.append(usage)
     row.append(body)
     node = row
   }
@@ -2591,6 +2379,19 @@ function typingText(run) {
   return `@${run.name} · ${chainTxt}${statusText}`
 }
 
+const QUIET_MS = 120e3
+const clock = ms => {
+  const s = Math.max(0, Math.floor(ms / 1000)), h = Math.floor(s / 3600), m = Math.floor(s / 60) % 60, ss = String(s % 60).padStart(2, '0')
+  return h ? `${h}:${String(m).padStart(2, '0')}:${ss}` : `${m}:${ss}`
+}
+
+// time since the turn started (same clock as its timeout), plus "im lặng" once no new step came for 2+ minutes
+function setRunTime(row, run) {
+  const now = Date.now(), quiet = now - run.activeAt, t = row.querySelector('.typing-time')
+  t.textContent = clock(now - run.startedAt) + (quiet >= QUIET_MS ? ` · im lặng ${Math.floor(quiet / 60e3)} phút` : '')
+  t.classList.toggle('quiet', quiet >= QUIET_MS)
+}
+
 function setStopButton(btn, run) {
   btn.textContent = run.stopping ? 'Đang dừng…' : 'Dừng'
   btn.disabled = run.stopping
@@ -2601,6 +2402,7 @@ function patchRun(run) {
   const row = [...$('#typing').children].find(r => r.dataset.runId === run.runId)
   if (!row) return renderActiveUI()
   row.querySelector('.typing-label').textContent = typingText(run)
+  setRunTime(row, run)
   setStopButton(row.querySelector('.btn-stop'), run)
   if (currentPopoverAgent !== run.name) return
   const pop = $('#member-popover')
@@ -2645,8 +2447,13 @@ function renderActiveUI() {
       const row = el('div', 'typing-row')
       row.dataset.runId = run.runId
       const lead = el('div', 'typing-lead')
-      lead.append(el('i'), el('i'), el('i'))
-      lead.append(el('span', 'typing-label', typingText(run)))
+      const pulse = el('i')
+      pulse.style.setProperty('--agent', getAgentAvatar(run.name)?.color || '#a1a1aa')
+      lead.append(pulse, el('span', 'typing-label', typingText(run)))
+
+      const time = el('span', 'typing-time')
+      const limit = team.find(a => a.name === run.name)?.timeoutMinutes ?? 30
+      time.title = `Chạy từ ${hhmm(run.startedAt)} · tự dừng khi quá ${limit} phút\n"im lặng": chưa có bước mới, agent có thể vẫn đang suy nghĩ hoặc chạy lệnh dài`
 
       const stopBtn = el('button', 'btn-stop box press')
       stopBtn.type = 'button'
@@ -2654,7 +2461,8 @@ function renderActiveUI() {
       setStopButton(stopBtn, run)
       stopBtn.onclick = () => stopAgent(run.name, run.runId)
 
-      row.append(lead, stopBtn)
+      row.append(lead, time, stopBtn)
+      setRunTime(row, run)
       return row
     }))
   })
@@ -2670,15 +2478,8 @@ function renderTeam() {
     btn.dataset.agent = a.name
     btn.setAttribute('aria-expanded', 'false')
     btn.setAttribute('aria-controls', 'member-popover')
-    const avData = getAgentAvatar(a)
-    if (avData) {
-      btn.dataset.agentAvatar = a.name
-      btn.textContent = ''
-      btn.append(createAvatarSvg(avData.gender, avData.color))
-    } else {
-      btn.style.background = color(a.name)
-      btn.textContent = a.name.slice(0, 2)
-    }
+    btn.dataset.agentAvatar = a.name
+    paintAvatar(btn, a.name, getAgentAvatar(a)?.color)
 
     btn.onmouseenter = () => openMemberPopover(a.name, btn)
     btn.onmouseleave = () => scheduleCloseMemberPopover()
@@ -2697,19 +2498,12 @@ function renderTeam() {
   renderActiveUI()
 }
 
-const STATUS_ICONS = {
-  todo: '☐',
-  doing: '◐',
-  review: '⧗',
-  done: '☑'
-}
 const STATUS_MAP = {
-  todo: 'Cần làm',
-  doing: 'Đang làm',
+  doing: 'Đang chạy',
   review: 'Chờ duyệt',
+  todo: 'Cần làm',
   done: 'Xong'
 }
-const STATUSES = ['todo', 'doing', 'review', 'done']
 let currentTasks = []
 let taskGen = 0
 const groupOpenStates = new Map()
@@ -2745,6 +2539,10 @@ function renderBoard(error = null) {
 
   const emptyEl = $('#tasks-empty')
   const treeEl = $('#tasks-tree')
+  const done = currentTasks.filter(t => t.status === 'done').length
+  $('#tasks-count').textContent = currentTasks.length ? `${done}/${currentTasks.length}` : ''
+  $('#tasks-bar').style.width = `${currentTasks.length ? done / currentTasks.length * 100 : 0}%`
+  $('#tasks-bar').parentElement.hidden = !currentTasks.length
 
   if (!dir || (!error && currentTasks.length === 0)) {
     emptyEl.hidden = false
@@ -2754,62 +2552,19 @@ function renderBoard(error = null) {
 
   emptyEl.hidden = true
 
-  const groupsMap = new Map()
+  // grouped by status, in the order that needs attention; "Xong" starts collapsed
   const numId = id => parseInt(id.replace(/\D/g, ''), 10) || 0
-
-  for (const t of currentTasks) {
-    const specKey = t.spec || ''
-    if (!groupsMap.has(specKey)) {
-      groupsMap.set(specKey, [])
-    }
-    groupsMap.get(specKey).push(t)
-  }
-
-  const sortedKeys = [...groupsMap.keys()].sort((a, b) => {
-    if (!a && b) return 1
-    if (a && !b) return -1
-    return base(a).localeCompare(base(b))
-  })
-
-  const groupElements = sortedKeys.map(specKey => {
-    const tasks = groupsMap.get(specKey)
-    tasks.sort((a, b) => numId(a.id) - numId(b.id))
-
-    const totalCount = tasks.length
-    const doneCount = tasks.filter(t => t.status === 'done').length
-    const isAllDone = totalCount > 0 && doneCount === totalCount
-
-    const groupName = specKey ? base(specKey) : 'Khác'
-    const groupKey = specKey || '__other__'
-
+  treeEl.replaceChildren(...Object.entries(STATUS_MAP).flatMap(([status, label]) => {
+    const tasks = currentTasks.filter(t => t.status === status).sort((a, b) => numId(a.id) - numId(b.id))
+    if (!tasks.length) return []
     const details = el('details', 'task-group')
-    const isOpen = groupOpenStates.has(groupKey) ? groupOpenStates.get(groupKey) : !isAllDone
-    if (isOpen) details.open = true
-
-    details.ontoggle = () => {
-      groupOpenStates.set(groupKey, details.open)
-    }
-
-    const summary = el('summary', 'task-group-sum')
-    const titleSpan = el('span', 'task-group-title', groupName)
-    if (specKey) titleSpan.title = specKey
-
-    const progSpan = el('span', 'task-group-prog', `${doneCount}/${totalCount}`)
-    progSpan.title = `Hoàn thành ${doneCount}/${totalCount} task`
-
-    summary.append(titleSpan, progSpan)
-    details.append(summary)
-
+    details.open = groupOpenStates.get(status) ?? status !== 'done'
+    details.ontoggle = () => groupOpenStates.set(status, details.open)
     const itemsDiv = el('div', 'task-group-items')
-    for (const task of tasks) {
-      itemsDiv.append(renderTreeTaskRow(task))
-    }
-    details.append(itemsDiv)
-
-    return details
-  })
-
-  treeEl.replaceChildren(...groupElements)
+    itemsDiv.append(...tasks.map(renderTreeTaskRow))
+    details.append(el('summary', 'task-group-sum', `${label} · ${tasks.length}`), itemsDiv)
+    return [details]
+  }))
 }
 
 function renderTreeTaskRow(task) {
@@ -2818,10 +2573,10 @@ function renderTreeTaskRow(task) {
   const row = el('div', 'tree-task-row' + (isDone ? ' done' : '') + (hasSpec ? ' has-spec' : ''))
   row.dataset.taskId = task.id
 
-  const iconChar = STATUS_ICONS[task.status] || '☐'
-  const statusText = STATUS_MAP[task.status] || task.status
-  const iconEl = el('span', 'tree-task-icon', iconChar)
-  iconEl.title = statusText
+  const iconEl = el('span', 'tree-task-icon')
+  iconEl.dataset.status = task.status
+  iconEl.style.setProperty('--agent', getAgentAvatar(task.assignee)?.color || '#a1a1aa')
+  iconEl.title = STATUS_MAP[task.status] || task.status
   row.append(iconEl)
 
   const idEl = el('span', 'tree-task-id', task.id)
@@ -3048,6 +2803,13 @@ document.addEventListener('click', e => {
 })
 
 new ResizeObserver(() => resizeInput()).observe($('main'))
+// tick the run clocks in place (rows are never rebuilt for this, so a click on "Dừng" can't miss)
+setInterval(() => {
+  for (const row of $('#typing').children) {
+    const run = [...activeRuns.values()].find(r => r.runId === row.dataset.runId)
+    if (run) setRunTime(row, run)
+  }
+}, 1000)
 
 $('#viewer-close').onclick = () => closeViewer()
 $('#viewer-reload').onclick = () => {
@@ -3140,7 +2902,7 @@ api.on('status', (d, name, on, runId) => {
   }
   const key = runKey(d, name)
   if (on) {
-    activeRuns.set(key, { name, runId, label: 'đang khởi động…', stopping: false, phase: 'running', blockedBy: [] })
+    activeRuns.set(key, { name, runId, label: 'đang khởi động…', stopping: false, phase: 'running', blockedBy: [], startedAt: Date.now(), activeAt: Date.now() })
   } else {
     const cur = activeRuns.get(key)
     if (cur && (!runId || cur.runId === runId)) activeRuns.delete(key)
@@ -3164,6 +2926,7 @@ api.on('progress', (d, name, data) => {
     if (data.stopping !== undefined) r.stopping = !!data.stopping
     if (data.chain !== undefined) r.chain = data.chain
     if (data.label === 'đang dừng…') r.stopping = true
+    if (data.startedAt) Object.assign(r, { startedAt: data.startedAt, activeAt: data.activeAt })
     if (d === dir) patchRun(r)
   }
 })

@@ -537,17 +537,21 @@ const heads = () => jobs.filter((job, i) => !job.finished && !jobs.slice(0, i).s
 const activeFor = dir => {
   const root = rootOf(dir)
   return heads().filter(job => job.root === root && job.headStarted)
-    .map(job => ({ name: job.name, runId: job.runId, label: job.label, stopping: job.stopping, phase: job.phase, blockedBy: job.blockedBy, chain: chainInfo(job) }))
+    .map(job => ({ name: job.name, runId: job.runId, label: job.label, stopping: job.stopping, phase: job.phase, blockedBy: job.blockedBy, chain: chainInfo(job),
+      startedAt: job.startedAt, activeAt: job.activeAt }))
 }
 const orphanFor = dir => {
   const root = rootOf(dir)
   return orphans.filter(lock => lock.root === root).map(({ name, runId, scope, state }) => ({ name, runId, owns: core.ownsList(scope), readOnly: scope.readOnly, state }))
 }
 const chainInfo = job => job.chain ? { turns: job.chain.turns, limit: job.chain.chainLimit } : null
+// activeAt: the last new step (CLI progress or a phase change), so the UI can tell a long silence from a busy turn
 function progress(job, label = job.label) {
   job.label = label
+  job.activeAt = Date.now()
   win?.webContents.send('progress', job.dir, job.name,
-    { runId: job.runId, label, phase: job.phase, blockedBy: job.blockedBy || [], stopping: job.stopping, chain: chainInfo(job) })
+    { runId: job.runId, label, phase: job.phase, blockedBy: job.blockedBy || [], stopping: job.stopping, chain: chainInfo(job),
+      startedAt: job.startedAt, activeAt: job.activeAt })
 }
 
 async function terminal(job, result, waiting = false) {
@@ -709,6 +713,7 @@ async function scheduleSummary(dir) {
 function startHead(job) {
   if (job.finished || job.headStarted) return
   job.headStarted = true
+  job.startedAt = Date.now() // the turn's timeout counts from here too
   win?.webContents.send('status', job.dir, job.name, true, job.runId)
   progress(job)
   try { job.timer = setTimeout(() => stopJob(job, 'timeout'), core.timeoutMinutes(job.agent) * 60000) }
@@ -1636,7 +1641,7 @@ if (!singleInstance) app.quit()
 else app.whenReady().then(() => {
   core.setTrustFile(path.join(app.getPath('userData'), 'trust.json'))
   for (const dir of projects()) loadOrphans(dir)
-  win = new BrowserWindow({ width: 1280, height: 820, webPreferences: { preload: path.join(__dirname, 'preload.js') } })
+  win = new BrowserWindow({ width: 1280, height: 820, minWidth: 960, minHeight: 560, webPreferences: { preload: path.join(__dirname, 'preload.js') } })
   // Closing never stops agents (the user chose that): CLIs keep running detached and may still edit files, but their
   // answers and the queue are lost, so ask first. Cmd+Q closes the window too, so this covers both.
   win.on('close', event => {

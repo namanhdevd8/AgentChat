@@ -782,7 +782,7 @@ async function rendererChecks() {
     team: [{ name: 'dev', cli: 'codex', avatar: { gender: 'male', color: '#abc' } }], currentTeamRevision: 'team-r1',
     currentSettings: { worktreesEnabled: true }, currentSettingsRevision: null,
     worktreeState: { enabled: true, agents: [{ name: 'dev', workspaceId: 'workspace' }] }, currentPopoverAgent: null,
-    AVATAR_PALETTE: ['#abc'], PALETTE_NAMES: {}, createAvatarSvg: () => el('svg'), avatar: () => el('svg'),
+    AVATAR_PALETTE: ['#abc'], PALETTE_NAMES: {}, paintAvatar: node => node, avatar: () => el('svg'),
     Option: function (label, value, defaultSelected, selected) { return { label, value, selected } },
     showToast: message => notices.push(message),
     api: { sessions: async () => ({ dev: session }), accounts: async () => ['codex'],
