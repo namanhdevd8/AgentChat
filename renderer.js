@@ -207,6 +207,9 @@ const firstSeen = (generation, seq) => {
   return true
 }
 const activeRuns = new Map()
+// recent turn lengths per agent (from the loaded log), for the "còn ~N phút" estimate
+const turnTimes = new Map()
+function noteTurnTime(name, ms) { const list = turnTimes.get(name) || []; list.push(ms); turnTimes.set(name, list.slice(-10)) }
 let orphanLocks = []
 let openSeq = 0, openingDir = null, pendingEvents = []
 const runKey = (d, name) => d + '\0' + name
@@ -235,9 +238,19 @@ async function loadProjects() {
     const b = el('button', 'space' + (on ? ' on' : ''))
     b.title = p.chat === '.chat' ? p.dir : `${p.dir} (${p.chat})`
     b.append(el('span', '', p.name))
+    if (!on) setSpaceBadge(b, p.needs)
     b.onclick = () => openProject(p.dir, p.chat)
     return b
   }))
+  markActiveBadge()
+}
+
+function setSpaceBadge(button, n) {
+  let badge = button.querySelector('.space-badge')
+  if (!n) return badge?.remove()
+  if (!badge) button.append(badge = el('span', 'space-badge'))
+  badge.textContent = n
+  badge.title = `${n} việc cần bạn`
 }
 
 function syncActive(list) {
@@ -271,11 +284,15 @@ async function openProject(d, c = d === dir ? box : null) {
   currentTasks = []
   groupOpenStates.clear()
   renderBoard()
+  needs = []
+  turnTimes.clear()
   $('#title').textContent = base(d)
   $('#path').textContent = tilde(c && c !== '.chat' ? `${d} · ${c}` : d)
   $('#log').replaceChildren()
   $('#stats-sec').hidden = true
   $('#gear').hidden = true // until this project's team is in
+  $('#timeline-btn').hidden = true
+  if ($('#timeline').open) $('#timeline').close()
   $('#input').disabled = true
   $('#search-wrap').hidden = false
   $('#search-input').value = ''
@@ -293,6 +310,7 @@ async function openProject(d, c = d === dir ? box : null) {
   sess = {}
   currentTeamRevision = null
   permissionRequests = []
+  renderNeeds()
 
   let res
   try {
@@ -379,12 +397,14 @@ async function openProject(d, c = d === dir ? box : null) {
   refreshFiles()
   loadProjects()
   loadTasks()
+  refreshNeeds()
   loadWorktreeState(d)
   updateSearchSenderDropdown()
   api.watchProject(d, null).catch(() => {})
   $('#input').disabled = false
   $('#input').focus()
   $('#gear').hidden = false
+  $('#timeline-btn').hidden = false
   resizeInput()
 }
 
@@ -1517,6 +1537,7 @@ function createMsgElement(m) {
 function msgFragment(list) {
   const frag = document.createDocumentFragment()
   for (const m of list) {
+    if (m.usage?.durationMs > 0 && m.from !== 'user' && m.from !== 'system') noteTurnTime(m.from, m.usage.durationMs)
     frag.append(createMsgElement(m))
     last = (m.from !== 'system' && m.kind !== 'task-status' && m.kind !== 'scope-warning' && m.kind !== 'merge') ? m : null
   }
@@ -2375,7 +2396,7 @@ function typingText(run) {
   } else if (run.phase === 'checking') {
     statusText = 'đang kiểm tra file…'
   }
-  const chainTxt = run.chain ? `chuỗi ${run.chain.turns}/${run.chain.limit} · ` : '' // agent turns since your last message
+  const chainTxt = run.chain ? `lượt ${run.chain.turns} (tối đa ${run.chain.limit}) · ` : '' // agent turns since your last message
   return `@${run.name} · ${chainTxt}${statusText}`
 }
 
@@ -2385,10 +2406,13 @@ const clock = ms => {
   return h ? `${h}:${String(m).padStart(2, '0')}:${ss}` : `${m}:${ss}`
 }
 
-// time since the turn started (same clock as its timeout), plus "im lặng" once no new step came for 2+ minutes
+// time since the turn started (same clock as its timeout); then "im lặng" once no new step came for 2+ minutes, else
+// time left judged by the median of this agent's recent turns (3+ of them)
 function setRunTime(row, run) {
-  const now = Date.now(), quiet = now - run.activeAt, t = row.querySelector('.typing-time')
-  t.textContent = clock(now - run.startedAt) + (quiet >= QUIET_MS ? ` · im lặng ${Math.floor(quiet / 60e3)} phút` : '')
+  const now = Date.now(), quiet = now - run.activeAt, elapsed = now - run.startedAt, t = row.querySelector('.typing-time')
+  const times = turnTimes.get(run.name), typical = times?.length >= 3 ? [...times].sort((a, b) => a - b)[times.length >> 1] : null
+  t.textContent = clock(elapsed) + (quiet >= QUIET_MS ? ` · im lặng ${Math.floor(quiet / 60e3)} phút`
+    : typical == null ? '' : typical > elapsed ? ` · còn ~${Math.max(1, Math.round((typical - elapsed) / 60e3))} phút` : ' · lâu hơn thường lệ')
   t.classList.toggle('quiet', quiet >= QUIET_MS)
 }
 
@@ -2449,11 +2473,13 @@ function renderActiveUI() {
       const lead = el('div', 'typing-lead')
       const pulse = el('i')
       pulse.style.setProperty('--agent', getAgentAvatar(run.name)?.color || '#a1a1aa')
-      lead.append(pulse, el('span', 'typing-label', typingText(run)))
+      const label = el('span', 'typing-label', typingText(run))
+      if (run.chain) label.title = 'Lượt: số lượt agent nối tiếp nhau kể từ tin gần nhất của bạn. Tới tối đa, chuỗi tạm dừng chờ bạn bấm Tiếp tục'
+      lead.append(pulse, label)
 
       const time = el('span', 'typing-time')
       const limit = team.find(a => a.name === run.name)?.timeoutMinutes ?? 30
-      time.title = `Chạy từ ${hhmm(run.startedAt)} · tự dừng khi quá ${limit} phút\n"im lặng": chưa có bước mới, agent có thể vẫn đang suy nghĩ hoặc chạy lệnh dài`
+      time.title = `Chạy từ ${hhmm(run.startedAt)} · tự dừng khi quá ${limit} phút\n"còn ~": ước lượng theo trung vị các lượt gần đây của @${run.name}\n"im lặng": chưa có bước mới, agent có thể vẫn đang suy nghĩ hoặc chạy lệnh dài`
 
       const stopBtn = el('button', 'btn-stop box press')
       stopBtn.type = 'button'
@@ -2609,6 +2635,192 @@ function renderTreeTaskRow(task) {
   return row
 }
 
+
+// ---- "Cần bạn": what waits for the user — agents' @user asks, paused chains, CLI permission requests ----
+let needs = []
+const NEED_LINE = /@user(?![\w-])/i
+const needTitle = m => m.kind === 'chain-stop' ? 'Chuỗi agent tạm dừng, chờ bạn'
+  : m.kind === 'permission-denied' ? `@${m.agent} bị CLI từ chối quyền`
+    : m.from !== 'user' && m.from !== 'system' && NEED_LINE.test(m.text || '') ? `@${m.from} cần bạn` : null
+
+async function refreshNeeds() {
+  if (!dir) return
+  const reqDir = dir, reqSeq = openSeq
+  const res = await api.needs(reqDir).catch(() => null)
+  if (!sameOpen(reqDir, reqSeq) || !res?.ok) return
+  needs = res.items
+  renderNeeds()
+}
+
+// a system notification while the window is in the background; clicking it brings the message up
+function notifyNeed(d, m, title) {
+  if (document.hasFocus()) return
+  const line = String(m.text || '').split('\n').find(text => NEED_LINE.test(text)) || m.text || ''
+  const note = new Notification(title, { body: line.replace(/\s+/g, ' ').trim().slice(0, 140) })
+  note.onclick = () => { window.focus(); if (d === dir) jumpToMessage(m.seq); else openProject(d) }
+}
+
+function markActiveBadge() {
+  const on = document.querySelector('.space.on')
+  if (on) setSpaceBadge(on, needs.length + permissionRequests.length)
+}
+
+// the reply goes to the agent that asked and quotes the ask: it may have asked several things
+function replyAbout(item) {
+  const quote = item.text.replace(/@user(?![\w-])/gi, '').replace(/\s+/g, ' ').trim()
+  return `(về tin ${hhmm(item.at)}: "${quote.length > 60 ? quote.slice(0, 60) + '…' : quote}")`
+}
+function prefill(text) {
+  const inp = $('#input')
+  inp.value = text
+  resizeInput()
+  inp.focus()
+  inp.setSelectionRange(text.length, text.length)
+}
+function needButton(label, onclick, cls = 'btn sm') {
+  const b = el('button', 'box press ' + cls, label)
+  b.type = 'button'
+  b.onclick = onclick
+  return b
+}
+async function needAction(button, call) {
+  button.disabled = true
+  try {
+    const res = await call()
+    if (res?.ok === false) throw new Error(res.error?.message || 'Không thực hiện được')
+  } catch (err) {
+    showToast(err.message.replace(/^.*?Error: /, ''))
+    button.disabled = false
+  }
+}
+
+function renderNeeds() {
+  const perms = permissionRequests.map(request => ({ kind: 'perm', from: request.agent,
+    text: (request.denials || []).map(x => x.label || x.tool).filter(Boolean).join(', ') || 'CLI từ chối quyền' }))
+  const items = [...perms, ...needs]
+  $('#needs-sec').hidden = !items.length
+  $('#needs-count').textContent = items.length
+  markActiveBadge()
+  $('#needs').replaceChildren(...items.map(item => {
+    const card = el('div', 'need')
+    const head = el('div', 'need-head')
+    head.append(item.kind === 'chain' ? el('span', 'sq', '‖') : avatar(item.from, 'sq'),
+      el('b', '', item.kind === 'chain' ? 'Chuỗi tạm dừng' : item.kind === 'perm' ? `@${item.from} cần quyền` : `@${item.from}`))
+    if (item.at) head.append(el('time', '', hhmm(item.at)))
+    if (item.kind !== 'perm') { // a permission request leaves once granted or dropped
+      const hide = needButton('✕', () => needAction(hide, async () => {
+        const res = await api.dismissNeed(dir, `${item.seq}:${item.at}`)
+        if (res.ok) { needs = res.items; renderNeeds() }
+        return res
+      }), 'need-x')
+      hide.title = 'Đã xem, ẩn khỏi danh sách'
+      hide.setAttribute('aria-label', 'Ẩn mục này')
+      head.append(hide)
+    }
+    const text = el('button', 'need-text', item.text)
+    text.type = 'button'
+    text.title = item.kind === 'perm' ? 'Mở mục Quyền' : 'Xem trong cuộc trò chuyện'
+    text.onclick = () => item.kind === 'perm' ? openSettingsForAgent(item.from) : jumpToMessage(item.seq)
+    const actions = el('div', 'need-actions')
+    if (item.kind === 'ask') {
+      const approve = needButton('Duyệt', () => needAction(approve, () => api.send(dir, `@${item.from} Duyệt ${replyAbout(item)}`)), 'btn sm primary')
+      actions.append(approve,
+        needButton('Yêu cầu sửa', () => prefill(`@${item.from} Yêu cầu sửa ${replyAbout(item)}: `)),
+        needButton('Từ chối', () => prefill(`@${item.from} Từ chối ${replyAbout(item)}: `)))
+    } else if (item.kind === 'chain') {
+      const resume = needButton('Tiếp tục', () => needAction(resume, () => api.continueChain(dir, { messageId: item.seq })), 'btn sm primary')
+      actions.append(resume)
+    } else actions.append(needButton('Mở mục Quyền', () => openSettingsForAgent(item.from)))
+    card.append(head, text, actions)
+    return card
+  }))
+}
+
+// ---- timeline: which agent ran when and for how long; the log's finished turns plus the ones running now ----
+const TL_RANGES = [['1 giờ', 3600e3], ['6 giờ', 6 * 3600e3], ['24 giờ', 86400e3], ['7 ngày', 7 * 86400e3]]
+const TL_OUTCOME = { success: 'xong', error: 'lỗi', timeout: 'quá giờ', stopped: 'đã dừng', running: 'đang chạy' }
+let tl = null, tlSpan = null, tlGen = 0
+
+// ponytail: reads back 7 days at most; add paging by range if older history matters
+async function openTimeline() {
+  const reqDir = dir, gen = ++tlGen, now = Date.now()
+  if (!$('#timeline').open) $('#timeline').showModal()
+  $('#timeline-body').replaceChildren(el('div', 'none', 'Đang tải…'))
+  const res = await api.timeline(reqDir, now - TL_RANGES.at(-1)[1]).catch(err => ({ ok: false, error: { message: err.message } }))
+  if (gen !== tlGen || dir !== reqDir) return
+  if (!res.ok) return $('#timeline-body').replaceChildren(el('div', 'viewer-error', res.error?.message || 'Không đọc được lịch sử'))
+  tl = { runs: res.runs, now }
+  // opens on the shortest range that reaches the latest turn
+  tlSpan = TL_RANGES.find(([, ms]) => res.last != null && now - res.last <= ms)?.[1] ?? TL_RANGES.at(-1)[1]
+  renderTimeline()
+}
+
+const roughDuration = ms => ms < 60e3 ? `${Math.round(ms / 1e3)} giây` : ms < 3600e3 ? `${Math.round(ms / 60e3)} phút`
+  : `${(ms / 3600e3).toLocaleString('vi-VN', { maximumFractionDigits: 1 })} giờ`
+
+function renderTimeline() {
+  const { now } = tl, span = tlSpan, from = now - span, at = t => span > 86400e3 ? when(t) : hhmm(t)
+  const running = [...activeRuns.entries()].filter(([key, r]) => key.startsWith(dir + '\0') && r.startedAt)
+    .map(([, r]) => ({ agent: r.name, start: r.startedAt, end: now, outcome: 'running' }))
+  const runs = [...tl.runs, ...running].filter(r => r.end >= from)
+  const names = [...new Set([...team.map(a => a.name), ...runs.map(r => r.agent)])]
+  const pct = t => `${(t - from) / span * 100}%`
+
+  for (const b of $('#timeline-range').children) b.classList.toggle('on', +b.dataset.span === span)
+  $('#timeline-sub').textContent = `${runs.length} lượt · ${at(from)} → bây giờ`
+
+  // gridlines on local-time boundaries, at most 8 of them
+  const step = [5, 10, 15, 30, 60, 120, 180, 360, 720, 1440].map(m => m * 60e3).find(ms => span / ms <= 8)
+  const zone = new Date().getTimezoneOffset() * 60e3, ticks = []
+  for (let t = Math.ceil((from - zone) / step) * step + zone; t < now; t += step) ticks.push(t)
+  const lines = () => ticks.map(t => { const line = el('i', 'tl-line'); line.style.left = pct(t); return line })
+
+  const axis = el('div', 'tl-row tl-axis'), scale = el('div', 'tl-lane')
+  scale.append(...ticks.map(t => { const tick = el('span', 'tl-tick', step >= 86400e3 ? when(t).split(' ')[0] : hhmm(t)); tick.style.left = pct(t); return tick }))
+  axis.append(el('div'), scale)
+
+  const rows = names.map(name => {
+    const mine = runs.filter(r => r.agent === name)
+    const busy = mine.reduce((n, r) => n + r.end - Math.max(r.start, from), 0)
+    const row = el('div', 'tl-row'), who = el('div', 'tl-who'), lane = el('div', 'tl-lane')
+    const label = el('div')
+    label.append(el('b', '', '@' + name), el('small', '', mine.length ? `${mine.length} lượt · ${roughDuration(busy)}` : 'rảnh'))
+    who.append(avatar(name, 'sq'), label)
+    lane.style.setProperty('--agent', getAgentAvatar(name)?.color || '#a1a1aa')
+    lane.append(...lines(), ...mine.map(r => {
+      const start = Math.max(r.start, from), bar = el(r.seq != null ? 'button' : 'span', 'tl-bar ' + r.outcome)
+      bar.style.left = pct(start)
+      bar.style.width = `${(r.end - start) / span * 100}%`
+      bar.title = `@${name} · ${at(r.start)}–${r.outcome === 'running' ? 'bây giờ' : hhmm(r.end)} · ${roughDuration(r.end - r.start)} · ${TL_OUTCOME[r.outcome] || r.outcome}`
+      if (r.seq != null) {
+        bar.type = 'button'
+        bar.onclick = () => { $('#timeline').close(); jumpToMessage(r.seq) }
+      }
+      return bar
+    }))
+    row.append(who, lane)
+    return row
+  })
+
+  const legend = el('div', 'tl-legend')
+  for (const [cls, label] of [['success', 'Xong (màu của agent)'], ['error', 'Lỗi'], ['stopped', 'Dừng / quá giờ'], ['running', 'Đang chạy']]) {
+    const item = el('span'), swatch = el('i', 'tl-bar ' + cls)
+    swatch.style.setProperty('--agent', '#a1a1aa')
+    item.append(swatch, label)
+    legend.append(item)
+  }
+  $('#timeline-body').replaceChildren(axis, ...rows, ...(runs.length ? [] : [el('div', 'none', 'Không có lượt nào trong khoảng này.')]), legend)
+}
+
+$('#timeline-btn').onclick = openTimeline
+$('#timeline-close').onclick = () => $('#timeline').close()
+$('#timeline-range').replaceChildren(...TL_RANGES.map(([label, ms]) => {
+  const b = el('button', '', label)
+  b.type = 'button'
+  b.dataset.span = ms
+  b.onclick = () => { if (tl) { tlSpan = ms; renderTimeline() } }
+  return b
+}))
 
 let currentViewerPath = null
 let currentViewerCanExternal = false
@@ -2863,11 +3075,15 @@ api.on('message', (d, m, meta) => {
     pendingEvents.push({ type: 'message', msg: m, meta })
     return
   }
+  const need = needTitle(m)
+  if (need) notifyNeed(d, m, need)
+  if (d !== dir && (need || m.from === 'user')) loadProjects() // that box's badge
   if (d === dir) {
     // the log was rewritten (e.g. a torn last line repaired) without a log-reset: seqs of the shown window no longer
     // line up and paging/search with the old generation fail, so start over from the new log
     if (meta.generation !== logGeneration) return openProject(dir)
     if (!firstSeen(meta.generation, m.seq)) return
+    if (need || m.from === 'user' || m.kind === 'chain-continue') refreshNeeds()
     newestLiveSeq = Math.max(newestLiveSeq, m.seq)
     if (meta.totals) currentTotals = meta.totals
     updateHeaderStats()
@@ -3013,6 +3229,7 @@ api.on('permissions-changed', (d, data) => {
   if (d === dir && data) {
     permissionRequests = Array.isArray(data.requests) ? data.requests : []
     updateGrantButtonsState()
+    renderNeeds()
   }
 })
 

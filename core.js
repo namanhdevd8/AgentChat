@@ -798,8 +798,10 @@ function addIndexedRecord(index, raw, record, start, end) {
   const length = Buffer.alloc(8); length.writeBigUInt64BE(BigInt(raw.length))
   index.recordHash.update(length).update(raw)
   const seq = index.records.length
+  const agent = record.agent || (record.from !== 'user' && record.from !== 'system' ? record.from : null)
   index.records.push({ start, end, from: String(record.from ?? ''), at: record.at, search: searchText(record.text),
-    kind: record.kind, summary: record.summary })
+    kind: record.kind, summary: record.summary, // a turn's result (an agent's answer or its error) carries usage: the timeline's bars
+    run: agent && record.usage ? { agent: String(agent), ms: value(record.usage.durationMs) || 0, outcome: String(record.outcome || 'success') } : undefined })
   index.prefixHashes.push(prefixDigest(index.recordHash))
   index.senders.add(String(record.from ?? ''))
   const turn = (record.from !== 'user' && record.from !== 'system') || (record.from === 'system' && (record.runId || record.usage))
@@ -973,6 +975,49 @@ async function searchLog(dir, options = {}) {
   }
   return { generation: index.generation, upper, results, nextBefore: results.length === limit ? results.at(-1).seq : null,
     senders: [...index.senders].filter(Boolean).sort() }
+}
+
+// "Cần bạn", newest first: agent messages that @user which the user hasn't answered since (a later user message @-ing that
+// agent, or one with no @ when it is the PM: that's who it goes to), and chain stops nobody continued or wrote after.
+// `dismissed` holds "seq:at" keys the user closed. ponytail: scans the in-memory index on every call; keep a cursor if
+// boxes reach ~100k messages
+async function needsYou(dir, dismissed = new Set(), limit = 50) {
+  const index = await getLogIndex(dir); logFailure(index)
+  const answered = new Set(), found = []
+  let userSince = false, resumed = false
+  for (let seq = index.records.length - 1; seq >= 0 && found.length < limit; seq--) {
+    const record = index.records[seq], from = record.from.toLowerCase(), key = `${seq}:${record.at}`
+    if (from === 'user') {
+      userSince = true
+      const named = [...record.search.matchAll(/@([\w-]+)/g)].map(match => match[1])
+      for (const name of named.length ? named : ['pm']) answered.add(name)
+    } else if (from === 'system') {
+      if (record.kind === 'chain-continue') resumed = true
+      else if (record.kind === 'chain-stop' && !userSince && !resumed && !dismissed.has(key)) found.push({ seq, kind: 'chain' })
+    } else if (/(?:^|[^\w@])@user(?![\w-])/.test(record.search) && !answered.has(from) && !dismissed.has(key)) found.push({ seq, kind: 'ask' })
+  }
+  const items = []
+  for (const item of found) {
+    const [message] = await readIndexedRecords(index, item.seq, item.seq + 1)
+    const line = item.kind === 'ask' && String(message.text).split('\n').find(text => /@user(?![\w-])/i.test(text)) // the ask itself
+    items.push({ ...item, from: message.from, at: message.at, text: clean(line || message.text) })
+  }
+  return items
+}
+
+// Agent turns that ended at/after `since` (ms), oldest first: a turn spans [at - durationMs, at]. `last` = the newest turn's end
+async function timeline(dir, since = 0, limit = 3000) {
+  const index = await getLogIndex(dir); logFailure(index)
+  const runs = []
+  let last = null
+  for (let seq = index.records.length - 1; seq >= 0 && runs.length < limit; seq--) {
+    const { run, at } = index.records[seq], end = Date.parse(at)
+    if (!run || !Number.isFinite(end)) continue
+    last ??= end
+    if (end < since) break // the log is appended in time order
+    runs.push({ seq, agent: run.agent, start: end - run.ms, end, outcome: run.outcome })
+  }
+  return { runs: runs.reverse(), last }
 }
 
 function appendRecordToIndex(index, raw, msg, start, end, stat) {
@@ -2135,7 +2180,7 @@ async function run(dir, agent, options = {}) {
     orphanState: r.orphanState || orphanState, pgid: r.pgid || pgid }
 }
 
-module.exports = { CHAT_DIR, chat, chatName, useBox, boxes, createBox, CLI, account, accounts, cliSessions, models, init, atomicWrite, setTrustFile, configTrust, trustConfig, revertConfig, appendLogIndexed, getLogIndex, invalidateLogIndex, logPage, searchLog, logTotals,
+module.exports = { CHAT_DIR, chat, chatName, useBox, boxes, createBox, CLI, account, accounts, cliSessions, models, init, atomicWrite, setTrustFile, configTrust, trustConfig, revertConfig, appendLogIndexed, getLogIndex, invalidateLogIndex, logPage, searchLog, needsYou, timeline, logTotals,
   normalizeProjectSettings, projectSettings, writeProjectSettings, summaryBatch, acceptSummary, materializeSummary, recoverSummary,
   team, normalizeTeam, saveTeam, teamRevision, normalizePermissions, permissionRules, normalizePermissionDenials,
   timeoutMinutes, sessionTokenLimit, sessions, setSession, sessionRotationPending, readHandoff, writeHandoff,

@@ -82,6 +82,7 @@
   .space:hover { background: var(--hover); color: var(--ink); }
   .space.on { background: var(--surface); border-color: var(--line); color: var(--ink); font-weight: 500; }
   .space span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .space .space-badge { margin-left: auto; flex: none; overflow: visible; }
 
   /* chat */
   main { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--surface); position: relative; }
@@ -233,6 +234,19 @@
   .task-progress { height: 4px; margin-bottom: 10px; border-radius: 2px; background: var(--hover); overflow: hidden; }
   .task-progress i { display: block; height: 100%; background: var(--ink); border-radius: 2px; transition: width .3s; }
   .task-tree { max-height: 50vh; overflow-y: auto; }
+  /* "Cần bạn": cards with the ask, a jump to it, and the answer buttons */
+  .needs-count, .space-badge { padding: 0 6px; border-radius: 999px; background: var(--accent); color: #fff; font: 600 11px/1.6 var(--mono); }
+  .needs-list { display: grid; gap: 8px; max-height: 40vh; overflow-y: auto; }
+  .need { display: grid; gap: 6px; padding: 8px 10px; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; }
+  .need-head { display: flex; align-items: center; gap: 6px; font-size: 12.5px; min-width: 0; }
+  .need-head b { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .need-head time { font-size: 11.5px; color: var(--faint); font-variant-numeric: tabular-nums; }
+  .need-x { margin-left: auto; flex: none; width: 20px; height: 20px; padding: 0; border: 0; border-radius: 4px; background: none; color: var(--faint); font-size: 11px; }
+  .need-x:hover { background: var(--hover); color: var(--ink); }
+  .need-text { padding: 0; border: 0; background: none; text-align: left; font-size: 13px; line-height: 1.45; overflow-wrap: anywhere;
+    display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+  .need-text:hover { color: var(--accent); }
+  .need-actions { display: flex; flex-wrap: wrap; gap: 6px; }
   .task-group-sum { display: flex; align-items: center; gap: 6px; padding: 4px 0; cursor: pointer; list-style: none; user-select: none; }
   .task-group-sum::-webkit-details-marker { display: none; }
   .task-group-sum::before { content: ''; border-left: 4px solid currentColor; border-top: 3.5px solid transparent; border-bottom: 3.5px solid transparent; transition: transform .12s; }
@@ -373,6 +387,35 @@
   @keyframes flash-bg { from { background: var(--accent-soft); } to { background: transparent; } }
   .highlight-flash { animation: flash-bg 2s ease-out; border-radius: 8px; }
 
+  /* timeline dialog: one lane per agent, a bar per turn */
+  .timeline-dialog { width: min(1040px, 94vw); }
+  .timeline-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+  .seg button { padding: 3px 10px; border: 0; background: none; font-size: 12.5px; color: var(--muted); }
+  .seg button + button { border-left: 1px solid var(--line); }
+  .seg button:hover { color: var(--ink); }
+  .seg button.on { background: var(--hover); color: var(--ink); font-weight: 500; }
+  .timeline-body { flex: 1; overflow: auto; padding: 0 20px 20px; }
+  .tl-row { display: grid; grid-template-columns: 190px minmax(0, 1fr); align-items: center; min-width: 560px; border-bottom: 1px solid var(--line); }
+  .tl-axis { position: sticky; top: 0; z-index: 2; height: 30px; background: var(--surface); }
+  .tl-who { display: flex; align-items: center; gap: 8px; min-width: 0; padding-right: 12px; font-size: 13px; line-height: 1.3; }
+  .tl-who div { display: grid; min-width: 0; }
+  .tl-who b { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tl-who small { font: 11px var(--mono); color: var(--faint); white-space: nowrap; }
+  .tl-lane { position: relative; height: 44px; }
+  .tl-axis .tl-lane { height: 30px; }
+  .tl-line { position: absolute; top: 0; bottom: 0; border-left: 1px dashed var(--line); }
+  .tl-tick { position: absolute; top: 8px; transform: translateX(-50%); font: 11px var(--mono); color: var(--faint); white-space: nowrap; }
+  .tl-bar { position: absolute; top: 13px; height: 18px; min-width: 3px; padding: 0; border: 0; border-radius: 4px; background: var(--agent); }
+  button.tl-bar:hover { outline: 2px solid var(--ink); outline-offset: 1px; z-index: 1; }
+  .tl-bar.error { background: var(--danger); }
+  .tl-bar.stopped, .tl-bar.timeout { border: 1px solid var(--agent); background: repeating-linear-gradient(135deg, var(--agent) 0 3px, transparent 3px 7px); }
+  .tl-bar.running { background: repeating-linear-gradient(135deg, var(--agent) 0 6px, color-mix(in srgb, var(--agent) 45%, var(--surface)) 6px 12px) 0 0 / 17px 17px; animation: tl-run 1s linear infinite; }
+  @keyframes tl-run { to { background-position: 17px 0; } }
+  .tl-legend { display: flex; flex-wrap: wrap; gap: 16px; margin-top: 14px; font-size: 12px; color: var(--muted); }
+  .tl-legend span { display: flex; align-items: center; gap: 6px; }
+  .tl-legend .tl-bar { position: static; display: inline-block; width: 16px; height: 10px; border-radius: 3px; }
+
   /* merge queue */
   .merge-summary { cursor: pointer; user-select: none; list-style: none; }
   .merge-summary::-webkit-details-marker { display: none; }
@@ -427,6 +470,9 @@
     </div>
     <div class="stack" id="stack"></div>
     <div id="member-popover" class="member-popover box" role="region" aria-label="Chi tiết thành viên" hidden></div>
+    <button id="timeline-btn" class="box press icon" title="Timeline: agent nào chạy lúc nào, bao lâu" aria-label="Mở timeline" hidden>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M4 6h8M9 12h11M6 18h7"/></svg>
+    </button>
     <button id="gear" class="box press icon" title="Cài đặt nhóm của box này" hidden>
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
     </button>
@@ -449,6 +495,10 @@
 </main>
 
 <aside>
+  <section class="box" id="needs-sec" hidden>
+    <div class="sec-head"><h3>Cần bạn</h3><span id="needs-count" class="needs-count"></span></div>
+    <div id="needs" class="needs-list"></div>
+  </section>
   <section class="box" id="tasks-sec">
     <div class="sec-head">
       <h3>Bảng task</h3>
@@ -612,6 +662,16 @@
     </div>
   </div>
   <div id="viewer-body" class="viewer-body"></div>
+</dialog>
+<dialog id="timeline" class="box timeline-dialog" aria-labelledby="timeline-title">
+  <div class="dhead timeline-head">
+    <div><h2 id="timeline-title">Timeline agent</h2><small id="timeline-sub"></small></div>
+    <div class="vhead-actions">
+      <div id="timeline-range" class="seg" role="group" aria-label="Khoảng thời gian"></div>
+      <button id="timeline-close" class="box press btn sm" type="button">Đóng</button>
+    </div>
+  </div>
+  <div id="timeline-body" class="timeline-body"></div>
 </dialog>
 <div id="toast" class="toast" role="status" aria-live="polite"></div>
 

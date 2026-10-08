@@ -1274,11 +1274,44 @@ function switchBox(root, name) {
   core.useBox(root, name)
 }
 
-ipcMain.handle('projects', event => {
+// "Cần bạn" items the user closed without answering, per box data folder: "seq:at" keys, so a rewritten log can't hide
+// a different message. In userData, not .chat/: an agent must not be able to clear what waits for the user
+const needsFile = () => path.join(app.getPath('userData'), 'needs-dismissed.json')
+let needsDismissed = null
+function dismissedNeeds(root) {
+  if (!needsDismissed) { try { needsDismissed = JSON.parse(fs.readFileSync(needsFile(), 'utf8')) } catch { needsDismissed = {} } }
+  return new Set(needsDismissed[core.chat(root)] || [])
+}
+const needsFor = root => core.needsYou(root, dismissedNeeds(root))
+
+ipcMain.handle('projects', async event => {
   validSender(event)
-  return projects().flatMap(dir => {
+  return (await Promise.all(projects().map(async dir => {
     const found = core.boxes(dir)
-    return (found.length ? found : [{ chat: '.chat', name: path.basename(dir) }]).map(box => ({ dir, ...box }))
+    // ponytail: only the box each folder has open is counted (core reads one box per folder); others show no badge
+    let needs = 0
+    try { needs = (await needsFor(rootOf(dir))).length } catch {}
+    return (found.length ? found : [{ chat: '.chat', name: path.basename(dir) }])
+      .map(box => ({ dir, ...box, needs: box.chat === core.chatName(dir) ? needs : 0 }))
+  }))).flat()
+})
+ipcMain.handle('timeline', (event, dir, since) => {
+  validSender(event)
+  return apiCall(async () => {
+    if (!Number.isFinite(since) || since < 0) throw gitError('INVALID_ARGUMENT', 'Khoảng thời gian không hợp lệ')
+    return await core.timeline(knownProject(dir), since)
+  })
+})
+ipcMain.handle('needs', (event, dir) => { validSender(event); return apiCall(async () => ({ items: await needsFor(knownProject(dir)) })) })
+ipcMain.handle('dismissNeed', (event, dir, key) => {
+  validSender(event)
+  return apiCall(async () => {
+    const root = knownProject(dir)
+    if (typeof key !== 'string' || !/^\d+:[\w.:+-]{1,40}$/.test(key)) throw gitError('INVALID_ARGUMENT', 'Mục không hợp lệ')
+    const keys = [...dismissedNeeds(root), key].slice(-500) // loads the store before it's indexed
+    needsDismissed[core.chat(root)] = keys
+    core.atomicWrite(needsFile(), JSON.stringify(needsDismissed))
+    return { items: await needsFor(root) }
   })
 })
 ipcMain.handle('pick', async event => {

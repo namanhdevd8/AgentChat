@@ -766,6 +766,41 @@ async function sprint6Checks() {
   assert.strictEqual(ui.split('id="stats"').length, 2)
 }
 
+// "Cần bạn": an @user ask stays open until the user writes to that agent (no @ → PM); a chain stop until any user
+// message or a continue; a dismissed key hides only that message
+async function needsChecks() {
+  const d = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'agent-needs-'))); core.init(d)
+  const say = (from, text, extra = {}) => core.appendLogIndexed(d, { from, text, at: new Date().toISOString(), ...extra })
+  const open = async (dismissed) => (await core.needsYou(d, dismissed)).map(item => [item.kind, item.from, item.text])
+  await say('pm', 'Đã chia việc.\n@user Bản 4 có 4 chỗ cần bạn chốt'); await say('dev', '@user xong T18, mời xem')
+  await say('qa', 'email: a@user.com') // not a mention
+  assert.deepStrictEqual(await open(), [['ask', 'dev', '@user xong T18, mời xem'], ['ask', 'pm', '@user Bản 4 có 4 chỗ cần bạn chốt']])
+  await say('user', '@dev ok') // answers dev only
+  assert.deepStrictEqual(await open(), [['ask', 'pm', '@user Bản 4 có 4 chỗ cần bạn chốt']])
+  await say('user', 'chốt theo phương án A') // no @ goes to the PM
+  assert.deepStrictEqual(await open(), [])
+  await say('system', 'Chuỗi dừng ở 12 lượt', { kind: 'chain-stop', targets: ['dev'] })
+  const [stop] = await core.needsYou(d)
+  assert.deepStrictEqual([stop.kind, (await core.needsYou(d, new Set([`${stop.seq}:${stop.at}`]))).length], ['chain', 0])
+  await say('system', 'Tiếp tục chuỗi với @dev.', { kind: 'chain-continue', continuedFrom: stop.seq })
+  assert.deepStrictEqual(await open(), [])
+}
+
+// timeline bars: a turn's result (answer or error) spans [at - durationMs, at]; other system lines are not turns
+async function timelineChecks() {
+  const d = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'agent-tl-'))); core.init(d)
+  const t0 = Date.parse('2026-10-08T08:00:00Z'), at = ms => new Date(t0 + ms).toISOString()
+  const usage = durationMs => ({ inputTokens: 1, outputTokens: 1, costUsd: 0, durationMs, partial: false })
+  await core.appendLogIndexed(d, { from: 'user', text: 'go', at: at(0) })
+  await core.appendLogIndexed(d, { from: 'pm', text: 'ok', at: at(60e3), runId: 'r1', agent: 'pm', outcome: 'success', usage: usage(50e3) })
+  await core.appendLogIndexed(d, { from: 'system', text: '@dev lỗi: x', at: at(120e3), runId: 'r2', agent: 'dev', outcome: 'error', usage: usage(30e3) })
+  await core.appendLogIndexed(d, { from: 'system', text: 'Tiếp tục chuỗi', at: at(130e3), kind: 'chain-continue', runId: 'c1' })
+  const { runs, last } = await core.timeline(d, 0)
+  assert.deepStrictEqual(runs.map(r => [r.agent, r.start - t0, r.end - t0, r.outcome]), [['pm', 10e3, 60e3, 'success'], ['dev', 90e3, 120e3, 'error']])
+  assert.strictEqual(last, t0 + 120e3)
+  assert.deepStrictEqual((await core.timeline(d, t0 + 100e3)).runs.map(r => r.agent), ['dev']) // only turns ending in range
+}
+
 // Run the real settings/merge handlers with a minimal DOM; no Electron/CLI lookup needed.
 async function rendererChecks() {
   const ui = fs.readFileSync(path.join(__dirname, 'renderer.js'), 'utf8'), vm = require('vm'), nodes = new Map(), notices = []
@@ -1176,12 +1211,19 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
     assert.deepStrictEqual((await call('projects')).filter(b => b.dir === two).map(b => [b.chat, b.name]), [['.chat', path.basename(two)], ['.chat2', 'Review']])
     const back = await whenIdle(() => call('open', two, '.chat'))
     assert.deepStrictEqual([back.chat, back.history.messages.some(m => m.text === 'R1'), back.history.messages.some(m => m.text === 'R2')], ['.chat', true, false])
+    // "Cần bạn" through IPC: counted on the open box's sidebar entry; a dismissal is kept in userData, not in the box
+    await core.appendLogIndexed(two, { from: 'pm', text: 'xong phần 1\n@user chốt A hay B?', at: new Date().toISOString() })
+    const asks = (await call('needs', two)).items, badge = async () => (await call('projects')).find(b => b.dir === two && b.chat === '.chat').needs
+    assert.deepStrictEqual([asks.map(item => item.text), await badge()], [['@user chốt A hay B?'], 1])
+    assert.strictEqual((await call('dismissNeed', two, '../x')).ok, false)
+    assert.deepStrictEqual([(await call('dismissNeed', two, `${asks[0].seq}:${asks[0].at}`)).items, await badge()], [[], 0])
+    assert.ok(fs.readFileSync(path.join(userData, 'needs-dismissed.json'), 'utf8').includes(`${asks[0].seq}:${asks[0].at}`))
     pickPath = in2('.chat2'); assert.deepStrictEqual(await call('pick'), { dir: two, chat: '.chat2' }) // picking a box's folder opens that box
     delete process.env.FAKE_REPLY; pickPath = null; dialogAnswer = 0
     console.log('ok (boxes)')
   }
 }
-logChecks().then(taskChecks).then(auditChecks).then(viewerChecks).then(runChecks).then(sprint7Checks).then(sprint8Checks).then(sprint6Checks).then(rendererChecks).then(mainChecks).then(() => console.log('ok'), e => { console.error(e); process.exit(1) })
+logChecks().then(needsChecks).then(timelineChecks).then(taskChecks).then(auditChecks).then(viewerChecks).then(runChecks).then(sprint7Checks).then(sprint8Checks).then(sprint6Checks).then(rendererChecks).then(mainChecks).then(() => console.log('ok'), e => { console.error(e); process.exit(1) })
 
 // PM creates a task and moves it in the same turn (no revision yet): "" is accepted only for PM on a todo task
 {
