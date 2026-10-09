@@ -1676,6 +1676,20 @@ ipcMain.handle('releaseLock', async (event, dir, runId) => {
   return { released: true }
 })
 
+// theme: set natively, so the page's prefers-color-scheme, menus, dialogs and scrollbars all follow; kept across restarts
+const THEMES = ['system', 'light', 'dark']
+const themeFile = () => path.join(app.getPath('userData'), 'theme.json')
+const windowBg = () => nativeTheme.shouldUseDarkColors ? '#151517' : '#f7f7f8' // --bg: no white flash before the page paints
+ipcMain.handle('theme', (event, source) => {
+  validSender(event)
+  if (source != null) {
+    if (!THEMES.includes(source)) throw new Error('Giao diện không hợp lệ')
+    nativeTheme.themeSource = source
+    try { core.atomicWrite(themeFile(), JSON.stringify(source)) } catch {}
+  }
+  return nativeTheme.themeSource
+})
+
 // size/position survive restarts; a spot on a screen that's gone (unplugged monitor) falls back to the default
 const windowFile = () => path.join(app.getPath('userData'), 'window.json')
 function savedBounds() {
@@ -1717,13 +1731,15 @@ else app.whenReady().then(() => {
   for (const dir of projects()) loadOrphans(dir)
   setMenu()
   if (!app.isPackaged) app.dock?.setIcon(path.join(__dirname, 'build/icon.png')) // packaged builds carry it in the bundle
+  try { const t = JSON.parse(fs.readFileSync(themeFile(), 'utf8')); if (THEMES.includes(t)) nativeTheme.themeSource = t } catch {}
   const { maximized, ...bounds } = savedBounds()
   win = new BrowserWindow({ width: 1280, height: 820, ...bounds, minWidth: 960, minHeight: 560,
-    backgroundColor: nativeTheme.shouldUseDarkColors ? '#151517' : '#f7f7f8', // --bg: no white flash before the page paints
+    backgroundColor: windowBg(),
     // macOS: the sidebar runs up under the traffic lights (index.html pads body.mac for them)
     ...(process.platform === 'darwin' && { titleBarStyle: 'hiddenInset', trafficLightPosition: { x: 18, y: 20 } }),
     webPreferences: { preload: path.join(__dirname, 'preload.js') } })
   if (maximized) win.maximize()
+  nativeTheme.on('updated', () => win.setBackgroundColor(windowBg()))
   win.on('close', () => {
     try { core.atomicWrite(windowFile(), JSON.stringify({ ...win.getNormalBounds(), maximized: win.isMaximized() })) } catch {}
   })

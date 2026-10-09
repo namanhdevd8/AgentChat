@@ -31,7 +31,11 @@
   body {
     margin: 0; height: 100vh; overflow: hidden; background: var(--bg); color: var(--ink);
     font: 14px/1.55 var(--sans); -webkit-font-smoothing: antialiased;
-    display: grid; grid-template-columns: clamp(200px, 15vw, 232px) minmax(0, 1fr) clamp(240px, 21vw, 300px);
+    display: grid; grid-template-columns: var(--nav) minmax(0, 1fr) var(--aside);
+    --nav: clamp(200px, 15vw, 232px);
+    /* right panel: dragged width (--aside-w, set by the grip) kept between 240px and a third of the window, and never
+       squeezing the chat below 520px (its width at the 960px minimum window); a smaller window re-clamps it */
+    --aside: clamp(240px, var(--aside-w, min(21vw, 300px)), min(33.333vw, 100vw - var(--nav) - 520px));
   }
   button { font: inherit; color: inherit; cursor: pointer; }
   button:disabled { cursor: not-allowed; opacity: .5; }
@@ -66,7 +70,7 @@
   .icon.sm { width: 22px; height: 22px; font-size: 13px; }
 
   /* section labels: small mono, lowercase */
-  nav h3, body > aside h3, .settings-nav-title, .settings-perm-hdr, .task-group-sum {
+  nav h3, body > aside h3, .stats-panel h3, .settings-nav-title, .settings-perm-hdr, .task-group-sum {
     font: 500 11.5px/1.4 var(--mono); text-transform: lowercase; letter-spacing: 0; color: var(--muted);
   }
 
@@ -88,9 +92,11 @@
   .space.on { background: var(--surface); border-color: var(--line); color: var(--ink); font-weight: 500; }
   .space span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .space .space-badge { margin-left: auto; flex: none; overflow: visible; }
-  .nav-foot { margin-top: auto; padding: 14px 6px 0; background: none; border: 0; text-align: left; font: 11.5px/1.6 var(--sans); color: var(--faint); }
-  .nav-foot:hover { color: var(--muted); }
-  .nav-foot span { display: block; }
+  .nav-foot { display: flex; align-items: flex-end; gap: 6px; margin-top: auto; padding-top: 14px; }
+  #about-btn { flex: 1; min-width: 0; padding: 0 6px; background: none; border: 0; text-align: left; font: 11.5px/1.6 var(--sans); color: var(--faint); }
+  #about-btn:hover { color: var(--muted); }
+  #about-btn span { display: block; }
+  #theme-btn { margin-left: auto; }
 
   /* Giới thiệu: who made it, what changed */
   .about-dialog { width: min(640px, 92vw); }
@@ -254,6 +260,10 @@
   body > aside section.box { padding: 14px 0; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; }
   body > aside section:last-child { border-bottom: 0; }
   body > aside h3 { margin: 0; }
+  /* sits just inside the panel's left padding, so it never covers the chat log's scrollbar */
+  .aside-grip { position: fixed; top: 0; bottom: 0; right: calc(var(--aside) - 6px); z-index: 10; width: 6px; cursor: col-resize; touch-action: none; -webkit-app-region: no-drag; }
+  .aside-grip:hover, .aside-grip:focus-visible, body.resizing .aside-grip { outline: 0; background: linear-gradient(var(--accent), var(--accent)) left / 2px 100% no-repeat; }
+  body.resizing { cursor: col-resize; user-select: none; }
   .sec-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
   .sec-head h3 { flex: 1; }
   .sec-count, .stats-badge { font: 500 12px var(--mono); color: var(--ink); font-variant-numeric: tabular-nums; }
@@ -292,10 +302,13 @@
   .tree-task-id { font: 500 12px var(--mono); }
   .tree-task-title { overflow: hidden; text-overflow: ellipsis; }
   .tree-task-assignee { font: 11.5px var(--mono); color: var(--faint); }
-  .stats-panel { display: grid; gap: 2px; font-size: 13px; }
-  .kv { display: flex; justify-content: space-between; gap: 12px; }
+  /* cost of the whole box, a strip under the timeline header (not scoped to the chosen range) */
+  .stats-panel { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 20px; padding: 10px 20px; border-bottom: 1px solid var(--line); font-size: 13px; flex: none; }
+  .stats-panel h3 { margin: 0; }
+  .kv { display: flex; gap: 8px; }
+  .kv span { color: var(--muted); }
   .kv b { font: 500 13px var(--mono); font-variant-numeric: tabular-nums; }
-  .stats-panel small { margin-top: 4px; font-size: 11.5px; color: var(--faint); }
+  .stats-panel small { font-size: 11.5px; color: var(--faint); }
   .frow { display: flex; align-items: center; gap: 8px; width: calc(100% + 12px); margin: 0 -6px; padding: 4px 6px; background: none; border: 0; border-radius: 5px; text-align: left; font: 12.5px/1.5 var(--mono); }
   .frow svg { width: 14px; height: 14px; color: var(--faint); }
   .frow:hover { background: var(--hover); }
@@ -490,7 +503,10 @@
   </button>
   <h3>Không gian</h3>
   <div id="projects"></div>
-  <button id="about-btn" class="nav-foot" type="button" title="Giới thiệu và các thay đổi" hidden><span id="foot-version"></span><span id="foot-author"></span></button>
+  <div class="nav-foot">
+    <button id="about-btn" type="button" title="Giới thiệu và các thay đổi" hidden><span id="foot-version"></span><span id="foot-author"></span></button>
+    <button id="theme-btn" class="box press icon" type="button"></button>
+  </div>
 </nav>
 
 <main class="box">
@@ -509,7 +525,7 @@
     </div>
     <div class="stack" id="stack"></div>
     <div id="member-popover" class="member-popover box" role="region" aria-label="Chi tiết thành viên" hidden></div>
-    <button id="timeline-btn" class="box press icon" title="Timeline: agent nào chạy lúc nào, bao lâu" aria-label="Mở timeline" hidden>
+    <button id="timeline-btn" class="box press icon" title="Timeline: agent nào chạy lúc nào, bao lâu; chi phí của box" aria-label="Mở timeline và chi phí" hidden>
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M4 6h8M9 12h11M6 18h7"/></svg>
     </button>
     <button id="gear" class="box press icon" title="Cài đặt nhóm của box này" hidden>
@@ -533,6 +549,7 @@
   </form>
 </main>
 
+<div id="aside-grip" class="aside-grip" role="separator" aria-orientation="vertical" aria-label="Độ rộng panel bên phải" tabindex="0" title="Kéo để đổi độ rộng · bấm đúp để về mặc định"></div>
 <aside>
   <section class="box" id="needs-sec" hidden>
     <div class="sec-head"><h3>Cần bạn</h3><span id="needs-count" class="needs-count"></span></div>
@@ -548,10 +565,6 @@
     <div id="task-error" class="task-error-banner" hidden></div>
     <div id="tasks-tree" class="task-tree"></div>
     <div id="tasks-empty" class="none" hidden>Nhờ PM tạo task khi giao việc.</div>
-  </section>
-  <section class="box" id="stats-sec" hidden>
-    <div class="sec-head"><h3>Chi phí</h3></div>
-    <div id="stats" class="stats-panel" title="Theo bộ đếm của CLI; cách tính cache có thể khác nhau"></div>
   </section>
   <section class="box" id="merge-sec" hidden>
     <details id="merge-details" open>
@@ -722,6 +735,7 @@
       <button id="timeline-close" class="box press btn sm" type="button">Đóng</button>
     </div>
   </div>
+  <div id="stats" class="stats-panel" title="Theo bộ đếm của CLI; cách tính cache có thể khác nhau"></div>
   <div id="timeline-body" class="timeline-body"></div>
 </dialog>
 <div id="toast" class="toast" role="status" aria-live="polite"></div>

@@ -296,7 +296,7 @@ async function openProject(d, c = d === dir ? box : null) {
   $('#title').textContent = base(d)
   $('#path').textContent = tilde(c && c !== '.chat' ? `${d} · ${c}` : d)
   $('#log').replaceChildren()
-  $('#stats-sec').hidden = true
+  $('#stats').replaceChildren()
   $('#gear').hidden = true // until this project's team is in
   $('#timeline-btn').hidden = true
   if ($('#timeline').open) $('#timeline').close()
@@ -1337,11 +1337,11 @@ function updateHeaderStats() {
   const row = (k, v) => { const r = el('div', 'kv'); r.append(el('span', '', k), el('b', '', v)); return r }
   const notes = [t.tokensIncomplete && 'token chưa đủ dữ liệu', t.costIncomplete && 'chi phí chưa đủ dữ liệu', t.partialLog && 'log chưa đầy đủ'].filter(Boolean)
   $('#stats').replaceChildren(
+    el('h3', '', 'Chi phí cả box'),
     row('Token', t.hasTokens ? short(t.tokens || 0) : t.tokensIncomplete ? '—' : '0'),
     row('USD', t.hasCost ? usd(t.costUsd || 0) : t.costIncomplete ? '—' : '0'),
     ...(notes.length ? [el('small', '', notes.join(' · '))] : []))
   $('#stats').title = `${(t.tokens || 0).toLocaleString('vi-VN')} token · USD ${(t.costUsd || 0).toLocaleString('vi-VN')}\n${CLI_COUNT_NOTE}`
-  $('#stats-sec').hidden = false
 }
 
 function withPreservedScroll(fn) {
@@ -3167,6 +3167,50 @@ $('#about-btn').onclick = () => {
   $('#about').showModal()
 }
 $('#about-close').onclick = () => $('#about').close()
+
+// theme: one fixed button cycles Theo hệ thống → Sáng → Tối; main applies it natively and remembers it
+const THEME_ICON = {
+  system: '<rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/>',
+  light: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>',
+  dark: '<path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5Z"/>'
+}
+const THEME_NAME = { system: 'Theo hệ thống', light: 'Sáng', dark: 'Tối' }
+function showTheme(t) {
+  const next = { system: 'light', light: 'dark', dark: 'system' }[t]
+  const icon = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+  icon.setAttribute('viewBox', '0 0 24 24'); icon.setAttribute('fill', 'none'); icon.setAttribute('stroke', 'currentColor')
+  icon.setAttribute('stroke-width', '2'); icon.setAttribute('stroke-linecap', 'round'); icon.setAttribute('stroke-linejoin', 'round')
+  icon.innerHTML = THEME_ICON[t]
+  $('#theme-btn').replaceChildren(icon)
+  $('#theme-btn').title = `Giao diện: ${THEME_NAME[t]} · bấm để chuyển sang ${THEME_NAME[next]}`
+  $('#theme-btn').setAttribute('aria-label', $('#theme-btn').title)
+  $('#theme-btn').onclick = () => api.theme(next).then(showTheme).catch(err => showToast(err.message.replace(/^.*?Error: /, '')))
+}
+api.theme().then(showTheme).catch(() => {})
+
+// right panel width: drag the grip (←/→ when focused, double-click resets); CSS keeps it within 240px … a third of the window
+const grip = $('#aside-grip'), aside = document.querySelector('body > aside')
+const setAside = w => document.body.style.setProperty('--aside-w', `${Math.round(w)}px`)
+function keepAside(reset) {
+  // store what CSS let through, so a drag past the limit leaves no overshoot to pull back first
+  if (reset) document.body.style.removeProperty('--aside-w'); else setAside(aside.offsetWidth)
+  try { if (reset) localStorage.removeItem('asideW'); else localStorage.asideW = aside.offsetWidth } catch {}
+}
+try { if (+localStorage.asideW) setAside(+localStorage.asideW) } catch {}
+grip.onpointerdown = e => {
+  if (e.button) return
+  e.preventDefault() // no text selection while dragging
+  const x0 = e.clientX, w0 = aside.offsetWidth
+  grip.setPointerCapture(e.pointerId)
+  document.body.classList.add('resizing')
+  grip.onpointermove = e => setAside(w0 + x0 - e.clientX)
+}
+grip.onlostpointercapture = () => { grip.onpointermove = null; document.body.classList.remove('resizing'); keepAside() }
+grip.ondblclick = () => keepAside(true)
+grip.onkeydown = e => {
+  const step = { ArrowLeft: 16, ArrowRight: -16 }[e.key]
+  if (step) { e.preventDefault(); setAside(aside.offsetWidth + step); keepAside() }
+}
 
 document.addEventListener('keydown', e => {
   // ⌘1…9 / Ctrl+1…9: the nth space in the sidebar

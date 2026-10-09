@@ -761,10 +761,9 @@ async function sprint6Checks() {
   await assert.rejects(core.appendLogIndexed(d, { from: 'user', text: 'x', at }), { code: 'LOG_CORRUPT' })
   fs.rmSync(log + '.link')
 
-  // T23: token & cost panel lives in the right column between the task board and File chung, not in the header
-  const ui = fs.readFileSync(path.join(__dirname, 'index.html'), 'utf8'), aside = ui.indexOf('<aside>')
-  const [tasksAt, statsAt, filesAt] = ['id="tasks-sec"', 'id="stats-sec"', '<h3>File chung</h3>'].map(x => ui.indexOf(x, aside))
-  assert.ok(aside > 0 && aside < tasksAt && tasksAt < statsAt && statsAt < filesAt, 'panel token không nằm giữa Bảng task và File chung')
+  // token & cost panel lives in the timeline dialog, not in the right column
+  const ui = fs.readFileSync(path.join(__dirname, 'index.html'), 'utf8'), tlAt = ui.indexOf('<dialog id="timeline"')
+  assert.ok(tlAt > 0 && ui.indexOf('id="stats"', tlAt) < ui.indexOf('</dialog>', tlAt) && !ui.includes('id="stats-sec"'), 'panel token không nằm trong Timeline')
   assert.strictEqual(ui.split('id="stats"').length, 2)
 }
 
@@ -928,7 +927,7 @@ async function mainHarness() {
   const electron = { app: { getPath: () => userData, requestSingleInstanceLock: () => true, whenReady: () => Promise.resolve(), on() {}, quit() {} },
     BrowserWindow: function () { return { webContents, loadFile: () => Promise.resolve(), isMinimized: () => false, on() {} } },
     ipcMain: { handle: (name, fn) => { handlers[name] = fn } }, shell: {},
-    Menu: { setApplicationMenu() {}, buildFromTemplate: t => t }, nativeTheme: {}, screen: { getAllDisplays: () => [] },
+    Menu: { setApplicationMenu() {}, buildFromTemplate: t => t }, nativeTheme: { themeSource: 'system', on() {} }, screen: { getAllDisplays: () => [] },
     dialog: { showMessageBox: async () => { dialogs++; return { response: dialogAnswer, checkboxChecked: true } },
       showOpenDialog: async () => ({ canceled: !pickPath, filePaths: [pickPath] }) } }
   const load = Module._load
@@ -989,6 +988,9 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
   core.trustConfig(root, core.configTrust(root).texts) // the fixture team is the user's own: pin it as accepted
   const ev = { sender: webContents }, call = (name, ...args) => handlers[name](ev, ...args)
   await call('open', root)
+  assert.strictEqual(await call('theme', 'dark'), 'dark') // theme: only the three sources, kept in userData
+  assert.throws(() => call('theme', 'red'))
+  assert.deepStrictEqual([await call('theme'), JSON.parse(fs.readFileSync(path.join(userData, 'theme.json'), 'utf8'))], ['dark', 'dark'])
   const log = () => { try { return fs.readFileSync(at('.chat/log.jsonl'), 'utf8').split('\n').filter(l => l.trim()).map(l => JSON.parse(l)) } catch { return [] } } // sync, for polling
   const registryFile = path.join(userData, 'worktrees', require('crypto').createHash('sha256').update(root).digest('hex'), 'registry.chat.json')
   const queue = () => { try { return JSON.parse(fs.readFileSync(registryFile, 'utf8')).queue } catch { return [] } }

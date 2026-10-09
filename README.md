@@ -46,7 +46,7 @@ thêm mục cho phiên bản đó vào `CHANGELOG.md` (`npm run check` báo lỗ
 | ⌘1 … ⌘9 | Mở không gian thứ 1 … 9 |
 | ⌘J | Tới box tiếp theo đang cần bạn |
 | ⌘F | Tìm trong lịch sử |
-| ⌘⇧T | Timeline: agent nào chạy lúc nào, bao lâu |
+| ⌘⇧T | Timeline: agent nào chạy lúc nào, bao lâu; chi phí của box |
 | ⌘, | Cài đặt nhóm |
 | Enter · Shift+Enter | Gửi · xuống dòng |
 

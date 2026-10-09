@@ -1,5 +1,12 @@
 # Các thay đổi
 
+## 0.3.0 · 2026-10-09
+
+### Mới
+- Kéo mép trái panel bên phải để đổi độ rộng, tối đa 1/3 cửa sổ (khung chat luôn giữ tối thiểu 520px); bấm đúp để về mặc định, app nhớ độ rộng.
+- Chi phí (token, USD) của cả box chuyển vào Timeline; panel bên phải gọn còn Bảng task và File chung.
+- Nút giao diện ở chân sidebar: Theo hệ thống, Sáng, Tối; menu và hộp thoại hệ thống đổi theo, app nhớ lựa chọn.
+
 ## 0.2.0 · 2026-10-08
 
 ### Mới
