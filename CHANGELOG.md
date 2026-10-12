@@ -1,5 +1,15 @@
 # Các thay đổi
 
+## 0.4.0 · 2026-10-12
+
+### Mới
+- Dán (⌘V) hoặc kéo ảnh PNG, JPEG, GIF, WebP vào ô soạn: ảnh hiện thành ảnh thu nhỏ có nút × để bỏ, và được gửi kèm tin nhắn. Ảnh đang soạn được giữ riêng cho từng box như phần chữ.
+- Ảnh hiện ngay trong khung chat, kể cả ảnh agent gửi; bấm vào ảnh để mở cỡ lớn.
+- Agent (Claude, Codex, agy) nhận đường dẫn ảnh và tự mở ảnh để xem. Agent cũng gửi được ảnh, ví dụ ảnh chụp màn hình, vào chat.
+
+### Bảo mật
+- Ảnh được nhận theo nội dung file, không theo đuôi; SVG và file nằm ngoài dự án bị chặn. Ảnh từ link ngoài không tự tải mà chỉ hiện thành link.
+
 ## 0.3.0 · 2026-10-09
 
 ### Mới

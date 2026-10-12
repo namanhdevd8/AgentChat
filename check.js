@@ -1295,3 +1295,29 @@ console.log('ok (windows args)')
     console.log('ok (argv values)')
   }).catch(e => { console.error(e); process.exit(1) })
 }
+// images: saved by content type under the box, read back only from inside the project, unseen by the scope audit
+{
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-img-')); core.init(d)
+  const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(16)])
+  const saved = core.saveImage(d, new Uint8Array(png))
+  assert.match(saved, /^\.chat\/attachments\/img-[0-9a-f]{12}\.png$/)
+  assert.throws(() => core.saveImage(d, new Uint8Array(Buffer.from('<svg onload="alert(1)"></svg>'))), { code: 'UNSUPPORTED' })
+  assert.throws(() => core.saveImage(d, 'abc'), { code: 'INVALID_ARGUMENT' })
+  fs.writeFileSync(path.join(d, 'reports/fake.png'), 'not an image at all')
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-img-out-')); fs.writeFileSync(path.join(outside, 'x.png'), png)
+  // markdown images never get a src the browser would fetch on its own (remote ones become links, local ones load via main)
+  const ui = fs.readFileSync(path.join(__dirname, 'renderer.js'), 'utf8'), vm = require('vm')
+  const md = vm.runInNewContext(ui.slice(ui.indexOf('let mdInstance'), ui.indexOf('function bindLinkHandler')) + ';initMarkdown()',
+    { window: { markdownit: require('markdown-it') } })
+  const html = md.render('![a](http://e.com/a.png) ![b" onerror="x](reports/a.png) ![c](javascript:x)')
+  assert.ok(!/\ssrc=/.test(html) && html.includes('data-src="reports/a.png"') && !html.includes('" onerror') && !html.includes('data-src="javascript'), html)
+  Promise.all([core.readImage(d, saved), core.readImage(d, 'reports/fake.png'), core.readImage(d, path.join(outside, 'x.png')),
+    core.readImage(d, `../${path.basename(outside)}/x.png`), core.snapshot(d), core.promptIndexed(d, core.team(d)[0], null)])
+    .then(([ok, fake, abs, rel, snap, briefing]) => {
+      assert.deepStrictEqual([ok.ok, ok.mime, ok.path, Buffer.compare(ok.bytes, png)], [true, 'image/png', saved, 0])
+      assert.deepStrictEqual([fake.ok, fake.code, abs.code, rel.code], [false, 'UNSUPPORTED', 'OUTSIDE_PROJECT', 'OUTSIDE_PROJECT'])
+      assert.ok(![...snap.keys()].some(k => k.includes('attachments'))) // a paste during a turn is not the agent's change
+      assert.ok(briefing.text.includes('![mô tả](.chat/attachments/'))
+      console.log('ok (images)')
+    }).catch(e => { console.error(e); process.exit(1) })
+}

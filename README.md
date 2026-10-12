@@ -33,7 +33,7 @@ thêm mục cho phiên bản đó vào `CHANGELOG.md` (`npm run check` báo lỗ
 
 ## Dữ liệu nằm ở đâu
 
-- Trong folder dự án: `.chat/` gồm log, bảng task, `memory.md` (bộ nhớ chung), `agents.json` (nhóm). Box thứ hai của
+- Trong folder dự án: `.chat/` gồm log, bảng task, `memory.md` (bộ nhớ chung), `agents.json` (nhóm), `attachments/` (ảnh gửi trong chat). Box thứ hai của
   cùng folder là `.chat2/`, rồi `.chat3/`…
 - Của riêng app (danh sách không gian, quyền đã tin, việc đã bỏ qua, kích thước cửa sổ): thư mục userData,
   trên macOS là `~/Library/Application Support/Agent Chat`.

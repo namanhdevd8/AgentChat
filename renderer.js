@@ -280,7 +280,7 @@ function syncActive(list) {
 const drafts = new Map()
 async function openProject(d, c = d === dir ? box : null) {
   // the input is disabled while a box opens: its text then isn't that box's draft
-  if (dir && !$('#input').disabled) drafts.set(dir + '\0' + box, $('#input').value)
+  if (dir && !$('#input').disabled) drafts.set(dir + '\0' + box, { text: $('#input').value, images: composerImages })
   const thisSeq = ++openSeq, prev = { dir, box }
   openingDir = d
   pendingEvents = []
@@ -302,6 +302,7 @@ async function openProject(d, c = d === dir ? box : null) {
   if ($('#timeline').open) $('#timeline').close()
   $('#input').disabled = true
   $('#input').value = ''
+  setComposerImages([])
   closeMentionPopup()
   $('#search-wrap').hidden = false
   $('#search-input').value = ''
@@ -412,7 +413,9 @@ async function openProject(d, c = d === dir ? box : null) {
   updateSearchSenderDropdown()
   api.watchProject(d, null).catch(() => {})
   $('#input').disabled = false
-  $('#input').value = drafts.get(d + '\0' + box) || ''
+  const draft = drafts.get(d + '\0' + box)
+  $('#input').value = draft?.text || ''
+  setComposerImages(draft?.images || [])
   $('#input').focus()
   $('#gear').hidden = false
   $('#timeline-btn').hidden = false
@@ -1224,12 +1227,17 @@ let mdInstance = null
 function initMarkdown() {
   if (mdInstance) return mdInstance
   if (typeof window.markdownit === 'function') {
-    mdInstance = new window.markdownit({ html: false, linkify: false, breaks: true }).disable('image')
+    mdInstance = new window.markdownit({ html: false, linkify: false, breaks: true })
     mdInstance.validateLink = (url) => {
       const trimmed = (url || '').trim()
       if (/^(?:javascript|data|vbscript|file):/i.test(trimmed) || /^\/\//.test(trimmed)) return false
       if (/^[a-z0-9+.-]+:/i.test(trimmed) && !/^https?:/i.test(trimmed)) return false
       return true
+    }
+    // no src the browser would fetch by itself: loadImages reads project files through main
+    mdInstance.renderer.rules.image = (tokens, idx, options, env, slf) => {
+      const esc = mdInstance.utils.escapeHtml
+      return `<img data-src="${esc(tokens[idx].attrGet('src') || '')}" alt="${esc(slf.renderInlineAsText(tokens[idx].children, options, env))}">`
     }
   }
   return mdInstance
@@ -1288,6 +1296,38 @@ function linkifyFiles(root, context = {}) {
   }
 }
 
+function loadImages(container, context = {}) {
+  const d = context.dir || dir, log = $('#log')
+  for (const img of container.querySelectorAll('img[data-src]')) {
+    const href = img.dataset.src, alt = img.alt || 'ảnh'
+    if (/^https?:\/\//i.test(href)) { // never fetched: a remote image would tell its server who reads the chat
+      const a = el('a', '', `[${alt}]`)
+      a.setAttribute('href', href)
+      img.replaceWith(a)
+      continue
+    }
+    img.title = alt
+    api.readImage(d, href, context.fromFile || null, context.workspace || null).then(res => {
+      if (!res?.ok) throw new Error(res?.message || 'không mở được')
+      const url = URL.createObjectURL(new Blob([res.bytes], { type: res.mime })), before = img.offsetHeight
+      img.onerror = () => URL.revokeObjectURL(url)
+      img.onload = () => {
+        URL.revokeObjectURL(url) // the decoded picture stays on screen
+        // #log has no scroll anchoring: keep what you read still, and the end in view if you were there
+        const grew = img.offsetHeight - before
+        if (!grew || !log.contains(img)) return
+        if (img.getBoundingClientRect().top + before <= log.getBoundingClientRect().top) log.scrollTop += grew
+        else if (!logHasAfter && log.scrollHeight - log.clientHeight - log.scrollTop - grew <= 48) log.scrollTop = log.scrollHeight
+      }
+      img.src = url
+      if (/^(reports|\.chat\d*)\//.test(res.path) && !img.closest('a')) { // what openFile accepts
+        img.classList.add('zoomable')
+        img.onclick = () => api.openFile(d, res.path, context.workspace || null).catch(err => showToast(err.message.replace(/^.*?Error: /, '')))
+      }
+    }).catch(err => img.replaceWith(el('span', 'img-missing', `[${alt}: ${err.message.replace(/^.*?Error: /, '')}]`)))
+  }
+}
+
 function renderMarkdown(text, context = {}) {
   const container = el('div', 'md-content')
   const parser = initMarkdown()
@@ -1305,6 +1345,7 @@ function renderMarkdown(text, context = {}) {
     bindLinkHandler(container, context)
     return container
   }
+  loadImages(container, context)
   linkifyFiles(container, context)
   bindLinkHandler(container, context)
   return container
@@ -2688,11 +2729,14 @@ async function refreshNeeds() {
   renderNeeds()
 }
 
+// one-line previews (notifications, cards, quotes) show "[ảnh]" instead of the markdown of an image
+const imageLabels = text => text.replace(/!\[([^\]]*)\]\([^)\s]*\)/g, (_, alt) => `[${alt || 'ảnh'}]`)
+
 // a system notification while the window is in the background; clicking it brings the message up
 function notifyNeed(d, m, title) {
   if (document.hasFocus()) return
   const line = String(m.text || '').split('\n').find(text => NEED_LINE.test(text)) || m.text || ''
-  const note = new Notification(title, { body: line.replace(/\s+/g, ' ').trim().slice(0, 140) })
+  const note = new Notification(title, { body: imageLabels(line).replace(/\s+/g, ' ').trim().slice(0, 140) })
   note.onclick = () => { window.focus(); if (d === dir) jumpToMessage(m.seq); else openProject(d) }
 }
 
@@ -2703,7 +2747,7 @@ function markActiveBadge() {
 
 // the reply goes to the agent that asked and quotes the ask: it may have asked several things
 function replyAbout(item) {
-  const quote = item.text.replace(/@user(?![\w-])/gi, '').replace(/\s+/g, ' ').trim()
+  const quote = imageLabels(item.text).replace(/@user(?![\w-])/gi, '').replace(/\s+/g, ' ').trim()
   return `(về tin ${hhmm(item.at)}: "${quote.length > 60 ? quote.slice(0, 60) + '…' : quote}")`
 }
 function prefill(text) {
@@ -2753,7 +2797,7 @@ function renderNeeds() {
       hide.setAttribute('aria-label', 'Ẩn mục này')
       head.append(hide)
     }
-    const text = el('button', 'need-text', item.text)
+    const text = el('button', 'need-text', imageLabels(item.text))
     text.type = 'button'
     text.title = item.kind === 'perm' ? 'Mở mục Quyền' : 'Xem trong cuộc trò chuyện'
     text.onclick = () => item.kind === 'perm' ? openSettingsForAgent(item.from) : jumpToMessage(item.seq)
@@ -2961,19 +3005,73 @@ $('#new').onclick = async () => {
 }
 $('#form').onsubmit = e => {
   e.preventDefault()
-  const text = $('#input').value.trim()
+  const typed = $('#input').value, images = composerImages
+  const text = [typed.trim(), ...images.map(file => `![ảnh](${file})`)].filter(Boolean).join('\n')
   if (!text || !dir) return
   $('#input').value = ''
+  setComposerImages([])
   closeMentionPopup()
   resizeInput()
   // main posts routing errors into the chat itself; what lands here failed before posting, so give the text back
   api.send(dir, text).catch(err => {
-    if (!$('#input').value) { $('#input').value = text; resizeInput() }
+    if (!$('#input').value && !composerImages.length) { $('#input').value = typed; setComposerImages(images); resizeInput() }
     showToast(err.message.replace(/^.*?Error: /, ''))
   })
   if (logHasAfter) $('#jump-latest').click() // the window doesn't show the end, where this message goes
   else $('#log').scrollTop = $('#log').scrollHeight
 }
+
+// pasted or dropped images are saved in the box right away and wait as thumbnails above the text; sending adds one
+// ![ảnh](path) line per image after the text, so the log and the agents see plain markdown
+let composerImages = []
+function setComposerImages(list) {
+  const log = $('#log'), atEnd = log.scrollHeight - log.clientHeight - log.scrollTop <= 48, strip = $('#attachments')
+  composerImages = list
+  strip.replaceChildren(...list.map((file, i) => {
+    const img = el('img'), remove = el('button', 'attach-x', '×')
+    img.dataset.src = file
+    img.alt = 'ảnh'
+    remove.type = 'button'
+    remove.title = 'Bỏ ảnh này'
+    remove.setAttribute('aria-label', 'Bỏ ảnh này')
+    remove.onclick = () => { setComposerImages(composerImages.filter((_, j) => j !== i)); $('#input').focus() }
+    const item = el('div', 'attach')
+    item.append(img, remove)
+    return item
+  }))
+  strip.hidden = !list.length
+  loadImages(strip, { dir })
+  if (atEnd && !logHasAfter) log.scrollTop = log.scrollHeight // the strip takes height from the log: keep the end in view
+}
+const imageFiles = list => [...(list || [])].filter(file => /^image\/(png|jpeg|gif|webp)$/.test(file.type))
+async function attachImages(files) {
+  const target = dir
+  for (const file of files) {
+    try {
+      if (file.size > 10 * 1024 * 1024) throw new Error(`${file.name} vượt quá 10 MiB`)
+      const res = await api.saveImage(target, new Uint8Array(await file.arrayBuffer()))
+      if (!res.ok) throw new Error(res.error.message)
+      if (dir !== target) return // switched box meanwhile: this composer belongs to another one
+      setComposerImages([...composerImages, res.path])
+      $('#input').focus()
+    } catch (err) { showToast(err.message.replace(/^.*?Error: /, '')) }
+  }
+}
+$('#input').addEventListener('paste', e => {
+  const files = imageFiles(e.clipboardData?.files)
+  if (!files.length) return
+  e.preventDefault()
+  attachImages(files)
+})
+document.addEventListener('dragover', e => { if (e.dataTransfer?.types.includes('Files')) e.preventDefault() })
+document.addEventListener('drop', e => {
+  if (!e.dataTransfer?.files.length) return
+  e.preventDefault()
+  if ($('#input').disabled) return
+  const files = imageFiles(e.dataTransfer.files)
+  if (files.length) attachImages(files)
+  else showToast('Chỉ đính kèm được ảnh PNG, JPEG, GIF hoặc WebP')
+})
 
 const inp = $('#input')
 inp.onkeydown = e => {

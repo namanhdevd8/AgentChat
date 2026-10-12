@@ -1,7 +1,7 @@
 // Project = folder. Chat log, team and shared memory live in <project>/.chat, reports in <project>/reports.
 // A folder can hold more independent boxes: .chat2, .chat3… (see chatName).
 const { spawn, execFile } = require('child_process')
-const { createHash, randomUUID } = require('crypto')
+const { createHash, randomBytes, randomUUID } = require('crypto')
 const { promisify } = require('util')
 const { pathToFileURL } = require('url')
 const readline = require('readline')
@@ -99,7 +99,8 @@ const RULES = `Quy tắc nhóm:
 - Kiến thức cả nhóm cần nhớ lâu dài: nối thêm vào .chat/memory.md (1 dòng/ý).
 - Tin của agent chỉ gọi người được @ ở đầu dòng; giao nhiều người thì viết các @ liên tiếp ở đầu dòng. Nhắc tên giữa câu không gọi.
 - Tin của End-User vẫn gọi mọi @ có trong tin; không có @ thì gọi PM.
-- @user là End-User (khách hàng): chỉ @user khi cần họ quyết định hoặc khi xong việc.`
+- @user là End-User (khách hàng): chỉ @user khi cần họ quyết định hoặc khi xong việc.
+- Ảnh trong chat viết dạng ![mô tả](đường dẫn tính từ thư mục dự án). Tin gọi bạn có ảnh thì mở ảnh bằng công cụ đọc file/xem ảnh của bạn trước khi trả lời. Muốn gửi ảnh (ví dụ ảnh chụp màn hình) thì lưu vào .chat/attachments/ rồi chèn ![mô tả](.chat/attachments/tên.png) vào tin.`
 
 const jsonLines = out => out.split('\n').flatMap(l => { try { return [JSON.parse(l)] } catch { return [] } })
 
@@ -572,7 +573,7 @@ function lockConflict(a, b) {
 
 const SNAPSHOT_EXCLUDED = new Set(['.chat/log.jsonl', '.chat/sessions.json', '.chat/worktree-sessions.json', '.chat/locks.json', '.chat/agents.json.tmp',
   '.chat/sessions.json.tmp', '.chat/worktree-sessions.json.tmp', '.chat/locks.json.tmp', '.chat/tasks.json.tmp', '.chat/project.json', '.chat/project.json.tmp',
-  '.chat/worktrees.json', '.chat/worktrees.json.tmp', '.chat/handoff',
+  '.chat/worktrees.json', '.chat/worktrees.json.tmp', '.chat/handoff', '.chat/attachments',
   '.chat/summary.md', '.chat/summary.md.tmp', '.chat/agents.json.pre-sprint-2.bak', '.chat/agents.json.pre-sprint-3.bak'])
 const abortError = () => Object.assign(new Error('Đã hủy kiểm tra file'), { name: 'AbortError' })
 
@@ -1658,6 +1659,47 @@ async function readProjectFile(dir, href, fromFile = null) {
   } finally { await handle?.close().catch(() => {}) }
 }
 
+// ---- images: pasted into the composer as ![ảnh](.chat/attachments/…), shown inline wherever markdown has ![alt](path).
+// Agents get only the path in their prompt and open it with their own tools (claude Read, codex view_image): no argv.
+const IMAGE_LIMIT = 10 * 1024 * 1024
+const IMAGE_MIME = { png: 'image/png', jpg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp' }
+const imageType = b => b.length < 12 ? null // by content, never by the name: SVG and anything else is refused
+  : b[0] === 0x89 && b.toString('latin1', 1, 4) === 'PNG' ? 'png'
+    : b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff ? 'jpg'
+      : b.toString('latin1', 0, 4) === 'GIF8' ? 'gif'
+        : b.toString('latin1', 0, 4) === 'RIFF' && b.toString('latin1', 8, 12) === 'WEBP' ? 'webp' : null
+
+function saveImage(dir, data) {
+  if (!ArrayBuffer.isView(data)) throw fail('INVALID_ARGUMENT', 'Dữ liệu ảnh không hợp lệ')
+  const bytes = Buffer.from(data.buffer, data.byteOffset, data.byteLength)
+  if (bytes.length > IMAGE_LIMIT) throw fail('TOO_LARGE', 'Ảnh vượt quá 10 MiB')
+  const type = imageType(bytes)
+  if (!type) throw fail('UNSUPPORTED', 'Chỉ nhận ảnh PNG, JPEG, GIF hoặc WebP')
+  noLinkBox(dir)
+  const folder = chat(dir, 'attachments')
+  try { rawFs.mkdirSync(folder) } catch (e) { if (e.code !== 'EEXIST') throw e }
+  if (isLink(folder) || !rawFs.statSync(folder).isDirectory()) throw fail('UNSUPPORTED', 'attachments không phải thư mục thường')
+  const name = `img-${randomBytes(6).toString('hex')}.${type}`, { O_WRONLY, O_CREAT, O_EXCL, O_NOFOLLOW } = rawFs.constants
+  const fd = rawFs.openSync(path.join(folder, name), O_WRONLY | O_CREAT | O_EXCL | (O_NOFOLLOW || 0))
+  try { rawFs.writeFileSync(fd, bytes) } finally { rawFs.closeSync(fd) }
+  return `${chatName(dir)}/attachments/${name}`
+}
+
+async function readImage(dir, href, fromFile = null) {
+  let handle
+  try {
+    const info = resolveProjectFile(dir, href, fromFile)
+    handle = await rawFs.promises.open(info.real, rawFs.constants.O_RDONLY | (rawFs.constants.O_NOFOLLOW || 0))
+    if ((await handle.stat()).size > IMAGE_LIMIT) throw fail('TOO_LARGE', 'Ảnh vượt quá 10 MiB')
+    const bytes = await handle.readFile(), type = imageType(bytes)
+    if (!type || bytes.length > IMAGE_LIMIT) throw fail('UNSUPPORTED', 'File không phải ảnh PNG, JPEG, GIF hoặc WebP')
+    return { ok: true, path: info.relative, mime: IMAGE_MIME[type], bytes }
+  } catch (e) {
+    const code = ['INVALID_PATH', 'OUTSIDE_PROJECT', 'NOT_FOUND', 'UNSUPPORTED', 'TOO_LARGE'].includes(e.code) ? e.code : 'IO_ERROR'
+    return { ok: false, code, message: e.message || 'Không đọc được ảnh' }
+  } finally { await handle?.close().catch(() => {}) }
+}
+
 const fmt = msgs => msgs.map(m => `[${m.from}] ${m.text}`).join('\n')
 const scope = agent => {
   const s = normalizeScope(agent, agent.projectDir)
@@ -2186,4 +2228,4 @@ module.exports = { CHAT_DIR, chat, chatName, useBox, boxes, createBox, CLI, acco
   timeoutMinutes, sessionTokenLimit, sessions, setSession, sessionRotationPending, readHandoff, writeHandoff,
   mentions, files, normalizeScope, ownsList, probe, winArg, spawnCli, shimTarget, normalizeAllowedCommands, scopeAllows, scopeLocks, lockConflict, snapshot, changedPaths, promptIndexed, run, runCommand, groupAlive,
   migrateTaskScope, parseTaskDefinitions, taskBoardIndexed, parseTaskStatusBlock, parseRunCommandBlock, parseHandoffBlock, validateTaskChanges,
-  resolveProjectFile, readProjectFile }
+  resolveProjectFile, readProjectFile, saveImage, readImage }

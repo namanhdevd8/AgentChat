@@ -1514,6 +1514,11 @@ ipcMain.handle('readProjectFile', (event, dir, href, fromFile, workspaceId) => {
   const root = knownProject(dir), base = viewerRoot(root, workspaceId, href)
   return core.readProjectFile(base, href, fromFile)
 })
+ipcMain.handle('saveImage', (event, dir, data) => { validSender(event); return apiCall(async () => ({ path: core.saveImage(knownProject(dir), data) })) })
+ipcMain.handle('readImage', (event, dir, href, fromFile, workspaceId) => {
+  validSender(event)
+  return core.readImage(viewerRoot(knownProject(dir), workspaceId, href), href, fromFile)
+})
 ipcMain.handle('watchProject', (event, dir, file, workspaceId) => { validSender(event); return watchProject(dir, file, workspaceId) })
 ipcMain.handle('openFile', async (event, dir, file, workspaceId) => { validSender(event); const error = await shell.openPath(resolveFile(dir, file, workspaceId)); if (error) throw new Error(error) })
 ipcMain.handle('openLink', async (event, dir, href, text = null) => {

@@ -22,6 +22,8 @@ contextBridge.exposeInMainWorld('api', {
   send: (dir, text) => ipcRenderer.invoke('send', dir, text),
   tasks: dir => ipcRenderer.invoke('tasks', dir),
   readProjectFile: (dir, href, fromFile = null, workspaceId = null) => ipcRenderer.invoke('readProjectFile', dir, href, fromFile, workspaceId),
+  saveImage: (dir, data) => ipcRenderer.invoke('saveImage', dir, data),
+  readImage: (dir, href, fromFile = null, workspaceId = null) => ipcRenderer.invoke('readImage', dir, href, fromFile, workspaceId),
   watchProject: (dir, file = null, workspaceId = null) => ipcRenderer.invoke('watchProject', dir, file, workspaceId),
   stop: (dir, name, runId) => ipcRenderer.invoke('stop', dir, name, runId),
   openFile: (dir, file, workspaceId = null) => ipcRenderer.invoke('openFile', dir, file, workspaceId),
