@@ -188,13 +188,31 @@ async function prepareWorkspace(root, agent) {
       record = { id, agent: agent.name, branch, path: cwd, baseSha: probe.sha }
       updateRegistry(root, latest => latest.agents.push(record))
     }
-    const cwd = await verifyWorkspace(root, record), status = (await git(cwd, ['status', '--porcelain=v1', '-z', '--untracked-files=all'])).stdout
-    if (status) throw gitError('DIRTY_WORKSPACE', `Workspace của ${agent.name} có thay đổi chưa được app ghi nhận`)
+    return { cwd: await verifyWorkspace(root, record), workspaceId: record.id, branch: record.branch, worktree: true }
+  })
+}
+
+// When the turn starts, not when it is queued: until then an earlier turn of the same agent may still change the workspace.
+async function startWorkspace(job) {
+  return withGitLock(job.root, async () => {
+    const probe = await repoProbe(job.root), registry = readWorktrees(job.root), record = registry.agents.find(item => item.id === job.workspaceId)
+    if (registry.targetRef !== probe.branch) throw gitError('TARGET_CHANGED', 'Nhánh chính đã đổi ngoài app')
+    if (!record) throw gitError('CONFIG_ERROR', 'Không tìm thấy workspace của agent')
+    const cwd = await verifyWorkspace(job.root, record), files = await workspaceChanges(cwd)
+    // Left by an earlier turn (cut off, failed the audit, or a merge the agent didn't finish). Refusing would block the
+    // agent for good, so they are committed under the same scope rule as an audited turn.
+    if (files.length) {
+      const unmerged = nul((await git(cwd, ['diff', '--name-only', '--diff-filter=U', '-z'])).stdout)
+      if (unmerged.length || files.some(file => isChatPath(file) || !core.scopeAllows(job.scope, file)))
+        throw gitError('DIRTY_WORKSPACE', `Workspace của ${job.name} có thay đổi chưa được app ghi nhận: ${files.slice(0, 5).join(', ')}${files.length > 5 ? '…' : ''}`)
+      await git(cwd, ['add', '--', ...files])
+      await git(cwd, ['-c', 'user.name=Agent Chat', '-c', 'user.email=agent-chat@local', 'commit', '-m', `agent ${job.name}: thay đổi còn lại từ lượt trước`])
+    }
     const head = await gitHead(cwd), behind = await git(cwd, ['merge-base', '--is-ancestor', head, probe.sha]).then(() => true).catch(() => false)
     const ahead = Number((await git(cwd, ['rev-list', '--count', `${probe.sha}..${head}`])).stdout.trim() || 0)
     if (behind && !ahead && head !== probe.sha) await git(cwd, ['merge', '--ff-only', probe.sha])
-    const depsReady = await bootstrapDependencies(root, cwd)
-    return { cwd, workspaceId: record.id, branch: record.branch, worktree: true, baseSha: await gitHead(cwd), depsReady }
+    job.depsReady = await bootstrapDependencies(job.root, cwd)
+    job.baseSha = await gitHead(cwd)
   })
 }
 
@@ -314,7 +332,9 @@ async function commitWorkspace(job, result, changed, auditComplete, outside) {
     const registry = readWorktrees(job.root), record = registry.agents.find(item => item.id === job.workspaceId)
     if (!record) throw gitError('CONFIG_ERROR', 'Không tìm thấy workspace của agent')
     const cwd = await verifyWorkspace(job.root, record), beforeHead = await gitHead(cwd)
-    if (beforeHead !== job.baseSha) throw gitError('TARGET_CHANGED', 'HEAD workspace đã đổi trong lúc agent chạy')
+    // the agent may commit (or merge) by itself; only a rewritten history is refused
+    if (beforeHead !== job.baseSha && !await git(cwd, ['merge-base', '--is-ancestor', job.baseSha, beforeHead]).then(() => true).catch(() => false))
+      throw gitError('TARGET_CHANGED', 'Lịch sử nhánh workspace bị viết lại trong lúc agent chạy')
     const files = await workspaceChanges(cwd)
     if (!auditComplete || outside.length || files.some(file => !changed.includes(file) || isChatPath(file) || !core.scopeAllows(job.scope, file))) {
       if (files.length) throw gitError('SCOPE_AUDIT', 'Không tự commit vì thay đổi chưa qua kiểm tra phạm vi', { files })
@@ -650,10 +670,13 @@ async function ask(dir, agent, hops, special = null, chain = null, trigger = nul
   // An agent that already has a turn waiting to start gets nothing from a second one: that turn builds its prompt
   // from the latest log when it starts. Without this, each extra @ ran a stale turn ("Chưa có tin mới nào gọi …").
   // Checked again right before the push: the awaits below let a second @ for the same agent slip in meanwhile.
+  // what asked for this turn: a user message's seq (so taking that message back can cancel it), anything else 'other'
+  const reason = !special && !retryContext && !grantRequestId && trigger?.from === 'user' && Number.isInteger(trigger.seq) ? trigger.seq : 'other'
   const waitingTurn = () => {
     if (special || retryContext || grantRequestId) return null
     const waiting = jobs.find(job => job.key === runKey(root, agent.name) && !job.finished && job.phase === 'queued' && !job.kind)
     if (waiting && chain && chain.turns > 0) chain.turns-- // merged, so not an extra turn
+    waiting?.reasons.add(reason)
     return waiting
   }
   let waiting = waitingTurn()
@@ -686,7 +709,7 @@ async function ask(dir, agent, hops, special = null, chain = null, trigger = nul
       avatar: { ...agent.avatar } }, scope,
     locks: workspace.worktree ? sharedMetadataLocks(scope, root) : core.scopeLocks(scope, root), label: 'đang xếp hàng…', phase: 'queued', blockedBy: [], stopping: false,
     finished: false, headStarted: false, reserved: false, spawned: false, pgid: null, setupError,
-    controller: new AbortController(), auditController: new AbortController(), timer: null, taskIds, chain, trigger: capturedTrigger,
+    controller: new AbortController(), auditController: new AbortController(), timer: null, taskIds, chain, trigger: capturedTrigger, reasons: new Set([reason]),
     retryContext, ...workspace, ...(special || {}) }
   if ((waiting = waitingTurn())) return waiting
   jobs.push(job)
@@ -825,7 +848,8 @@ function permissionCandidate(job, result) {
 
 async function executeJob(job) {
   let before, metadataBefore, result, paths = [], changed = [], metadataChanged = [], auditComplete = true, workspaceError, handoffError, pendingPermission
-  try {
+  if (job.worktree) try { await startWorkspace(job) } catch (e) { result = { outcome: 'error', text: e.message, usage: zeroUsage() } }
+  if (!result) try {
     before = await core.snapshot(job.cwd || job.root, { signal: job.controller.signal, excludeChat: job.worktree })
     if (job.worktree) metadataBefore = await core.snapshot(job.root, { signal: job.controller.signal, onlyChat: true })
   }
@@ -879,7 +903,7 @@ async function executeJob(job) {
     }
   } else if (result.orphanState) auditComplete = false
 
-  if (job.worktree && !result.orphanState) try {
+  if (job.worktree && job.baseSha && !result.orphanState) try {
     const workspace = await commitWorkspace(job, result, changed, auditComplete, paths)
     if (workspace) result.logExtra = { ...(result.logExtra || {}), workspace }
   } catch (e) { workspaceError = e }
@@ -1507,6 +1531,21 @@ ipcMain.handle('send', async (event, dir, text) => {
   // the message is posted: from here on a failure goes into the chat, never back to the input (resending would duplicate it)
   try { await route(root, msg, 0) } catch (e) { await post(root, 'system', `Chưa gọi được agent: ${e.message}`, { kind: 'route-error' }) }
   scheduleSummary(root).catch(e => console.error(e))
+})
+// Taking a message back: agents get "(tin đã được thu hồi)" in its place from now on, and turns that only this message asked
+// for stop (waiting or running). Turns it set off further down a chain keep going; they see the note in the log.
+ipcMain.handle('retract', (event, dir, seq) => {
+  validSender(event)
+  return apiCall(async () => {
+    const root = knownProject(dir), index = await core.getLogIndex(root)
+    if (!Number.isInteger(seq) || index.records[seq]?.from !== 'user') throw gitError('INVALID_ARGUMENT', 'Chỉ thu hồi được tin của bạn')
+    if (index.retracted.has(seq)) throw gitError('CONFLICT', 'Tin này đã được thu hồi')
+    const [msg] = (await core.logPage(root, { around: seq, limit: 1 })).messages
+    const at = new Date(msg.at).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' })
+    await post(root, 'system', `Tin lúc ${at} của End-User đã được thu hồi; bỏ qua yêu cầu trong tin đó.`, { kind: 'retract', target: seq })
+    for (const job of [...jobs]) if (job.root === root && !job.finished && job.reasons?.delete(seq) && !job.reasons.size) stopJob(job, 'stopped')
+    return { text: msg.text }
+  })
 })
 ipcMain.handle('tasks', (event, dir) => { validSender(event); return core.taskBoardIndexed(knownProject(dir)) })
 ipcMain.handle('readProjectFile', (event, dir, href, fromFile, workspaceId) => {

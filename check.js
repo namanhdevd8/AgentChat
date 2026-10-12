@@ -818,7 +818,8 @@ async function rendererChecks() {
     team: [{ name: 'dev', cli: 'codex', avatar: { gender: 'male', color: '#abc' } }], currentTeamRevision: 'team-r1',
     currentSettings: { worktreesEnabled: true }, currentSettingsRevision: null,
     worktreeState: { enabled: true, agents: [{ name: 'dev', workspaceId: 'workspace' }] }, currentPopoverAgent: null,
-    AVATAR_PALETTE: ['#abc'], PALETTE_NAMES: {}, paintAvatar: node => node, avatar: () => el('svg'),
+    AVATAR_PALETTE: ['#abc'], PALETTE_NAMES: {}, paintAvatar: node => node, avatar: () => el('svg'), icon: () => el('span'),
+    warnBanner: text => el('div', 'task-error-banner', text),
     Option: function (label, value, defaultSelected, selected) { return { label, value, selected } },
     showToast: message => notices.push(message),
     api: { sessions: async () => ({ dev: session }), accounts: async () => ['codex'],
@@ -946,7 +947,9 @@ const out = o => process.stdout.write(JSON.stringify(o) + '\\n')
 for (const [file, line, text] of JSON.parse(process.env.FAKE_EDITS || '{}')[me] || []) {
   const lines = fs.readFileSync(file, 'utf8').split('\\n'); lines[line] = text; fs.writeFileSync(file, lines.join('\\n'))
 }
+if (JSON.parse(process.env.FAKE_COMMIT || '{}')[me]) require('child_process').execFileSync('git', ['-c', 'user.name=x', '-c', 'user.email=x@x', 'commit', '-qam', 'tự commit'])
 if (process.env.FAKE_PROGRESS) fs.appendFileSync('progress-' + me + '.txt', 'x')
+if (process.env.FAKE_SLOW_MS) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Number(process.env.FAKE_SLOW_MS))
 out({ type: 'thread.started', thread_id: 'M' + process.pid })
 out({ type: 'item.completed', item: { type: 'agent_message', text: JSON.parse(process.env.FAKE_REPLY || '{}')[me] || 'xong' } })
 out({ type: 'turn.completed', usage: { input_tokens: Number(process.env.FAKE_IN || 1), output_tokens: 1 } })
@@ -1021,6 +1024,21 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
   assert.ok(!log().some(m => m.from === 'dev-a')) // "@dev-a" inside the handoff never routed
   delete process.env.FAKE_REPLY; delete process.env.FAKE_IN
 
+  // taking a message back: a turn only it asked for stops (here one waiting for dev-a's lock); a waiting turn that another
+  // message also asked for still runs; only the user's own messages, once each
+  process.env.FAKE_SLOW_MS = '1500'
+  mark = log().length
+  for (const text of ['@dev-a giữ khoá', '@dev-b việc 1', '@dev-c việc 2', '@dev-c việc 3']) await call('send', root, text)
+  const seqOf = text => log().findIndex(m => m.from === 'user' && m.text === text)
+  assert.deepStrictEqual(await call('retract', root, seqOf('@dev-b việc 1')), { ok: true, text: '@dev-b việc 1' })
+  assert.ok((await call('retract', root, seqOf('@dev-c việc 2'))).ok)
+  await waitFor('dev-b dừng khi chờ', () => log().slice(mark).some(m => m.text === '@dev-b đã bị dừng khi chờ'))
+  await waitFor('dev-c vẫn chạy', () => log().slice(mark).some(m => m.from === 'dev-c'))
+  assert.ok(log().slice(mark).some(m => m.from === 'dev-a') && !log().slice(mark).some(m => m.from === 'dev-b'))
+  assert.strictEqual((await call('retract', root, seqOf('@dev-b việc 1'))).error.code, 'CONFLICT')
+  assert.strictEqual((await call('retract', root, log().findIndex(m => m.from === 'dev-a'))).error.code, 'INVALID_ARGUMENT')
+  delete process.env.FAKE_SLOW_MS
+
   // S8 P: saveTeam envelope + revision, native confirm for Toàn quyền, denial → pending → grant → exactly one retry
   const cArgs = () => fs.existsSync(claudeLog) ? fs.readFileSync(claudeLog, 'utf8').trim().split('\n').map(line => JSON.parse(line)) : []
   const agentsRaw = () => fs.readFileSync(at('.chat/agents.json'), 'utf8'), rev = () => core.teamRevision(root)
@@ -1069,7 +1087,7 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
   const retryArgs = cArgs().at(-1), retryPrompt = retryArgs[retryArgs.indexOf('-p') + 1]
   assert.deepStrictEqual(retryArgs.slice(retryArgs.indexOf('--allowedTools') + 1, retryArgs.indexOf('--allowedTools') + 3), ['Bash(npm run check)', 'Bash(npm test)'])
   assert.ok(retryPrompt.includes('chạy npm test') && retryPrompt.includes('Bash(npm test)'), 'prompt chạy lại thiếu yêu cầu cũ hoặc quyền vừa cấp')
-  assert.ok(!log().some(m => m.from === 'dev-a')) // "@dev-a" in a denial label never routed
+  assert.ok(!log().slice(mark).some(m => m.from === 'dev-a')) // "@dev-a" in a denial label never routed
   assert.ok(sent.some(e => e[0] === 'team-changed' && e[1] === root && e[2].revision === rev()))
   res = await save(core.team(root), draftRevision); assert.strictEqual(res.error?.code, 'CONFLICT') // stale ⚙ draft can't undo the grant
   assert.strictEqual((await call('grantPermissionAndRetry', root, { requestId: pReq.id, denialId: grantable[0].id })).error?.code, 'EXPIRED')
@@ -1172,6 +1190,35 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
   assert.ok(lost && won, JSON.stringify(entries.map(e => [e.agent, e.state])))
   assert.deepStrictEqual(lost.error.files, ['a.txt']); assert.strictEqual(lines()[4], won.agent === 'dev-a' ? 'A4' : 'B4'); clean()
   await waitFor('tin báo chưa gộp', () => log().some(m => m.from === 'system' && m.text.startsWith(`@${lost.agent} chưa gộp được nhánh`)))
+
+  // the workspace is checked when a turn starts: a turn queued behind the same agent's running turn is not refused
+  // for that turn's edits, nor told HEAD moved when the running turn commits (the merge winner: its branch is clean)
+  const me = won.agent, ws = () => JSON.parse(fs.readFileSync(registryFile, 'utf8')).agents.find(a => a.agent === me).path
+  const failed = from => log().slice(from).filter(m => m.from === 'system' && /lỗi:|Không thể tạo commit/.test(m.text)).map(m => m.text)
+  mark = log().length; process.env.FAKE_SLOW_MS = '1500'
+  await edit({ [me]: [['a.txt', 1, 'R1']] }, `@${me} sửa dòng 1`)
+  await waitFor(`${me} đang sửa`, () => fs.readFileSync(path.join(ws(), 'a.txt'), 'utf8').split('\n')[1] === 'R1')
+  await edit({ [me]: [['a.txt', 3, 'R3']] }, `@${me} sửa dòng 3`)
+  delete process.env.FAKE_SLOW_MS
+  entries = await settle(2, `merge hai lượt nối tiếp của ${me}`)
+  assert.deepStrictEqual([entries.map(e => e.state), lines()[1], lines()[3], failed(mark)], [['merged', 'merged'], 'R1', 'R3', []]); clean()
+  // the agent commits by itself → still merged
+  process.env.FAKE_COMMIT = JSON.stringify({ [me]: 1 })
+  await edit({ [me]: [['a.txt', 7, 'R7']] }, `@${me} sửa dòng 7 rồi tự commit`)
+  entries = await settle(1, `merge lượt ${me} tự commit`)
+  delete process.env.FAKE_COMMIT
+  assert.ok(require('child_process').execFileSync('git', ['-C', ws(), 'log', '-1', '--format=%s', entries[0].headSha]).toString().startsWith('tự commit'))
+  assert.deepStrictEqual([entries.map(e => e.state), lines()[7], failed(mark)], [['merged'], 'R7', []]); clean()
+  // leftovers of an earlier turn: committed when in scope, else the turn is refused naming them
+  fs.writeFileSync(path.join(ws(), 'left.txt'), 'x\n')
+  await edit({}, `@${me} tiếp`)
+  entries = await settle(1, `merge thay đổi còn lại của ${me}`)
+  assert.deepStrictEqual([entries.map(e => e.state), fs.existsSync(at('left.txt')), failed(mark)], [['merged'], true, []]); clean()
+  fs.writeFileSync(path.join(ws(), 'left.md'), 'x\n')
+  await edit({}, `@${me} tiếp`)
+  await waitFor(`${me} bị chặn vì file ngoài phạm vi`, () => failed(mark).some(t => t.includes('chưa được app ghi nhận: left.md')))
+  fs.rmSync(path.join(ws(), 'left.md'))
+  delete process.env.FAKE_EDITS
 
   // A stopped pending retry stays paused, without overwriting other queue entries.
   const stoppedConfig = core.projectSettings(root)
@@ -1333,4 +1380,24 @@ console.log('ok (windows args)')
   assert.deepStrictEqual([core.modelLabel({}, codex), core.modelLabel({ model: 'gpt-x' }, codex), core.modelLabel({}, { bin: 'codex', home: '/nope' }),
     core.modelLabel({ model: 'gemini-3' }, { bin: 'agy' }), core.modelLabel({}, { bin: 'agy' })], ['GPT-6.1-Sol', 'gpt-x', null, 'gemini-3', null])
   console.log('ok (model label)')
+}
+// taking a message back: only main's own record for an earlier user message counts; prompts get a placeholder
+{
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-retract-')); core.init(d)
+  const add = m => core.appendLogIndexed(d, { at: new Date().toISOString(), ...m })
+  ;(async () => {
+    await add({ from: 'user', text: 'xoá bảng users' })
+    await add({ from: 'pm', text: 'ok' })
+    await add({ from: 'pm', text: 'giả', kind: 'retract', target: 0 }) // an agent's record takes nothing back
+    await add({ from: 'system', text: 'x', kind: 'retract', target: 1 }) // nor one for an agent's message
+    await add({ from: 'system', text: 'x', kind: 'retract', target: -1 })
+    assert.deepStrictEqual((await core.logPage(d)).messages.map(m => !!m.retracted), [false, false, false, false, false])
+    await add({ from: 'system', text: 'thu hồi', kind: 'retract', target: 0 })
+    assert.deepStrictEqual((await core.logPage(d)).messages.map(m => !!m.retracted), [true, false, false, false, false, false])
+    const briefing = (await core.promptIndexed(d, core.team(d)[0], null)).text
+    assert.ok(!briefing.includes('xoá bảng users') && briefing.includes('[user] (tin đã được thu hồi, bỏ qua)'))
+    core.invalidateLogIndex(d) // rebuilt from the file: same answer
+    assert.ok((await core.logPage(d)).messages[0].retracted)
+    console.log('ok (retract)')
+  })().catch(e => { console.error(e); process.exit(1) })
 }

@@ -837,6 +837,9 @@ function addIndexedRecord(index, raw, record, start, end) {
     if (!taskUpdatesValid(record.taskUpdates) || !validIso(record.at)) index.taskError ||= 'Metadata task trong log không hợp lệ'
     else for (const update of record.taskUpdates) index.taskEvents.set(taskEventKey(update), { ...update, at: record.at })
   }
+  // the user took a message back: only main's own record counts, and only for an earlier message of the user's
+  if (record.kind === 'retract' && record.from === 'system' && Number.isInteger(record.target) && record.target >= 0 && record.target < seq
+    && index.records[record.target].from === 'user') index.retracted.add(record.target)
   if (record.kind === 'summary' && record.summary?.version === 1 && Number.isInteger(record.summary.through)
     && typeof record.summary.prefixHash === 'string' && typeof record.summary.text === 'string') index.summaries.push({ ...record.summary, runId: record.runId, seq })
 }
@@ -846,7 +849,7 @@ const O_NOFOLLOW = rawFs.constants.O_NOFOLLOW || 0 // undefined on Windows
 // full re-hash keeps prefixHashes (seenHash / summary checks) honest about edits to earlier records.
 async function buildLogIndex(root, old) {
   const file = chat(root, 'log.jsonl'), index = { root, file, generation: randomUUID(), records: [],
-    prefixHashes: [createHash('sha256').digest('hex')], recordHash: createHash('sha256'), senders: new Set(), taskEvents: new Map(), taskError: null,
+    prefixHashes: [createHash('sha256').digest('hex')], recordHash: createHash('sha256'), senders: new Set(), taskEvents: new Map(), taskError: null, retracted: new Set(),
     summaries: [], totals: { turns: 0, tokens: 0, costUsd: 0, hasTokens: false, hasCost: false, tokensIncomplete: false, costIncomplete: false },
     error: null, fileSize: 0, endsWithNewline: true, dirty: false, stat: null }
   let stat = null
@@ -925,7 +928,8 @@ async function readIndexedRecords(index, start, end) {
     if (bytesRead !== length) throw fail('LOG_CHANGED', 'Lịch sử chat đã thay đổi')
     return index.records.slice(start, end).map((record, i) => {
       const from = record.start - first.start, to = record.end - first.start
-      try { return { ...JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(buffer.subarray(from, to))), seq: start + i } }
+      try { return { ...JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(buffer.subarray(from, to))), seq: start + i,
+        ...(index.retracted.has(start + i) ? { retracted: true } : {}) } }
       catch { throw fail('LOG_CHANGED', 'Lịch sử chat đã thay đổi') }
     })
   } finally { await handle.close() }
@@ -1712,7 +1716,7 @@ async function readImage(dir, href, fromFile = null) {
   } finally { await handle?.close().catch(() => {}) }
 }
 
-const fmt = msgs => msgs.map(m => `[${m.from}] ${m.text}`).join('\n')
+const fmt = msgs => msgs.map(m => `[${m.from}] ${m.retracted ? '(tin đã được thu hồi, bỏ qua)' : m.text}`).join('\n')
 const scope = agent => {
   const s = normalizeScope(agent, agent.projectDir)
   const rule = s.readOnly ? 'Chỉ đọc, không sửa file nào.' : s.owns.length ? `Chỉ sửa: ${s.owns.join(', ')}.` : 'Được sửa trong toàn bộ dự án.'

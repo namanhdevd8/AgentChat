@@ -1,5 +1,14 @@
 # Các thay đổi
 
+## 0.6.0 · 2026-10-12
+
+### Mới
+- Thu hồi tin của bạn: rê chuột lên tin, bấm nút thu hồi hai lần. Agent không còn thấy nội dung tin; lượt chỉ do tin đó gọi (đang chờ hay đang chạy) bị dừng. Nếu ô soạn đang trống, nội dung tin được trả lại để sửa rồi gửi lại.
+- Bộ icon SVG riêng thay cho emoji (⚙, 🌿, ⏱, ⚠️, 🚫, ✕…), cùng nét vẽ với giao diện app.
+
+### Sửa lỗi
+- Agent không còn bị chặn mãi với lỗi "Workspace có thay đổi chưa được app ghi nhận". App kiểm tra workspace khi lượt bắt đầu chạy thay vì lúc xếp hàng. App cũng chấp nhận việc agent tự commit hoặc tự gộp nhánh, và tự commit thay đổi còn sót từ lượt trước nếu nằm trong phạm vi của agent.
+
 ## 0.5.0 · 2026-10-12
 
 ### Mới

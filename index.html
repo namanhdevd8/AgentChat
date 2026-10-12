@@ -41,7 +41,10 @@
   button:disabled { cursor: not-allowed; opacity: .5; }
   svg { width: 16px; height: 16px; flex: none; }
   :focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-  [hidden] { display: none !important; } /* class rules below set display, which would otherwise override the hidden attribute */
+  [hidden] { display: none !important; }
+  .ico { display: inline-grid; place-items: center; flex: none; width: 1.15em; height: 1.15em; vertical-align: -.2em; }
+  .ico svg { width: 100%; height: 100%; }
+  .ico.lead { margin-right: .4em; } /* class rules below set display, which would otherwise override the hidden attribute */
   .muted { color: var(--muted); }
   .box { border: 1px solid var(--line); border-radius: 8px; }
   .press { transition: background-color .12s, border-color .12s, color .12s; }
@@ -55,6 +58,7 @@
   }
   .av { width: 32px; height: 32px; }
   .sq { width: 20px; height: 20px; font-size: 9px; border-radius: 5px; }
+  .sq > .ico { width: 12px; height: 12px; }
 
   /* buttons */
   .btn { padding: 6px 12px; background: var(--surface); font-size: 13px; font-weight: 500; line-height: 1.3; border-radius: 6px; }
@@ -155,6 +159,12 @@
   .row.me { grid-template-columns: minmax(0, 1fr); }
   .row.me > :not(.text) { display: none; }
   .row.me .text { grid-column: 1; justify-self: end; max-width: min(80%, 640px); margin-top: 4px; padding: 9px 14px; background: var(--hover); border-radius: 12px; }
+  .row.me .text { position: relative; }
+  .row.me .text.retracted { color: var(--muted); font-style: italic; }
+  .retract { position: absolute; right: calc(100% + 6px); top: 50%; transform: translateY(-50%); display: inline-flex; align-items: center; height: 24px; padding: 0 6px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--muted); font-size: 12px; white-space: nowrap; opacity: 0; cursor: pointer; }
+  .row.me:hover .retract, .retract:focus-visible, .retract.armed { opacity: 1; }
+  .retract:hover { background: var(--hover); color: var(--ink); }
+  .retract.armed { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 35%, var(--line)); }
   .usage { margin-top: 4px; font: 11.5px/1.4 var(--mono); color: var(--faint); font-variant-numeric: tabular-nums; }
 
   /* system event: one small grey line between hairlines */
@@ -238,7 +248,7 @@
   #attachments .attach { position: relative; }
   #attachments img { display: block; width: 64px; height: 64px; object-fit: cover; border: 1px solid var(--line); border-radius: 6px; }
   #attachments img.zoomable { cursor: zoom-in; }
-  #attachments .attach-x { position: absolute; top: -6px; right: -6px; width: 20px; height: 20px; padding: 0; border: 1px solid var(--line); border-radius: 50%; background: var(--surface); color: var(--ink); font: 14px/1 var(--sans); cursor: pointer; }
+  #attachments .attach-x { position: absolute; top: -6px; right: -6px; width: 20px; height: 20px; display: grid; place-items: center; padding: 0; border: 1px solid var(--line); border-radius: 50%; background: var(--surface); color: var(--ink); font-size: 11px; cursor: pointer; }
   #attachments .attach-x:hover { background: var(--hover); }
   form textarea { flex: 1; resize: none; min-height: 44px; height: 44px; padding: 11px 0; border: 0; outline: 0; background: none; color: inherit; font: inherit; }
   form textarea:focus-visible { outline: none; }
@@ -287,7 +297,7 @@
   .need-head { display: flex; align-items: center; gap: 6px; font-size: 12.5px; min-width: 0; }
   .need-head b { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .need-head time { font-size: 11.5px; color: var(--faint); font-variant-numeric: tabular-nums; }
-  .need-x { margin-left: auto; flex: none; width: 20px; height: 20px; padding: 0; border: 0; border-radius: 4px; background: none; color: var(--faint); font-size: 11px; }
+  .need-x { margin-left: auto; flex: none; width: 20px; height: 20px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 4px; background: none; color: var(--faint); font-size: 11px; }
   .need-x:hover { background: var(--hover); color: var(--ink); }
   .need-text { padding: 0; border: 0; background: none; text-align: left; font-size: 13px; line-height: 1.45; overflow-wrap: anywhere;
     display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
@@ -373,7 +383,7 @@
   .settings-nav-icon { width: 18px; display: grid; place-items: center; flex: none; font-size: 13px; }
   .settings-nav-av { width: 20px; height: 20px; font-size: 8.5px; border-radius: 5px; }
   .settings-nav-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
-  .settings-nav-warn { font-size: 12px; flex: none; }
+  .settings-nav-warn { flex: none; margin-left: auto; color: var(--danger); }
 
   .settings-content { overflow-y: auto; padding: 20px; display: flex; flex-direction: column; min-height: 0; gap: 16px; }
   .settings-pane { display: flex; flex-direction: column; gap: 16px; }
@@ -546,7 +556,7 @@
   <div id="log-error-banner" class="log-error-banner box" hidden></div>
   <div id="log"><div id="empty"><div class="box"><img src="build/icon.svg" alt=""><b>Chưa mở không gian nào</b>Bấm “Không gian mới” và chọn folder dự án để bắt đầu làm việc với nhóm agent.</div></div></div>
   <button id="jump-latest" class="jump-latest box press" type="button" hidden>
-    <span>↓ Về tin mới nhất</span>
+    <span><i data-icon="down" class="lead"></i>Về tin mới nhất</span>
     <span id="jump-latest-badge" class="badge" hidden>0</span>
   </button>
   <div id="typing" aria-live="polite"></div>
@@ -570,7 +580,7 @@
     <div class="sec-head">
       <h3>Bảng task</h3>
       <span id="tasks-count" class="sec-count"></span>
-      <button id="reloadTasks" class="box press icon sm" title="Tải lại bảng task" type="button">↻</button>
+      <button id="reloadTasks" class="box press icon sm" title="Tải lại bảng task" type="button"><i data-icon="refresh"></i></button>
     </div>
     <div class="task-progress" hidden><i id="tasks-bar"></i></div>
     <div id="task-error" class="task-error-banner" hidden></div>
@@ -597,15 +607,15 @@
       <div class="settings-nav-section">
         <div class="settings-nav-title">Dự án</div>
         <button type="button" id="tab-general" class="settings-nav-item active" data-tab="general">
-          <span class="settings-nav-icon">⚙</span>
+          <span class="settings-nav-icon"><i data-icon="sliders"></i></span>
           <span class="settings-nav-label">Chung</span>
         </button>
         <button type="button" id="tab-worktree" class="settings-nav-item" data-tab="worktree">
-          <span class="settings-nav-icon">🌿</span>
+          <span class="settings-nav-icon"><i data-icon="branch"></i></span>
           <span class="settings-nav-label">Worktree &amp; Git</span>
         </button>
         <button type="button" id="tab-limits" class="settings-nav-item" data-tab="limits">
-          <span class="settings-nav-icon">⏱</span>
+          <span class="settings-nav-icon"><i data-icon="gauge"></i></span>
           <span class="settings-nav-label">Giới hạn &amp; Chi phí</span>
         </button>
       </div>
@@ -613,7 +623,7 @@
       <div class="settings-nav-section">
         <div class="settings-nav-title settings-nav-agent-head">
           <span>Thành viên</span>
-          <button type="button" id="sidebar-add-btn" class="settings-add-btn press" title="Thêm agent mới">+</button>
+          <button type="button" id="sidebar-add-btn" class="settings-add-btn press" title="Thêm agent mới"><i data-icon="plus"></i></button>
         </div>
         <div id="settings-agent-nav" class="settings-agent-nav"></div>
       </div>

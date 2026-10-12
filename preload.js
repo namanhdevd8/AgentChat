@@ -20,6 +20,7 @@ contextBridge.exposeInMainWorld('api', {
   files: dir => ipcRenderer.invoke('files', dir),
   continueChain: (dir, request) => ipcRenderer.invoke('continueChain', dir, request),
   send: (dir, text) => ipcRenderer.invoke('send', dir, text),
+  retract: (dir, seq) => ipcRenderer.invoke('retract', dir, seq),
   tasks: dir => ipcRenderer.invoke('tasks', dir),
   readProjectFile: (dir, href, fromFile = null, workspaceId = null) => ipcRenderer.invoke('readProjectFile', dir, href, fromFile, workspaceId),
   saveImage: (dir, data) => ipcRenderer.invoke('saveImage', dir, data),

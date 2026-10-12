@@ -196,6 +196,28 @@ function validateAllowTools(tools) {
 }
 
 const hhmm = iso => new Date(iso).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' })
+// the app's icon set: 24×24 strokes in currentColor, drawn like the header's; "lead" = an icon followed by text
+const ICONS = {
+  sliders: '<path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/>',
+  branch: '<circle cx="6" cy="5.5" r="2.2"/><circle cx="6" cy="18.5" r="2.2"/><circle cx="18" cy="7.5" r="2.2"/><path d="M6 7.7v8.6M18 9.7V11a7.5 7.5 0 0 1-7.5 7.5H8.2"/>',
+  gauge: '<path d="M4.6 18a8.5 8.5 0 1 1 14.8 0"/><path d="m12 13.8 3.6-3.6"/><circle cx="12" cy="13.8" r="1"/>',
+  warn: '<path d="M12 4 2.8 19.5h18.4Z"/><path d="M12 10v4M12 17h.01"/>',
+  ban: '<circle cx="12" cy="12" r="8.5"/><path d="m6 6 12 12"/>',
+  close: '<path d="m6 6 12 12M18 6 6 18"/>',
+  check: '<path d="m5 12.5 4.5 4.5L19 7.5"/>',
+  down: '<path d="M12 5v14M6 13l6 6 6-6"/>',
+  refresh: '<path d="M20 12a8 8 0 1 1-2.34-5.66L20 8.5"/><path d="M20 4v4.5h-4.5"/>',
+  plus: '<path d="M12 5v14M5 12h14"/>',
+  pause: '<path d="M9 6v12M15 6v12"/>',
+  undo: '<path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/>',
+}
+const icon = (name, cls = '') => {
+  const s = el('span', ('ico ' + cls).trim())
+  s.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name]}</svg>`
+  return s
+}
+const warnBanner = text => { const b = el('div', 'task-error-banner'); b.append(icon('warn', 'lead'), text); return b }
+for (const node of document.querySelectorAll('i[data-icon]')) node.replaceWith(icon(node.dataset.icon, node.className)) // static spots in index.html
 const fileIcon = () => { const s = document.createElementNS('http://www.w3.org/2000/svg', 'svg'); s.setAttribute('viewBox', '0 0 24 24'); s.innerHTML = '<path d="M6 2h8l5 5v15H6z M14 2v5h5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round"/>'; return s }
 let box = '.chat' // which box of the folder `dir` is shown (.chat, .chat2…); main keeps the same one open
 let dir = null, team = [], currentTeamRevision = null, permissionRequests = [], last = null
@@ -357,7 +379,7 @@ async function openProject(d, c = d === dir ? box : null) {
   syncActive(res.active)
   renderOrphanLocks()
 
-  $('#log-error-banner').textContent = history.error ? `⚠️ Lỗi định dạng log: ${history.error.message || history.error.code}` : ''
+  $('#log-error-banner').replaceChildren(...history.error ? [icon('warn', 'lead'), `Lỗi định dạng log: ${history.error.message || history.error.code}`] : [])
   $('#log-error-banner').hidden = !history.error
 
   for (const ev of pendingEvents) {
@@ -397,6 +419,7 @@ async function openProject(d, c = d === dir ? box : null) {
     }
   }
   pendingEvents = []
+  for (const r of messages) if (r.kind === 'retract') { const target = messages.find(x => x.seq === r.target); if (target) target.retracted = true } // taken back while opening
 
   last = null
   $('#log').replaceChildren(msgFragment(messages))
@@ -536,7 +559,7 @@ function renderEditors() {
     btn.append(navAv, navLabel)
 
     if (a.scopeNeedsReview) {
-      const warn = el('span', 'settings-nav-warn', '⚠️')
+      const warn = icon('warn', 'settings-nav-warn')
       warn.title = 'Phạm vi cũ cần xác nhận'
       btn.append(warn)
     }
@@ -666,8 +689,7 @@ function renderEditors() {
     permGroup.append(modeLab)
 
     if (a.permissions.mode === 'full') {
-      const fullWarn = el('div', 'task-error-banner')
-      fullWarn.textContent = '⚠️ Cảnh báo Toàn quyền: Agent có thể chạy lệnh, dùng mạng và tác động tới file ngoài dự án theo quyền tài khoản máy. Phạm vi file của app không phải sandbox bảo vệ hệ điều hành.'
+      const fullWarn = warnBanner('Cảnh báo Toàn quyền: Agent có thể chạy lệnh, dùng mạng và tác động tới file ngoài dự án theo quyền tài khoản máy. Phạm vi file của app không phải sandbox bảo vệ hệ điều hành.')
       permGroup.append(fullWarn)
 
       if (isCodex) {
@@ -744,17 +766,17 @@ function renderEditors() {
     permGroup.append(cmdLab)
 
     if (a.permissionConfigError) {
-      const permErr = el('div', 'task-error-banner', `⚠️ Lỗi cấu hình quyền: ${a.permissionConfigError}`)
+      const permErr = warnBanner(`Lỗi cấu hình quyền: ${a.permissionConfigError}`)
       permGroup.append(permErr)
     }
     if (a.commandConfigError) {
-      const cmdErr = el('div', 'task-error-banner', `⚠️ Lỗi cấu hình lệnh: ${a.commandConfigError}`)
+      const cmdErr = warnBanner(`Lỗi cấu hình lệnh: ${a.commandConfigError}`)
       permGroup.append(cmdErr)
     }
 
     let sessErr = null
     if (a.sessionConfigError) {
-      sessErr = el('div', 'task-error-banner', `⚠️ Lỗi cấu hình xoay phiên: ${a.sessionConfigError}`)
+      sessErr = warnBanner(`Lỗi cấu hình xoay phiên: ${a.sessionConfigError}`)
     }
 
     const m = modelsOf[a.cli], models = m?.models || []
@@ -844,7 +866,9 @@ $('#probe').onclick = async () => {
     if (!res?.ok) { out.replaceChildren(el('div', 'probe-row bad', res?.error?.message || 'Không kiểm tra được')); return }
     out.replaceChildren(...res.results.map(r => {
       const row = el('div', 'probe-row ' + (r.ok ? 'good' : 'bad'))
-      row.append(el('b', '', `${r.ok ? '✓' : '✗'} @${r.name}`),
+      const name = el('b')
+      name.append(icon(r.ok ? 'check' : 'close', 'lead'), `@${r.name}`)
+      row.append(name,
         el('span', '', `${r.cli}${r.model ? ' · ' + r.model : ''} · ${(r.ms / 1000).toFixed(1)} giây${r.ok ? ' · trả lời "' + r.text + '"' : ''}`))
       if (!r.ok) row.append(el('div', 'probe-err', r.error))
       return row
@@ -1394,6 +1418,35 @@ function withPreservedScroll(fn) {
   }
 }
 
+// two clicks: taking a message back may stop agents already working on it. The text goes back into an empty composer.
+function retractButton(m) {
+  const b = el('button', 'retract'), d = dir
+  let armed = null
+  const reset = () => { clearTimeout(armed); armed = null; b.classList.remove('armed'); b.replaceChildren(icon('undo')) }
+  b.type = 'button'
+  b.title = 'Thu hồi tin này: agent bỏ qua yêu cầu trong tin, lượt chỉ do tin này gọi sẽ dừng'
+  b.setAttribute('aria-label', 'Thu hồi tin này')
+  b.append(icon('undo'))
+  b.onclick = async () => {
+    if (!armed) {
+      b.classList.add('armed')
+      b.replaceChildren(icon('undo', 'lead'), 'Thu hồi?')
+      armed = setTimeout(reset, 4000)
+      return
+    }
+    reset()
+    b.disabled = true
+    const res = await api.retract(d, m.seq).catch(err => ({ ok: false, error: { message: err.message } }))
+    if (!res.ok) { b.disabled = false; return showToast(res.error.message.replace(/^.*?Error: /, '')) }
+    if (d === dir && !$('#input').value.trim() && !composerImages.length) restoreComposer(res.text)
+  }
+  return b
+}
+function markRetracted(seq) {
+  const body = document.querySelector(`#log [data-seq="${seq}"] .text`)
+  if (body) { body.className = 'text retracted'; body.replaceChildren('Bạn đã thu hồi tin này') }
+}
+
 function createMsgElement(m) {
   const usage = usageEl(m.usage)
   let node = null
@@ -1430,7 +1483,7 @@ function createMsgElement(m) {
     const card = el('div', 'perm-denied-card')
 
     const hdr = el('div', 'perm-denied-hdr')
-    hdr.append('🚫 CLI báo từ chối quyền của @', el('span', '', m.agent || 'agent'))
+    hdr.append(icon('ban', 'lead'), 'CLI báo từ chối quyền của @', el('span', '', m.agent || 'agent'))
     card.append(hdr)
 
     if (m.text) {
@@ -1573,9 +1626,10 @@ function createMsgElement(m) {
       row.append(avatar(agent || m.from), meta)
       row.firstChild.style.gridRow = 'span 2'
     }
-    const body = el('div', 'text')
-    body.append(renderMarkdown(m.text, { dir, fromFile: null, workspace: m.workspace || null }))
+    const body = el('div', m.retracted ? 'text retracted' : 'text', m.retracted ? 'Bạn đã thu hồi tin này' : null)
+    if (!m.retracted) body.append(renderMarkdown(m.text, { dir, fromFile: null, workspace: m.workspace || null }))
     if (usage) body.append(usage)
+    if (m.from === 'user' && !m.retracted && m.seq != null) body.append(retractButton(m))
     row.append(body)
     node = row
   }
@@ -1630,7 +1684,7 @@ function renderLoadedPage(page, mode = 'replace') {
   if (mode !== 'append') logHasBefore = page.hasBefore
   if (mode !== 'prepend') logHasAfter = page.hasAfter || page.end <= newestLiveSeq
   if (page.error) {
-    $('#log-error-banner').textContent = `⚠️ Lỗi log: ${page.error.message}`
+    $('#log-error-banner').replaceChildren(icon('warn', 'lead'), `Lỗi log: ${page.error.message}`)
     $('#log-error-banner').hidden = false
   } else {
     $('#log-error-banner').hidden = true
@@ -2391,7 +2445,7 @@ function updateMemberPopoverContent(agent) {
   }
 
   if (agent.scopeNeedsReview) {
-    const warn = el('div', 'task-error-banner', '⚠️ Cần xác nhận phạm vi trong Cài đặt')
+    const warn = warnBanner('Cần xác nhận phạm vi trong Cài đặt')
     pop.append(warn)
   }
 
@@ -2785,15 +2839,18 @@ function renderNeeds() {
   $('#needs').replaceChildren(...items.map(item => {
     const card = el('div', 'need')
     const head = el('div', 'need-head')
-    head.append(item.kind === 'chain' ? el('span', 'sq', '‖') : avatar(item.from, 'sq'),
+    const paused = el('span', 'sq')
+    paused.append(icon('pause'))
+    head.append(item.kind === 'chain' ? paused : avatar(item.from, 'sq'),
       el('b', '', item.kind === 'chain' ? 'Chuỗi tạm dừng' : item.kind === 'perm' ? `@${item.from} cần quyền` : `@${item.from}`))
     if (item.at) head.append(el('time', '', hhmm(item.at)))
     if (item.kind !== 'perm') { // a permission request leaves once granted or dropped
-      const hide = needButton('✕', () => needAction(hide, async () => {
+      const hide = needButton('', () => needAction(hide, async () => {
         const res = await api.dismissNeed(dir, `${item.seq}:${item.at}`)
         if (res.ok) { needs = res.items; renderNeeds() }
         return res
       }), 'need-x')
+      hide.append(icon('close'))
       hide.title = 'Đã xem, ẩn khỏi danh sách'
       hide.setAttribute('aria-label', 'Ẩn mục này')
       head.append(hide)
@@ -3029,7 +3086,8 @@ function setComposerImages(list) {
   const log = $('#log'), atEnd = log.scrollHeight - log.clientHeight - log.scrollTop <= 48, strip = $('#attachments')
   composerImages = list
   strip.replaceChildren(...list.map((file, i) => {
-    const img = el('img'), remove = el('button', 'attach-x', '×')
+    const img = el('img'), remove = el('button', 'attach-x')
+    remove.append(icon('close'))
     img.dataset.src = file
     img.alt = 'ảnh'
     remove.type = 'button'
@@ -3043,6 +3101,14 @@ function setComposerImages(list) {
   strip.hidden = !list.length
   loadImages(strip, { dir })
   if (atEnd && !logHasAfter) log.scrollTop = log.scrollHeight // the strip takes height from the log: keep the end in view
+}
+function restoreComposer(text) { // image lines become thumbnails again
+  const images = [], kept = []
+  for (const line of String(text).split('\n')) { const image = /^!\[ảnh\]\(([^)\s]+)\)$/.exec(line); if (image) images.push(image[1]); else kept.push(line) }
+  $('#input').value = kept.join('\n').trim()
+  setComposerImages(images)
+  resizeInput()
+  $('#input').focus()
 }
 const imageFiles = list => [...(list || [])].filter(file => /^image\/(png|jpeg|gif|webp)$/.test(file.type))
 async function attachImages(files) {
@@ -3347,6 +3413,7 @@ api.on('message', (d, m, meta) => {
     // line up and paging/search with the old generation fail, so start over from the new log
     if (meta.generation !== logGeneration) return openProject(dir)
     if (!firstSeen(meta.generation, m.seq)) return
+    if (m.kind === 'retract') markRetracted(m.target)
     if (need || m.from === 'user' || m.kind === 'chain-continue') refreshNeeds()
     newestLiveSeq = Math.max(newestLiveSeq, m.seq)
     if (meta.totals) currentTotals = meta.totals
@@ -3481,7 +3548,7 @@ api.on('team-changed', (d, data) => {
       renderTeam()
     }
     if ($('#settings').open && !savingTeam) {
-      $('#err').textContent = '⚠️ Cấu hình thành viên đã bị thay đổi bên ngoài. Hãy mở lại Cài đặt trước khi lưu.'
+      $('#err').replaceChildren(icon('warn', 'lead'), 'Cấu hình thành viên đã bị thay đổi bên ngoài. Hãy mở lại Cài đặt trước khi lưu.')
     }
   }
 })
