@@ -1567,7 +1567,8 @@ function createMsgElement(m) {
       const meta = el('div', 'meta')
       meta.append(el('b', '', m.from === 'user' ? 'Bạn' : '@' + m.from))
       const agent = team.find(a => a.name === m.from)
-      if (agent) meta.append(el('span', 'cli', agent.cli))
+      const cli = m.cli || agent?.cli // what the turn ran on; older messages have no model
+      if (cli) meta.append(el('span', 'cli', m.model ? `${cli} · ${m.model}` : cli))
       meta.append(el('time', '', hhmm(m.at)))
       row.append(avatar(agent || m.from), meta)
       row.firstChild.style.gridRow = 'span 2'

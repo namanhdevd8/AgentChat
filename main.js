@@ -559,7 +559,7 @@ async function terminal(job, result, waiting = false) {
     : result.outcome === 'timeout' ? `@${job.name} quá giờ${waiting ? ' khi chờ khóa' : ''}`
       : result.outcome === 'error' ? `@${job.name} lỗi: ${result.text}` : result.text
   const msg = await post(job.dir, result.outcome === 'success' ? job.name : 'system', text,
-    { runId: job.runId, agent: job.name, cli: job.agent.cli, outcome: result.outcome, usage: result.usage,
+    { runId: job.runId, agent: job.name, cli: job.agent.cli, ...(result.model ? { model: result.model } : {}), outcome: result.outcome, usage: result.usage,
       ...(result.taskUpdates?.length ? { taskUpdates: result.taskUpdates } : {}),
       ...(result.commandResults?.length ? { commandResults: result.commandResults } : {}), ...(result.logExtra || {}) },
     result.taskChanges ? { taskChanges: result.taskChanges, actor: job.name } : {})

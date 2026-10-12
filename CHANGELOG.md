@@ -1,5 +1,10 @@
 # Các thay đổi
 
+## 0.5.0 · 2026-10-12
+
+### Mới
+- Dòng tên trên mỗi tin của agent hiện cả model đã chạy lượt đó, ví dụ `claude · opus-5-5`, `codex2 · GPT-6.1-Sol`. Claude báo đúng model thật, kể cả khi để Mặc định hoặc chọn tên tắt như opus; Codex lấy model đã chọn hoặc model mặc định trong cấu hình của tài khoản; agy chỉ hiện khi bạn chọn model trong ⚙.
+
 ## 0.4.0 · 2026-10-12
 
 ### Mới

@@ -1321,3 +1321,16 @@ console.log('ok (windows args)')
       console.log('ok (images)')
     }).catch(e => { console.error(e); process.exit(1) })
 }
+// the model a turn ran on: claude's init event names it; codex from -m or config.toml, named like its models_cache
+{
+  const r = core.CLI.claude.parse('{"type":"system","subtype":"init","session_id":"S","model":"claude-opus-5-5"}\n{"type":"result","subtype":"success","result":"ok","session_id":"S"}')
+  assert.strictEqual(r.model, 'claude-opus-5-5')
+  assert.strictEqual(core.modelLabel({ model: 'opus' }, { bin: 'claude' }, r.model), 'opus-5-5')
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-home-'))
+  fs.writeFileSync(path.join(home, 'config.toml'), 'model = "gpt-6.1-sol"\n[profiles.x]\nmodel = "other"\n')
+  fs.writeFileSync(path.join(home, 'models_cache.json'), JSON.stringify({ models: [{ slug: 'gpt-6.1-sol', display_name: 'GPT-6.1-Sol' }] }))
+  const codex = { bin: 'codex', home }
+  assert.deepStrictEqual([core.modelLabel({}, codex), core.modelLabel({ model: 'gpt-x' }, codex), core.modelLabel({}, { bin: 'codex', home: '/nope' }),
+    core.modelLabel({ model: 'gemini-3' }, { bin: 'agy' }), core.modelLabel({}, { bin: 'agy' })], ['GPT-6.1-Sol', 'gpt-x', null, 'gemini-3', null])
+  console.log('ok (model label)')
+}

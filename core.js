@@ -142,7 +142,7 @@ function claudeResult(s, baseline) {
     else usage.partial = true
   }
   return { id: s.id, text: s.text, usage, ...(s.permissionDenials.length ? { permissionDenials: s.permissionDenials } : {}),
-    error: !s.terminal ? 'Thiếu kết quả cuối từ Claude' : s.error }
+    ...(s.model ? { model: s.model } : {}), error: !s.terminal ? 'Thiếu kết quả cuối từ Claude' : s.error }
 }
 
 function claudePermissionArgs(agent) {
@@ -192,10 +192,10 @@ const CLI = {
     args: (p, id, a = {}) => ['-p', p, '--output-format', 'stream-json', '--verbose', ...claudePermissionArgs(a),
       ...opt('--add-dir', a.sharedChat), ...opt('--model', a.model), ...opt('--effort', a.effort), ...opt('--resume', id)],
     stdinArgs: (id, a) => { const v = CLI.claude.args('', id, a); v.splice(1, 1); return v }, // `-p` with no prompt reads stdin
-    state: () => ({ id: null, text: null, usage: null, rawCostUsd: null, permissionDenials: [], error: null, terminal: false }),
+    state: () => ({ id: null, text: null, usage: null, rawCostUsd: null, permissionDenials: [], error: null, terminal: false, model: null }),
     event(e, s, { dir }) {
       s.id ||= e.session_id
-      if (e.type === 'system' && e.subtype === 'init') s.id = e.session_id || s.id
+      if (e.type === 'system' && e.subtype === 'init') { s.id = e.session_id || s.id; s.model = typeof e.model === 'string' ? e.model : s.model }
       if (e.type === 'assistant' && !e.parent_tool_use_id && !e.message?.parent_tool_use_id) {
         const content = Array.isArray(e.message?.content) ? e.message.content : []
         const tool = content.find(x => x.type === 'tool_use')
@@ -379,6 +379,18 @@ async function models(name) {
     return { models: await agyModels.list, efforts: ['low', 'medium', 'high'] }
   }
   return { models: [] }
+}
+
+// The model a turn ran on, as the chat header shows it: claude reports it ("claude-opus-5-5" → "opus-5-5"); codex only
+// through -m or the account's config.toml, named as its models_cache does ("GPT-6.1-Sol"); agy only through --model
+function modelLabel(agent, acc, reported) {
+  if (reported) return reported.replace(/^claude-/, '').slice(0, 60)
+  if (acc?.bin !== 'codex') return agent.model || null
+  let slug = agent.model
+  try {
+    slug ||= /^\s*model\s*=\s*"([^"]+)"/m.exec(rawFs.readFileSync(path.join(acc.home, 'config.toml'), 'utf8').split(/^\s*\[/m)[0])?.[1]
+    return JSON.parse(rawFs.readFileSync(path.join(acc.home, 'models_cache.json'), 'utf8')).models.find(m => m.slug === slug)?.display_name || slug || null
+  } catch { return slug || null }
 }
 
 // Accounts on this machine: ~/.claude, ~/.claude2, ~/.codex1… plus agy
@@ -2218,6 +2230,7 @@ async function run(dir, agent, options = {}) {
     limit: agent.sessionTokenLimit, handoffStatus: initial.handoffStatus || 'missing' } : null
   const permissionDenials = normalizePermissionDenials(denialEntries, agent)
   return { outcome, text: outcome === 'error' ? (r.killError?.message || r.error || 'Lỗi không xác định') : (r.text || '').trim() || '(không có phản hồi)', usage,
+    model: modelLabel(agent, acc, r.model),
     commandResults, permissionDenials, sessionRotation, emptyResponse: outcome === 'success' && !(r.text || '').trim(),
     orphanState: r.orphanState || orphanState, pgid: r.pgid || pgid }
 }
@@ -2228,4 +2241,4 @@ module.exports = { CHAT_DIR, chat, chatName, useBox, boxes, createBox, CLI, acco
   timeoutMinutes, sessionTokenLimit, sessions, setSession, sessionRotationPending, readHandoff, writeHandoff,
   mentions, files, normalizeScope, ownsList, probe, winArg, spawnCli, shimTarget, normalizeAllowedCommands, scopeAllows, scopeLocks, lockConflict, snapshot, changedPaths, promptIndexed, run, runCommand, groupAlive,
   migrateTaskScope, parseTaskDefinitions, taskBoardIndexed, parseTaskStatusBlock, parseRunCommandBlock, parseHandoffBlock, validateTaskChanges,
-  resolveProjectFile, readProjectFile, saveImage, readImage }
+  resolveProjectFile, readProjectFile, saveImage, readImage, modelLabel }
