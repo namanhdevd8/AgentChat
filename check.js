@@ -1395,8 +1395,6 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
   assert.deepStrictEqual([entries.map(e => e.state), lines()[4], failed(mark)], [['merged'], 'R4', []]); clean()
 
   // S9/T37: every refused merge has exactly one system message (refuse() and the catch both post)
-  // known product bugs found by QA: reported (BUG …) without blocking the merge queue; prints ĐÃ SỬA once fixed
-  const xfail = async (id, fn) => { try { await fn(); console.log(`ĐÃ SỬA ${id}: bỏ xfail trong check.js`) } catch (e) { console.log(`BUG ${id}: ${e.message.split('\n')[0]}`) } }
   const errorMsgs = id => log().filter(m => m.kind === 'merge' && m.queueId === id && m.error).length
   for (const e of queue().filter(e => e.error)) assert.strictEqual(errorMsgs(e.id), 1, `${e.state} ${e.id}: ${errorMsgs(e.id)} tin lỗi`)
   // S9/T37: an agent repairs its red branch by committing and merging main itself (what PM asked dev-be to do). Files that
@@ -1407,23 +1405,19 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
   await edit({ 'dev-c': [['a.txt', 5, 'l5']] }, '@dev-c bỏ RED ở dòng 5, tự commit rồi merge main')
   await waitFor('dev-c trả lời', () => log().slice(mark).some(m => m.from === 'dev-c'))
   delete process.env.FAKE_COMMIT; delete process.env.FAKE_MERGE
-  await xfail('T37-tu-merge-main', async () => {
-    try { await waitFor('mục gộp mới của dev-c', () => queue().length > q0 && queue().every(done), 15000) }
-    catch { throw new Error('agent tự merge main → không có mục gộp mới, mục check-failed cũ vẫn kẹt; tin hệ thống: '
-      + JSON.stringify(log().slice(mark).filter(m => m.from === 'system').map(m => m.text))) }
-    entries = queue().slice(q0); q0 = queue().length
-    assert.deepStrictEqual([entries.map(e => e.state), lines()[5]], [['merged'], 'l5']); clean()
-  })
+  try { await waitFor('mục gộp mới của dev-c', () => queue().length > q0 && queue().every(done), 15000) }
+  catch { throw new Error('agent tự merge main → không có mục gộp mới, mục check-failed cũ vẫn kẹt; tin hệ thống: '
+    + JSON.stringify(log().slice(mark).filter(m => m.from === 'system').map(m => m.text))) }
+  entries = queue().slice(q0); q0 = queue().length
+  assert.deepStrictEqual([entries.map(e => e.state), lines()[5]], [['merged'], 'l5']); clean()
   // T38: only a version bump passes, but a branch that changes real dependencies must not be checked/merged with the old
   // node_modules: blocked (one message), main untouched
   mark = log().length; const pkgBefore = fs.readFileSync(at('package.json'), 'utf8')
   await edit({ [me]: [['package.json', 1, '  "dependencies": { "left-pad": "1.3.0" }, "name": "fixture",']] }, `@${me} thêm dependency left-pad`)
   entries = await settle(1, `merge lượt ${me} đổi dependencies`)
-  await xfail('T37-doi-deps-van-gop', async () => {
-    assert.notStrictEqual(entries[0].state, 'merged', 'nhánh đổi dependencies thật vẫn được gộp, check chạy với node_modules cũ')
-    assert.strictEqual(fs.readFileSync(at('package.json'), 'utf8'), pkgBefore)
-    await waitFor('một tin báo chặn deps', () => errorMsgs(entries[0].id) === 1, 5000)
-  })
+  assert.notStrictEqual(entries[0].state, 'merged', 'nhánh đổi dependencies thật vẫn được gộp, check chạy với node_modules cũ')
+  assert.strictEqual(fs.readFileSync(at('package.json'), 'utf8'), pkgBefore)
+  await waitFor('một tin báo chặn deps', () => errorMsgs(entries[0].id) === 1, 5000)
   delete process.env.FAKE_EDITS
 
   // A stopped pending retry stays paused, without overwriting other queue entries.
