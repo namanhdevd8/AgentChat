@@ -36,3 +36,4 @@ QA kiểm trên main `7c406bc`, check của QA đã vào main `77c48b7`. Kết q
 2. V2: bấm một link ảnh hoặc `.svg`, thử "Vừa khung" và "100%".
 3. V3: mở một file `.html`, chuyển qua lại giữa hai tab Xem trước và Mã nguồn. Bấm "Mở bằng trình duyệt" thì phải hiện hộp xác nhận.
 4. Kiểm lại cả 3 mục trên với theme sáng và tối.
+- Cập nhật (PM, 2026-10-13): dev-be đã sửa cả 2 lỗi trên main `c0db168`. Hai ca `T45-cap-song-song` và `T45-doi-symlink-luc-xac-nhan` giờ là assert thường và đạt trong check của hàng chờ merge. T43 → Xong.
