@@ -445,7 +445,11 @@ const reply = (text, ctx) => {
   if (ctx != null) out(JSON.stringify({ type: 'assistant', message: { id: 'M' + tid, content: [{ type: 'text', text: text || '' }], usage: { input_tokens: ctx } } }) + '\\n')
   out(JSON.stringify({ type: 'result', subtype: 'success', result: text || '', session_id: tid, usage: { input_tokens: inVal, output_tokens: 2 } }) + '\\n')
 }
-if (mode === 'text') reply(process.env.FAKE_TEXT || 'ok', inVal)
+if (mode === 'steps') { // S9 R7: FAKE_STEPS = raw stream events, then one result (FAKE_ERR=1 → is_error)
+  for (const e of JSON.parse(process.env.FAKE_STEPS)) out(JSON.stringify(e) + '\\n')
+  const err = process.env.FAKE_ERR === '1'
+  out(JSON.stringify({ type: 'result', subtype: err ? 'error_during_execution' : 'success', is_error: err, result: 'ok', session_id: tid, usage: { input_tokens: inVal, output_tokens: 2 } }) + '\\n')
+} else if (mode === 'text') reply(process.env.FAKE_TEXT || 'ok', inVal)
 else if (mode === 'empty') {
   if (p.includes('Bạn chưa gửi tin trả lời')) reply('đã trả lời', inVal)
   else reply('', inVal)
@@ -752,6 +756,70 @@ function sprint8Checks() {
   assert.deepStrictEqual(core.normalizePermissionDenials(Array(33).fill({ tool_name: 'Bash', tool_input: { command: 'ls' } }), agent).map(x => x.canGrant), [false])
 }
 
+// ---- Sprint 9 R7 (context of the last main step) + R4 (progress detail): parser fixtures and core.run with a fake claude ----
+async function sprint9Checks() {
+  const cl = core.CLI.claude, J = (...events) => events.map(e => JSON.stringify(e)).join('\n')
+  const A = (id, usage, extra = {}) => ({ type: 'assistant', ...extra, message: { ...(id ? { id } : {}), content: [{ type: 'tool_use', name: 'Bash', input: { command: 'ls' } }], ...(usage === undefined ? {} : { usage }) } })
+  const R = (input, extra = {}) => ({ type: 'result', subtype: 'success', result: 'ok', session_id: 's', usage: { input_tokens: input, output_tokens: 1 }, ...extra })
+  const ctx = (...events) => cl.parse(J(...events, R(1)), { costBaseline: 0 }).contextInputTokens
+  const k = n => ({ input_tokens: n })
+  let r = cl.parse(J(A('m1', k(60000)), A('m2', k(65000)), A('m3', k(70000)), R(195000)), { costBaseline: 0 })
+  assert.deepStrictEqual([r.usage.inputTokens, r.contextInputTokens], [195000, 70000]) // usage = sum, context = last step
+  assert.strictEqual(ctx(A('m1', { input_tokens: 4, cache_read_input_tokens: 30000, cache_creation_input_tokens: 500,
+    cache_creation: { ephemeral_5m_input_tokens: 500 } })), 30504) // breakdown not added twice
+  assert.strictEqual(ctx(A('m1', k(100)), A('m1', k(120))), 120) // same ID = same step: snapshot, not 220
+  assert.strictEqual(ctx(A('m1', k(100)), A('m2', k(200)), A('m1', k(100))), 200) // an old ID repeated does not replace the newer step
+  assert.strictEqual(ctx(A('m1', k(70000)), A('s1', k(300000), { parent_tool_use_id: 't' })), 70000) // subagent (event level)
+  assert.strictEqual(ctx(A('m1', k(70000)), { type: 'assistant', message: { id: 's2', parent_tool_use_id: 't', content: [], usage: k(300000) } }), 70000)
+  assert.strictEqual(ctx(A('m1', k(200000)), A('m2', k(70000))), 70000) // last step, not max
+  assert.strictEqual(ctx(A('m1', k(70000)), A('m2')), null) // new step without usage → null, not the previous step
+  assert.strictEqual(ctx(A('m1', k(70000)), A(null, k(5))), null) // no message ID → no measurement
+  assert.strictEqual(ctx(A('m1', { input_tokens: 5 })), 5) // cache fields missing = 0 …
+  assert.strictEqual(ctx(A('m1', { input_tokens: 5, cache_read_input_tokens: null })), null) // … present but broken = null
+  for (const bad of ['5', -1, 1.5, null, 2 ** 53]) assert.strictEqual(ctx(A('m1', k(bad))), null, String(bad))
+  assert.strictEqual(ctx(A('m1', { input_tokens: 2 ** 52, cache_read_input_tokens: 2 ** 52 })), null) // sum beyond safe integers
+  assert.strictEqual(ctx(A('m1', k(0))), 0) // 0 is a valid measurement
+  assert.strictEqual(ctx(A('m1', k(70000)), { type: 'system', subtype: 'compact' }), null) // compaction drops the old snapshot
+  assert.strictEqual(cl.parse(J(A('m1', k(70000)), R(1, { subtype: 'error_during_execution', is_error: true }))).contextInputTokens, null)
+  assert.strictEqual(core.CLI.codex.parse(J({ type: 'turn.completed', usage: { input_tokens: 999999, output_tokens: 1 } })).contextInputTokens, null)
+
+  // R4: the full command (not the 160-char label) as runtime detail; capped at 8192, control chars dropped, never HTML
+  const s = cl.state(), ev = e => cl.event(e, s, { dir: '/p' }), bash = command => ({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Bash', input: { command } }] } })
+  const long = 'npm run check -- ' + 'x'.repeat(300)
+  assert.strictEqual(ev(bash(long)), 'Đang chạy lệnh'); assert.deepStrictEqual(s.progressDetail, { detail: long, detailTruncated: false })
+  ev(bash('y'.repeat(9000))); assert.deepStrictEqual([s.progressDetail.detail.length, s.progressDetail.detailTruncated], [8192, true])
+  ev(bash('<script>alert(1)</script>\n\tok\x07')); assert.strictEqual(s.progressDetail.detail, '<script>alert(1)</script>\n\tok')
+  ev({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Edit', input: { file_path: '/p/src/a.js' } }] } })
+  assert.strictEqual(s.progressDetail.detail, '/p/src/a.js') // label shows the basename, detail the full path
+  ev({ type: 'assistant', message: { content: [{ type: 'text', text: 'xong' }] } }); assert.strictEqual(s.progressDetail.detail, null) // new activity clears it
+
+  // core.run: context of the last spawn decides the next turn; usage still sums; two commands with one label both reported
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-chat-s9-')); core.init(d)
+  fs.writeFileSync(path.join(d, '.chat', 'agents.json'), JSON.stringify([{ name: 'q', cli: 'claude', role: 'Dev' }]))
+  const q = core.team(d)[0]
+  const go = async (steps, env = {}, a = q) => {
+    Object.assign(process.env, { FAKE_MODE: 'steps', FAKE_STEPS: JSON.stringify(steps), FAKE_TID: 'Q1', FAKE_IN: '195000', FAKE_ERR: '0' }, env)
+    const progress = [], res = await core.run(d, a, { runId: 'r' + Math.random(), onProgress: (label, extra) => progress.push([label, extra?.detail ?? null]) })
+    return { ...res, progress, args: lastArgs(), s: core.sessions(d)[a.name] }
+  }
+  r = await go([A('m1', k(60000)), A('m2', k(65000)), A('m3', k(150001))])
+  assert.deepStrictEqual([r.usage.inputTokens, r.s.lastTurn.inputTokens, r.s.lastTurn.contextInputTokens], [195000, 195000, 150001])
+  assert.ok(core.sessionRotationPending(q, r.s))
+  r = await go([A('m1', k(70000))], { FAKE_TID: 'Q2' }); assert.ok(!r.args.includes('--resume') && r.sessionRotation?.contextInputTokens === 150001)
+  r = await go([A('m1', k(200000)), A('m2', k(150000))], { FAKE_TID: 'Q2', FAKE_IN: '999999' }) // usage huge, last step = limit
+  assert.ok(r.args.includes('--resume') && r.s.lastTurn.contextInputTokens === 150000 && !core.sessionRotationPending(q, r.s))
+  r = await go([A('m1', k(999999))], { FAKE_TID: 'Q2', FAKE_ERR: '1' }) // error: usage kept, context not trusted
+  assert.deepStrictEqual([r.outcome, r.usage.inputTokens, r.s.lastTurn.contextInputTokens], ['error', 195000, null])
+  r = await go([A('m1', k(5))], { FAKE_TID: 'Q2' }); assert.ok(r.args.includes('--resume'))
+  // legacy record: only a huge inputTokens, no context → never rotates
+  core.setSession(d, 'q', { ...core.sessions(d).q, lastTurn: { runId: 'old', inputTokens: 5000000, partial: false, at: new Date().toISOString() } })
+  assert.ok(!core.sessionRotationPending(q, core.sessions(d).q))
+  r = await go([bash('npm test -- a'), { ...bash('npm test -- b'), message: { id: 'z', content: [{ type: 'tool_use', name: 'Bash', input: { command: 'npm test -- b' } }] } }], { FAKE_TID: 'Q2' })
+  assert.deepStrictEqual(r.progress.filter(([label]) => label === 'Đang chạy lệnh').map(([, detail]) => detail), ['npm test -- a', 'npm test -- b'])
+  for (const key of ['FAKE_STEPS', 'FAKE_TID', 'FAKE_IN', 'FAKE_ERR']) delete process.env[key]
+  console.log('ok (sprint 9 R7/R4)')
+}
+
 // ---- Sprint 6 F: indexed log, accent-insensitive search, 10k messages, J settings, summary checkpoint ----
 async function sprint6Checks() {
   const d = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-chat-s6-')); core.init(d)
@@ -953,11 +1021,63 @@ async function rendererChecks() {
   assert.deepStrictEqual(notices, [], 'merge response from the previous box must be ignored')
 }
 
+// ---- Sprint 9 FE: R2 grouping rule and R3 File chung, run from renderer.js in a vm (geometry/keyboard/theme still need Electron) ----
+async function rendererS9Checks() {
+  const ui = fs.readFileSync(path.join(__dirname, 'renderer.js'), 'utf8'), vm = require('vm'), nodes = new Map(), store = new Map(), opened = []
+  const part = (from, to) => ui.slice(ui.indexOf(from), ui.indexOf(to, ui.indexOf(from)))
+  const el = (tag, className = '', textContent = '') => ({ tag, className, textContent, title: '', attrs: {}, children: [],
+    append(...c) { this.children.push(...c) }, replaceChildren(...c) { this.children = c }, setAttribute(k, v) { this.attrs[k] = v } })
+  const $ = id => { if (!nodes.has(id)) nodes.set(id, el('div')); return nodes.get(id) }
+  let list = []
+  const ctx = vm.createContext({ $, el, base: p => p.split(/[\\/]/).pop(), fileIcon: () => el('svg'), openFileViewer: f => opened.push(f),
+    document: { createDocumentFragment: () => el('frag') }, dir: '/p', box: '.chat', openSeq: 1, api: { files: async () => list },
+    localStorage: { getItem: k => store.has(k) ? store.get(k) : null, setItem: (k, v) => store.set(k, v) } })
+  vm.runInContext(part('function isGroupableSystemMsg', 'function createMsgElement'), ctx)
+  vm.runInContext(part('async function refreshFiles', "$('#new').onclick"), ctx)
+  // R2: only the allowlisted success kinds are folded; never by text, never errors/actions
+  const sys = (x = {}) => ({ from: 'system', seq: 5, at: '2026-10-13T00:00:00Z', text: 'Đã gộp nhánh của dev-a sau khi kiểm tra đạt.', ...x })
+  const yes = [sys({ kind: 'task-status-note', relatedRunId: 'r1' }), sys({ kind: 'merge', queueId: 'q', headSha: 'h' })]
+  const no = [sys({ kind: 'merge', queueId: 'q', headSha: 'h', error: { code: 'CONFLICT' } }), sys({ kind: 'merge', queueId: 'q' }),
+    sys({ kind: 'task-status-note', relatedRunId: ' ' }), sys({ kind: 'permission-denied' }), sys({ kind: 'chain-stop', canContinue: true }),
+    sys({ kind: 'session-rotated' }), sys({ kind: 'scope-warning' }), sys({ kind: 'retract' }), sys({ kind: 'mystery' }), sys(),
+    sys({ kind: 'merge', queueId: 'q', headSha: 'h', retracted: true }), sys({ kind: 'merge', queueId: 'q', headSha: 'h', seq: undefined }),
+    sys({ kind: 'merge', queueId: 'q', headSha: 'h', usage: { inputTokens: 1 } }), { ...sys({ kind: 'task-status-note', relatedRunId: 'r' }), from: 'pm' }]
+  assert.deepStrictEqual(yes.map(m => ctx.isGroupableSystemMsg(m)), [true, true])
+  no.forEach((m, i) => assert.strictEqual(ctx.isGroupableSystemMsg(m), false, `R2 gom nhầm #${i}: ${m.kind}`))
+  // R3: pins (this box's memory, reports/roadmap.md once), sprint groups N desc with the spec first, the rest in "Khác"
+  list = ['agents.json', 'reports/sprint-9-design.md', '.chat2/memory.md', 'reports/hotfix.md', 'reports/sprint-10.md', 'docs/roadmap.md',
+    'reports/sprint-9.md', 'reports/roadmap.md', '.chat/memory.md', 'reports/sprint-9-proposal.md', 'reports/sprint-2.md', 'reports/sprint-09.md',
+    'reports/xsprint-9.md', 'reports/sprint-9.txt']
+  const view = () => $('#files').children[0].children.map(n => n.tag === 'button' ? n.title
+    : [n.children[0].textContent, ...n.children[1].children.map(b => b.title)])
+  store.set('file-groups:v1:' + JSON.stringify(['/p', '.chat']), JSON.stringify({ 'sprint:99': true, 'sprint:9': true }))
+  await ctx.refreshFiles()
+  assert.deepStrictEqual(view(), ['.chat/memory.md', 'reports/roadmap.md', ['Sprint 10 · 1', 'reports/sprint-10.md'],
+    ['Sprint 9 · 3', 'reports/sprint-9.md', 'reports/sprint-9-design.md', 'reports/sprint-9-proposal.md'], ['Sprint 2 · 1', 'reports/sprint-2.md'],
+    ['Khác · 7', 'agents.json', 'reports/hotfix.md', '.chat2/memory.md', 'docs/roadmap.md', 'reports/sprint-09.md', 'reports/sprint-9.txt', 'reports/xsprint-9.md']])
+  const groups = $('#files').children[0].children.filter(n => n.tag === 'details')
+  assert.deepStrictEqual(groups.map(g => !!g.open), [false, true, false, false]) // default closed, remembered state restored
+  assert.deepStrictEqual(JSON.parse(store.get('file-groups:v1:' + JSON.stringify(['/p', '.chat']))), { 'sprint:9': true }) // gone group pruned
+  groups[0].open = true; groups[0].ontoggle()
+  assert.strictEqual(JSON.parse(store.get('file-groups:v1:' + JSON.stringify(['/p', '.chat'])))['sprint:10'], true)
+  $('#files').children[0].children[0].onclick(); assert.deepStrictEqual(opened, ['.chat/memory.md']) // full path, not the basename
+  ctx.box = '.chat2'; await ctx.refreshFiles(); assert.strictEqual(view()[0], '.chat2/memory.md') // the open box's memory
+  assert.ok(!store.has('file-groups:v1:' + JSON.stringify(['/p', '.chat2'])) || !JSON.parse(store.get('file-groups:v1:' + JSON.stringify(['/p', '.chat2'])))['sprint:9'])
+  ctx.localStorage.getItem = () => '{hỏng'; await ctx.refreshFiles(); assert.strictEqual(view()[0], '.chat2/memory.md') // broken storage: defaults
+  // a reply for the previous box (same folder) must not overwrite the panel
+  let release; ctx.api.files = () => new Promise(r => { release = r })
+  const before = $('#files').children[0], pending = ctx.refreshFiles(); ctx.box = '.chat'; ctx.openSeq++
+  release(['reports/sprint-1.md']); await pending
+  assert.strictEqual($('#files').children[0], before, 'R3: danh sách file của box cũ ghi đè box mới')
+  console.log('ok (sprint 9 FE R2/R3)')
+}
+
 // ---- Sprint 6 H + J through the real main.js: Electron stubbed, a sample git repo, a fake codex. Own process: main.js registers IPC globally ----
 function mainChecks() {
   const r = require('child_process').spawnSync(process.execPath, [__filename, '--main'], { encoding: 'utf8', timeout: 300000,
     env: { ...process.env, SHELL: '/nonexistent' } }) // SHELL: main.js must not replace PATH (fake CLI) with the login shell's
   assert.strictEqual(r.status, 0, 'main.js (chuỗi agent / worktree / merge) lỗi:\n' + String(r.stdout + r.stderr).slice(-4000))
+  for (const line of String(r.stdout).split('\n')) if (/^(BUG|ĐÃ SỬA) /.test(line)) console.log(line)
 }
 
 async function mainHarness() {
@@ -988,6 +1108,8 @@ for (const [file, line, text] of JSON.parse(process.env.FAKE_EDITS || '{}')[me] 
   const lines = fs.readFileSync(file, 'utf8').split('\\n'); lines[line] = text; fs.writeFileSync(file, lines.join('\\n'))
 }
 if (JSON.parse(process.env.FAKE_COMMIT || '{}')[me]) require('child_process').execFileSync('git', ['-c', 'user.name=x', '-c', 'user.email=x@x', 'commit', '-qam', 'tự commit'])
+const mergeRef = JSON.parse(process.env.FAKE_MERGE || '{}')[me] // the agent merges a branch into its own (S9: fixing a red branch)
+if (mergeRef) require('child_process').execFileSync('git', ['-c', 'user.name=x', '-c', 'user.email=x@x', 'merge', '-q', '--no-edit', mergeRef])
 if (process.env.FAKE_PROGRESS) fs.appendFileSync('progress-' + me + '.txt', 'x')
 if (process.env.FAKE_SLOW_MS) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Number(process.env.FAKE_SLOW_MS))
 out({ type: 'thread.started', thread_id: 'M' + process.pid })
@@ -1018,7 +1140,7 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'agent-chat-git-'))), at = f => path.join(root, f)
   core.init(root)
   fs.writeFileSync(at('.chat/agents.json'), JSON.stringify(['dev-a', 'dev-b', 'dev-c', 'dev-r'].map(name =>
-    ({ name, cli: name === 'dev-r' ? 'claude' : 'codex', role: 'Dev', owns: ['*.txt'], resume: name === 'dev-r', allowedCommands: ['npm run check'],
+    ({ name, cli: name === 'dev-r' ? 'claude' : 'codex', role: 'Dev', owns: name === 'dev-r' ? ['*.txt'] : ['*.txt', 'package.json'], resume: name === 'dev-r', allowedCommands: ['npm run check'],
       ...(name === 'dev-r' ? { sessionTokenLimit: 100 } : {}) }))))
   fs.writeFileSync(at('a.txt'), Array.from({ length: 10 }, (_, i) => `l${i}`).join('\n'))
   fs.writeFileSync(at('package.json'), JSON.stringify({ name: 'fixture', private: true, scripts: { check: 'node chk.js' } }))
@@ -1272,6 +1394,38 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
   entries = await settle(1, `merge lượt ${me} sau khi main bump version`)
   assert.deepStrictEqual([entries.map(e => e.state), lines()[4], failed(mark)], [['merged'], 'R4', []]); clean()
 
+  // S9/T37: every refused merge has exactly one system message (refuse() and the catch both post)
+  // known product bugs found by QA: reported (BUG …) without blocking the merge queue; prints ĐÃ SỬA once fixed
+  const xfail = async (id, fn) => { try { await fn(); console.log(`ĐÃ SỬA ${id}: bỏ xfail trong check.js`) } catch (e) { console.log(`BUG ${id}: ${e.message.split('\n')[0]}`) } }
+  const errorMsgs = id => log().filter(m => m.kind === 'merge' && m.queueId === id && m.error).length
+  for (const e of queue().filter(e => e.error)) assert.strictEqual(errorMsgs(e.id), 1, `${e.state} ${e.id}: ${errorMsgs(e.id)} tin lỗi`)
+  // S9/T37: an agent repairs its red branch by committing and merging main itself (what PM asked dev-be to do). Files that
+  // came from main are not the agent's edits: the turn must still queue the branch, or the old error entry stays forever
+  fs.writeFileSync(at('notes.md'), 'main\n'); git('add', 'notes.md'); git('commit', '-q', '-m', 'notes on main') // outside dev-c's scope
+  mark = log().length
+  process.env.FAKE_COMMIT = JSON.stringify({ 'dev-c': 1 }); process.env.FAKE_MERGE = JSON.stringify({ 'dev-c': 'main' })
+  await edit({ 'dev-c': [['a.txt', 5, 'l5']] }, '@dev-c bỏ RED ở dòng 5, tự commit rồi merge main')
+  await waitFor('dev-c trả lời', () => log().slice(mark).some(m => m.from === 'dev-c'))
+  delete process.env.FAKE_COMMIT; delete process.env.FAKE_MERGE
+  await xfail('T37-tu-merge-main', async () => {
+    try { await waitFor('mục gộp mới của dev-c', () => queue().length > q0 && queue().every(done), 15000) }
+    catch { throw new Error('agent tự merge main → không có mục gộp mới, mục check-failed cũ vẫn kẹt; tin hệ thống: '
+      + JSON.stringify(log().slice(mark).filter(m => m.from === 'system').map(m => m.text))) }
+    entries = queue().slice(q0); q0 = queue().length
+    assert.deepStrictEqual([entries.map(e => e.state), lines()[5]], [['merged'], 'l5']); clean()
+  })
+  // T38: only a version bump passes, but a branch that changes real dependencies must not be checked/merged with the old
+  // node_modules: blocked (one message), main untouched
+  mark = log().length; const pkgBefore = fs.readFileSync(at('package.json'), 'utf8')
+  await edit({ [me]: [['package.json', 1, '  "dependencies": { "left-pad": "1.3.0" }, "name": "fixture",']] }, `@${me} thêm dependency left-pad`)
+  entries = await settle(1, `merge lượt ${me} đổi dependencies`)
+  await xfail('T37-doi-deps-van-gop', async () => {
+    assert.notStrictEqual(entries[0].state, 'merged', 'nhánh đổi dependencies thật vẫn được gộp, check chạy với node_modules cũ')
+    assert.strictEqual(fs.readFileSync(at('package.json'), 'utf8'), pkgBefore)
+    await waitFor('một tin báo chặn deps', () => errorMsgs(entries[0].id) === 1, 5000)
+  })
+  delete process.env.FAKE_EDITS
+
   // A stopped pending retry stays paused, without overwriting other queue entries.
   const stoppedConfig = core.projectSettings(root)
   core.writeProjectSettings(root, { ...stoppedConfig.settings, worktreesEnabled: false }, stoppedConfig.revision)
@@ -1332,7 +1486,7 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
     console.log('ok (boxes)')
   }
 }
-logChecks().then(needsChecks).then(timelineChecks).then(taskChecks).then(auditChecks).then(viewerChecks).then(runChecks).then(sprint7Checks).then(sprint8Checks).then(sprint6Checks).then(rendererChecks).then(mainChecks).then(() => console.log('ok'), e => { console.error(e); process.exit(1) })
+logChecks().then(needsChecks).then(timelineChecks).then(taskChecks).then(auditChecks).then(viewerChecks).then(runChecks).then(sprint7Checks).then(sprint8Checks).then(sprint9Checks).then(sprint6Checks).then(rendererChecks).then(rendererS9Checks).then(mainChecks).then(() => console.log('ok'), e => { console.error(e); process.exit(1) })
 
 // PM creates a task and moves it in the same turn (no revision yet): "" is accepted only for PM on a todo task
 {
