@@ -71,6 +71,11 @@ const agyOut = J({ event: 'init', conversation_id: 'c1' },
 assert.deepStrictEqual(ag.parse(agyOut, { resumed: true }), { id: 'c1', text: 'ok', usage: U(6, 3), contextInputTokens: null, error: null })
 assert.deepStrictEqual(ag.parse('{"conversation_id":"c1","response":"ok"}').text, 'ok') // old single-JSON fixture
 assert.ok(ag.parse(J({ event: 'result', result: { response: 'x', status: 'ERROR' } })).error)
+// resumed after a failed turn: agy still says ERROR with the old error though this turn answered (agy 1.3.3)
+const agyStale = (...steps) => ag.parse(J({ event: 'user_input' }, ...steps.map((t, i) => step(i, null, { step_type: t })),
+  { event: 'result', result: { response: 'ok2', status: 'ERROR', error: 'Individual quota reached. Resets in 4h10m8s.' } }), { resumed: true })
+assert.deepStrictEqual([agyStale('system_message', 'agent_response').error, agyStale('error_message', 'agent_response').error], [null, null])
+assert.ok(agyStale('agent_response', 'error_message').error.includes('quota'))
 assert.ok(ag.parse(J({ event: 'init', conversation_id: 'c1' })).error) // no terminal
 
 // progress labels: one plain line, project-relative, no raw output
@@ -403,6 +408,7 @@ if (process.env.FAKE_MODE === 'slow') {
   const ask = command => 'Chạy\\n' + F + 'run-command\\n' + JSON.stringify({ command }) + '\\n' + F
   const reply = text => { if (text) out(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text } }) + '\\n'); out(JSON.stringify({ type: 'turn.completed', usage: usage(process.env.FAKE_IN === 'null' ? null : Number(process.env.FAKE_IN || 3), 2) }) + '\\n') }
   if (mode === 'broken') process.exit(1)
+  else if (mode === 'quota') { process.stderr.write('.\\nAGY_ERROR: {"short_error":"Hết quota. Reset sau 4h."}\\n'); out(JSON.stringify({ type: 'turn.failed', error: { message: 'Hết quota. Reset sau 4h.' } }) + '\\n'); process.exit(1) }
   else if (p.includes('DỮ LIỆU KHÔNG TIN CẬY')) reply(mode === 'loop' ? ask('node ok.js') : 'kết quả ' + (/"exitCode":(\\d+|null)/.exec(p) || [])[1] + (p.includes('"error"') ? ' lỗi' : ''))
   else if (p.includes('Bạn chưa gửi tin trả lời')) reply(mode === 'empty' ? 'đã trả lời' : '')
   else if (mode.startsWith('cmd:')) reply(ask(mode.slice(4)))
@@ -532,6 +538,7 @@ async function runChecks() {
   j = await job('empty2'); assert.deepStrictEqual([j.text, j.calls], ['(không có phản hồi)', 2])
   j = await job('task'); assert.strictEqual(j.calls, 1) // task-status-only answer is not empty
   j = await job('broken'); assert.deepStrictEqual([j.outcome, j.calls], ['error', 1]) // errors are not retried
+  j = await job('quota'); assert.deepStrictEqual([j.outcome, j.text], ['error', 'Hết quota. Reset sau 4h.']) // stderr that only repeats the error is not appended
   const saved5 = JSON.stringify(core.sessions(dir))
   j = await job('empty', { ...dev5, resume: false }); assert.deepStrictEqual([j.text, j.calls], ['đã trả lời', 2])
   assert.ok(lastArgs().includes('T1')); assert.strictEqual(JSON.stringify(core.sessions(dir)), saved5) // RAM-only id for resume:false

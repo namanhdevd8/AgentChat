@@ -43,3 +43,8 @@ PM phát hiện ngày 2026-10-13: hai nhánh pm (`8a53be0`) và techlead (`d4daf
 ## Điều kiện để dev bắt đầu (End-User)
 1. Bấm Thử lại cho nhánh pm và techlead trong hàng chờ merge, để `sprint-9.md` và `sprint-9-design.md` vào main. Nếu không, worktree của dev sẽ không có hai file này.
 2. Phạm vi trong ⚙: dev-fe hiện chỉ có `index.html`, cần thêm `renderer.js` và `check.js`; dev-be cần thêm `check.js` (danh sách của dev-be cũng đang thiếu `package-lock.json`).
+
+## Ghi chú cho QA T37 (PM, 2026-10-13)
+- T38 thêm `post` tin lỗi trong `refuse()` của processMerge (main.js), mà catch ở main.js:485 vốn đã post tin "chưa gộp được nhánh". QA cần kiểm tra mỗi lỗi gộp chỉ ra **một** tin hệ thống.
+- T38 sửa `bootstrapDependencies` để bỏ qua manifest chỉ khác `version`, và không còn chặn hàng chờ bằng `needs-deps` lúc xếp hàng. Cần kiểm tra cả ca đổi `dependencies` thật vẫn bị chặn.
+- Nhánh dev-be (`0961b62`) và dev-fe (`f5a3057`) đều là checkpoint của lượt bị ngắt (quota/500). Khi nghiệm thu, coi `npm run check` trong hàng chờ merge là kết quả chính thức, không dựa vào lời báo pass.
