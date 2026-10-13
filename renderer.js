@@ -244,7 +244,6 @@ let logHasBefore = false
 let logHasAfter = false
 let newestLiveSeq = -1
 let currentTotals = null
-const openLogGroupSeqs = new Set()
 let currentSettings = { version: 1, autoSummary: true, worktreesEnabled: false, mergeChecks: ['npm run check'], chainLimit: 12, maxHops: 12, costCeiling: null }
 let currentSettingsRevision = null
 let worktreeState = null
@@ -1684,6 +1683,7 @@ function msgFragment(list) {
 
 // bumped by every full replace of the log window: a paging reply started before one belongs to a window that's gone
 let logWindow = 0
+const openLogGroupSeqs = new Set()
 
 function dayLabel(iso, now = new Date()) {
   const d = new Date(iso), days = Math.round((new Date(now.toDateString()) - new Date(d.toDateString())) / 864e5)
@@ -1706,13 +1706,16 @@ function markDays() {
 
 function getLogScrollAnchor() {
   const log = $('#log')
+  if (!log || typeof log.getBoundingClientRect !== 'function') {
+    return { nearBottom: true }
+  }
   const nearBottom = (log.scrollHeight - log.clientHeight - log.scrollTop) <= 48
   if (nearBottom && !logHasAfter) {
     return { nearBottom: true }
   }
   const logTop = log.getBoundingClientRect().top
-  const visible = [...log.children].find(c => {
-    if (c.hidden || c.id === 'empty') return false
+  const visible = [...(log.children || [])].find(c => {
+    if (c.hidden || c.id === 'empty' || typeof c.getBoundingClientRect !== 'function') return false
     const r = c.getBoundingClientRect()
     return r.bottom > logTop
   })
@@ -1720,8 +1723,8 @@ function getLogScrollAnchor() {
     return {
       nearBottom: false,
       seq: visible.dataset?.seq ? Number(visible.dataset.seq) : null,
-      isSummary: visible.classList.contains('sys-summary-btn'),
-      nextSeq: visible.classList.contains('sys-summary-btn')
+      isSummary: visible.classList?.contains?.('sys-summary-btn'),
+      nextSeq: visible.classList?.contains?.('sys-summary-btn')
         ? (visible.nextElementSibling?.dataset?.seq ? Number(visible.nextElementSibling.dataset.seq) : null)
         : null,
       offset: visible.getBoundingClientRect().top - logTop
@@ -1732,44 +1735,47 @@ function getLogScrollAnchor() {
 
 function restoreLogScrollAnchor(anchor) {
   const log = $('#log')
+  if (!log || typeof log.getBoundingClientRect !== 'function') {
+    return
+  }
   if (anchor.nearBottom && !logHasAfter) {
     log.scrollTop = log.scrollHeight
     return
   }
   const logTop = log.getBoundingClientRect().top
   if (anchor.seq != null) {
-    const el = log.querySelector(`:scope > [data-seq="${anchor.seq}"]`)
-    if (el && !el.hidden) {
+    const el = log.querySelector?.(`:scope > [data-seq="${anchor.seq}"]`)
+    if (el && !el.hidden && typeof el.getBoundingClientRect === 'function') {
       log.scrollTop += (el.getBoundingClientRect().top - logTop) - anchor.offset
       return
     }
     if (el && el.hidden) {
       let prev = el.previousElementSibling
-      while (prev && !prev.classList.contains('sys-summary-btn')) {
+      while (prev && !prev.classList?.contains?.('sys-summary-btn')) {
         prev = prev.previousElementSibling
       }
-      if (prev && !prev.hidden) {
+      if (prev && !prev.hidden && typeof prev.getBoundingClientRect === 'function') {
         log.scrollTop += (prev.getBoundingClientRect().top - logTop) - anchor.offset
         return
       }
     }
   }
   if (anchor.isSummary && anchor.nextSeq != null) {
-    const nextEl = log.querySelector(`:scope > [data-seq="${anchor.nextSeq}"]`)
+    const nextEl = log.querySelector?.(`:scope > [data-seq="${anchor.nextSeq}"]`)
     if (nextEl) {
       let btn = nextEl.previousElementSibling
-      while (btn && !btn.classList.contains('sys-summary-btn')) {
+      while (btn && !btn.classList?.contains?.('sys-summary-btn')) {
         btn = btn.previousElementSibling
       }
       const target = (btn && !btn.hidden) ? btn : nextEl
-      if (target && !target.hidden) {
+      if (target && !target.hidden && typeof target.getBoundingClientRect === 'function') {
         log.scrollTop += (target.getBoundingClientRect().top - logTop) - anchor.offset
         return
       }
     }
   }
-  if (anchor.seq != null) {
-    const all = [...log.querySelectorAll(':scope > [data-seq]')].filter(r => !r.hidden)
+  if (anchor.seq != null && typeof log.querySelectorAll === 'function') {
+    const all = [...log.querySelectorAll(':scope > [data-seq]')].filter(r => !r.hidden && typeof r.getBoundingClientRect === 'function')
     if (all.length > 0) {
       let closest = all[0]
       let minDiff = Math.abs(Number(closest.dataset.seq) - anchor.seq)
@@ -1788,6 +1794,8 @@ function restoreLogScrollAnchor(anchor) {
 
 function reflowLogGroups() {
   const log = $('#log')
+  if (!log || typeof log.getBoundingClientRect !== 'function' || typeof log.querySelectorAll !== 'function') return
+
   log.querySelectorAll(':scope > .sys-summary-btn').forEach(b => b.remove())
   const rows = [...log.querySelectorAll(':scope > [data-seq]')]
   rows.forEach(r => { r.hidden = false })
@@ -1869,34 +1877,42 @@ function reflowLogGroups() {
 
 function trimLogWindow(mode) {
   const log = $('#log')
-  const items = [...log.querySelectorAll(':scope > [data-seq]')]
+  const items = [...(log.children || [])].filter(c => c.id !== 'empty' && !c.classList?.contains?.('day') && !c.classList?.contains?.('sys-summary-btn'))
   if (items.length <= 300) return
 
   if (mode === 'prepend') {
     const excess = items.length - 300
     for (let i = items.length - excess; i < items.length; i++) {
-      const seq = Number(items[i].dataset.seq)
+      const seq = items[i].dataset?.seq ? Number(items[i].dataset.seq) : null
       if (Number.isInteger(seq)) openLogGroupSeqs.delete(seq)
-      items[i].remove()
+      items[i].remove?.()
     }
+    markDays()
     logHasAfter = true
-    $('#jump-latest').hidden = false
+    const jumpLatest = $('#jump-latest')
+    if (jumpLatest) jumpLatest.hidden = false
   } else {
     const excess = items.length - 300
+    const oldScrollHeight = log.scrollHeight || 0
+    const oldScrollTop = log.scrollTop || 0
     for (let i = 0; i < excess; i++) {
-      const seq = Number(items[i].dataset.seq)
+      const seq = items[i].dataset?.seq ? Number(items[i].dataset.seq) : null
       if (Number.isInteger(seq)) openLogGroupSeqs.delete(seq)
-      items[i].remove()
+      items[i].remove?.()
     }
+    markDays()
     logHasBefore = true
+    log.scrollTop = Math.max(0, oldScrollTop - (oldScrollHeight - (log.scrollHeight || 0)))
   }
 }
 
 function updateLogLayout(mode) {
   const anchor = getLogScrollAnchor()
   const log = $('#log')
-  log.querySelectorAll(':scope > .sys-summary-btn').forEach(b => b.remove())
-  log.querySelectorAll(':scope > [data-seq]').forEach(r => { r.hidden = false })
+  if (typeof log.getBoundingClientRect === 'function' && typeof log.querySelectorAll === 'function') {
+    log.querySelectorAll(':scope > .sys-summary-btn').forEach(b => b.remove())
+    log.querySelectorAll(':scope > [data-seq]').forEach(r => { r.hidden = false })
+  }
   trimLogWindow(mode)
   markDays()
   reflowLogGroups()
@@ -1937,8 +1953,10 @@ function renderLoadedPage(page, mode = 'replace') {
     last = null
     const frag = msgFragment(page.messages)
     const anchor = getLogScrollAnchor()
-    log.querySelectorAll(':scope > .sys-summary-btn').forEach(b => b.remove())
-    log.querySelectorAll(':scope > [data-seq]').forEach(r => { r.hidden = false })
+    if (typeof log.getBoundingClientRect === 'function' && typeof log.querySelectorAll === 'function') {
+      log.querySelectorAll(':scope > .sys-summary-btn').forEach(b => b.remove())
+      log.querySelectorAll(':scope > [data-seq]').forEach(r => { r.hidden = false })
+    }
     log.prepend(frag)
     trimLogWindow('prepend')
     markDays()
