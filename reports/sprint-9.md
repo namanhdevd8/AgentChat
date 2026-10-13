@@ -48,3 +48,4 @@ PM phát hiện ngày 2026-10-13: hai nhánh pm (`8a53be0`) và techlead (`d4daf
 - T38 thêm `post` tin lỗi trong `refuse()` của processMerge (main.js), mà catch ở main.js:485 vốn đã post tin "chưa gộp được nhánh". QA cần kiểm tra mỗi lỗi gộp chỉ ra **một** tin hệ thống.
 - T38 sửa `bootstrapDependencies` để bỏ qua manifest chỉ khác `version`, và không còn chặn hàng chờ bằng `needs-deps` lúc xếp hàng. Cần kiểm tra cả ca đổi `dependencies` thật vẫn bị chặn.
 - Nhánh dev-be (`0961b62`) và dev-fe (`f5a3057`) đều là checkpoint của lượt bị ngắt (quota/500). Khi nghiệm thu, coi `npm run check` trong hàng chờ merge là kết quả chính thức, không dựa vào lời báo pass.
+- Quan sát 2026-10-13 04:32Z: dev-be tự merge main để sửa xung đột (merge commit `c4db05b`, gộp thử với main `7b3749c` thì sạch). Lượt đó báo success, nhưng hàng chờ merge không có mục mới; mục cũ vẫn ở CONFLICT, phải bấm Thử lại. Techlead/QA xem đây có phải lỗi của luồng commitWorkspace khi agent tự commit không.
