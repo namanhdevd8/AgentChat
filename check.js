@@ -1405,6 +1405,38 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
     viewed = await call('readProjectFile', root, toURL(path.join(siblingWorkspace, 'secret.txt')).href, null, linkedWorkspace.id)
     assert.strictEqual(viewed.code, 'OUTSIDE_PROJECT')
   } finally { fs.rmSync(siblingWorkspace, { recursive: true, force: true }) }
+  // T41 (QA, independent review): no way out of the project or the registered agent worktrees through main's IPC
+  {
+    const outsideDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'qa-outside-'))), secret = path.join(outsideDir, 'secret.txt')
+    fs.writeFileSync(secret, 'BÍ MẬT')
+    const wt = linkedWorkspace.path, integrationDir = path.join(path.dirname(path.dirname(wt)), 'integration', require('crypto').randomUUID())
+    fs.symlinkSync(secret, path.join(wt, 'leak.txt')); fs.symlinkSync(outsideDir, path.join(wt, 'leakdir'))
+    fs.symlinkSync(secret, at('leak-root.txt'))
+    fs.mkdirSync(integrationDir, { recursive: true }); fs.writeFileSync(path.join(integrationDir, 'a.txt'), 'BÍ MẬT')
+    const rel = path.relative(root, secret), wtRel = path.relative(wt, secret)
+    const attempts = [
+      ['file://' + root + '/../' + path.basename(outsideDir) + '/secret.txt'], [root + '/reports/../../' + path.basename(outsideDir) + '/secret.txt'],
+      ['file://' + root + '/reports/%2e%2e/%2e%2e/' + path.basename(outsideDir) + '/secret.txt'], [toURL(secret).href], [secret],
+      ['file://localhost' + secret], ['file://evil.example' + at('a.txt')], [toURL(path.join(wt, 'leak.txt')).href], [toURL(path.join(wt, 'leakdir', 'secret.txt')).href],
+      [toURL(at('leak-root.txt')).href], ['leak-root.txt'], [toURL(path.join(integrationDir, 'a.txt')).href], [toURL(path.join(wt, '.chat', '..', '..', path.basename(outsideDir), 'secret.txt')).href],
+      [rel], [wtRel, null, linkedWorkspace.id], ['leak.txt', null, linkedWorkspace.id], ['leakdir/secret.txt', null, linkedWorkspace.id],
+      ['secret.txt', path.relative(wt, path.join(outsideDir, 'x.md')), linkedWorkspace.id], ['a.txt', null, '00000000-0000-0000-0000-000000000000'], ['a.txt', null, '../../x']]
+    for (const [href, from = null, ws] of attempts) {
+      let res
+      try { res = await call('readProjectFile', root, href, from, ws) } catch (e) { res = { ok: false, code: e.code || 'THROW' } }
+      assert.ok(!res.ok && !JSON.stringify(res).includes('BÍ MẬT'), `T41: đọc được ngoài dự án: ${href} ${from} ${ws} → ${JSON.stringify(res).slice(0, 200)}`)
+    }
+    for (const href of [toURL(secret).href, toURL(path.join(wt, 'leak.txt')).href, 'file://' + root + '/reports/%2e%2e/%2e%2e/' + path.basename(outsideDir) + '/secret.txt'])
+      await assert.rejects(Promise.resolve().then(() => call('openFile', root, href)), undefined, `T41: mở ngoài bằng app khác: ${href}`)
+    for (const href of [toURL(secret).href, toURL(path.join(wt, 'leak.txt')).href]) {
+      let res; try { res = await call('readImage', root, href, null, null) } catch (e) { res = { ok: false } }
+      assert.ok(!res?.ok, `T41: readImage ngoài dự án: ${href}`)
+    }
+    assert.ok((await call('readProjectFile', root, 'file://localhost' + at('a.txt'))).ok) // localhost host is the same machine
+    fs.rmSync(path.join(wt, 'leak.txt')); fs.rmSync(path.join(wt, 'leakdir')); fs.rmSync(at('leak-root.txt'))
+    fs.rmSync(integrationDir, { recursive: true, force: true }); fs.rmSync(outsideDir, { recursive: true, force: true })
+    console.log('ok (T41 file scope)')
+  }
   fs.rmSync(at('dirty.tmp'))
   const blockedId = entries[0].id
   assert.ok((await call('retryMerge', root, { queueId: blockedId })).ok)
