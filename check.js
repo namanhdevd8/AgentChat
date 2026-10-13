@@ -1410,6 +1410,20 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
     + JSON.stringify(log().slice(mark).filter(m => m.from === 'system').map(m => m.text))) }
   entries = queue().slice(q0); q0 = queue().length
   assert.deepStrictEqual([entries.map(e => e.state), lines()[5]], [['merged'], 'l5']); clean()
+  const scopeWarnings = from => log().slice(from).filter(m => m.kind === 'scope-warning').map(m => m.text)
+  assert.deepStrictEqual(scopeWarnings(mark), [], 'files main brought in must not be blamed on the agent')
+  // a branch that only bumps the version is checked and merged (manifests compared after the merge)
+  mark = log().length
+  await edit({ 'dev-c': [['package.json', 6, '  "version": "0.6.1"']] }, '@dev-c chỉ tăng version')
+  entries = await settle(1, 'merge nhánh dev-c chỉ đổi version')
+  assert.deepStrictEqual([entries.map(e => e.state), JSON.parse(fs.readFileSync(at('package.json'), 'utf8')).version], [['merged'], '0.6.1']); clean()
+  // a real out-of-scope edit by the agent is still caught after the main-diff filter: warned, named, not committed or queued
+  mark = log().length; const q1 = queue().length
+  await edit({ 'dev-c': [['notes.md', 0, 'dev-c sửa']] }, '@dev-c sửa notes.md (ngoài phạm vi)')
+  await waitFor('cảnh báo ngoài phạm vi của dev-c', () => scopeWarnings(mark).some(t => t.includes('@dev-c') && t.includes('notes.md')))
+  await waitFor('dev-c trả lời', () => log().slice(mark).some(m => m.from === 'dev-c'))
+  await new Promise(r => setTimeout(r, 300))
+  assert.deepStrictEqual([queue().length, fs.readFileSync(at('notes.md'), 'utf8')], [q1, 'main\n'])
   // T38: only a version bump passes, but a branch that changes real dependencies must not be checked/merged with the old
   // node_modules: blocked (one message), main untouched
   mark = log().length; const pkgBefore = fs.readFileSync(at('package.json'), 'utf8')
