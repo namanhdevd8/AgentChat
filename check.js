@@ -1064,6 +1064,23 @@ async function rendererS9Checks() {
   ctx.box = '.chat2'; await ctx.refreshFiles(); assert.strictEqual(view()[0], '.chat2/memory.md') // the open box's memory
   assert.ok(!store.has('file-groups:v1:' + JSON.stringify(['/p', '.chat2'])) || !JSON.parse(store.get('file-groups:v1:' + JSON.stringify(['/p', '.chat2'])))['sprint:9'])
   ctx.localStorage.getItem = () => '{hỏng'; await ctx.refreshFiles(); assert.strictEqual(view()[0], '.chat2/memory.md') // broken storage: defaults
+  // Absolute paths (core.files output): normalized against dir, original path preserved for openFileViewer
+  ctx.box = '.chat'; ctx.localStorage.getItem = k => store.has(k) ? store.get(k) : null
+  list = ['/p/agents.json', '/p/reports/sprint-9-design.md', '/p/reports/sprint-9.md', '/p/reports/roadmap.md', '/p/.chat/memory.md']
+  await ctx.refreshFiles()
+  assert.deepStrictEqual(view(), ['/p/.chat/memory.md', '/p/reports/roadmap.md',
+    ['Sprint 9 · 2', '/p/reports/sprint-9.md', '/p/reports/sprint-9-design.md'],
+    ['Khác · 1', '/p/agents.json']])
+  opened.length = 0; $('#files').children[0].children[0].onclick()
+  assert.deepStrictEqual(opened, ['/p/.chat/memory.md'])
+  // Windows absolute paths with backslashes
+  ctx.dir = 'C:\\p'; ctx.box = '.chat'
+  list = ['C:\\p\\agents.json', 'C:\\p\\reports\\sprint-9.md', 'C:\\p\\reports\\roadmap.md', 'C:\\p\\.chat\\memory.md']
+  await ctx.refreshFiles()
+  assert.deepStrictEqual(view(), ['C:\\p\\.chat\\memory.md', 'C:\\p\\reports\\roadmap.md',
+    ['Sprint 9 · 1', 'C:\\p\\reports\\sprint-9.md'],
+    ['Khác · 1', 'C:\\p\\agents.json']])
+  ctx.dir = '/p'
   // a reply for the previous box (same folder) must not overwrite the panel
   let release; ctx.api.files = () => new Promise(r => { release = r })
   const before = $('#files').children[0], pending = ctx.refreshFiles(); ctx.box = '.chat'; ctx.openSeq++
