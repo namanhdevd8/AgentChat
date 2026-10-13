@@ -1168,13 +1168,34 @@ async function mainHarness() {
   const Module = require('module'), { execFileSync } = require('child_process')
   const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-chat-ud-')), handlers = {}, sent = []
   let dialogs = 0, dialogAnswer = 0, pickPath = null
-  const webContents = { send: (...a) => sent.push(a), setWindowOpenHandler() {}, on() {} }
+  const mainFrame = { id: 1 }
+  const webContents = { send: (...a) => sent.push(a), setWindowOpenHandler() {},
+    on(event, fn) { if (!this._listeners) this._listeners = {}; (this._listeners[event] = this._listeners[event] || []).push(fn) },
+    emit(event, ...args) { for (const fn of this._listeners?.[event] || []) fn(...args) }, mainFrame, id: 1 }
+  const registeredSchemes = []
+  const protocolHandlers = {}
+  let webRequestFilter = null, webRequestCallback = null
+  const protocol = {
+    registerSchemesAsPrivileged: schemes => { registeredSchemes.push(...schemes) },
+    handle: (scheme, fn) => { protocolHandlers[scheme] = fn }
+  }
+  const session = {
+    defaultSession: {
+      protocol,
+      webRequest: {
+        onBeforeRequest: (filter, cb) => { webRequestFilter = filter; webRequestCallback = cb }
+      },
+      on: () => {}
+    }
+  }
   const electron = { app: { getPath: () => userData, requestSingleInstanceLock: () => true, whenReady: () => Promise.resolve(), on() {}, quit() {} },
-    BrowserWindow: function () { return { webContents, loadFile: () => Promise.resolve(), isMinimized: () => false, on() {} } },
-    ipcMain: { handle: (name, fn) => { handlers[name] = fn } }, shell: {},
+    BrowserWindow: function () { return { webContents, loadFile: () => Promise.resolve(), isMinimized: () => false, on(e, fn) { webContents.on(e, fn) }, isDestroyed: () => false } },
+    ipcMain: { handle: (name, fn) => { handlers[name] = fn } }, shell: { openPath: async () => '' },
     Menu: { setApplicationMenu() {}, buildFromTemplate: t => t }, nativeTheme: { themeSource: 'system', on() {} }, screen: { getAllDisplays: () => [] },
     dialog: { showMessageBox: async () => { dialogs++; return { response: dialogAnswer, checkboxChecked: true } },
-      showOpenDialog: async () => ({ canceled: !pickPath, filePaths: [pickPath] }) } }
+      showMessageBoxSync: () => 0,
+      showOpenDialog: async () => ({ canceled: !pickPath, filePaths: [pickPath] }) },
+    protocol, session }
   const load = Module._load
   Module._load = function (request, ...rest) { return request === 'electron' ? electron : load.call(this, request, ...rest) }
 
@@ -1237,7 +1258,7 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
 
   require('./main'); await new Promise(r => setImmediate(r))
   core.trustConfig(root, core.configTrust(root).texts) // the fixture team is the user's own: pin it as accepted
-  const ev = { sender: webContents }, call = (name, ...args) => handlers[name](ev, ...args)
+  const ev = { sender: webContents, senderFrame: mainFrame }, call = (name, ...args) => handlers[name](ev, ...args)
   await call('open', root)
   assert.strictEqual(await call('theme', 'dark'), 'dark') // theme: only the three sources, kept in userData
   assert.throws(() => call('theme', 'red'))
@@ -1436,6 +1457,151 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
     fs.rmSync(path.join(wt, 'leak.txt')); fs.rmSync(path.join(wt, 'leakdir')); fs.rmSync(at('leak-root.txt'))
     fs.rmSync(integrationDir, { recursive: true, force: true }); fs.rmSync(outsideDir, { recursive: true, force: true })
     console.log('ok (T41 file scope)')
+  }
+  // Sprint 10 BE: senderFrame validation, readImage with workspace, HTML preview lifecycle, protocol handling, openHtmlExternal
+  {
+    // 1. senderFrame validation
+    await assert.rejects(handlers['readProjectFile']({ sender: webContents, senderFrame: { id: 2 } }, root, 'a.txt'), /Nguồn IPC không hợp lệ/)
+    await assert.rejects(handlers['createHtmlPreview']({ sender: webContents, senderFrame: { id: 2 } }, root, 'page.html'), /Nguồn IPC không hợp lệ/)
+    await assert.rejects(handlers['openHtmlExternal']({ sender: webContents, senderFrame: { id: 2 } }, root, 'page.html'), /Nguồn IPC không hợp lệ/)
+    await assert.rejects(handlers['readImage']({ sender: webContents, senderFrame: { id: 2 } }, root, 'test.png'), /Nguồn IPC không hợp lệ/)
+    await assert.rejects(handlers['readProjectFile']({ sender: {}, senderFrame: mainFrame }, root, 'a.txt'), /Nguồn IPC không hợp lệ/)
+
+    // 2. readImage with workspace routing
+    const pngSample = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(16)])
+    fs.writeFileSync(at('test.png'), pngSample)
+    const imgRoot = await call('readImage', root, 'test.png')
+    assert.strictEqual(imgRoot.ok, true)
+    assert.strictEqual(imgRoot.mime, 'image/png')
+    assert.strictEqual(imgRoot.workspace, null)
+    assert.strictEqual(typeof imgRoot.canOpenExternal, 'boolean')
+
+    const wt = linkedWorkspace.path
+    const svgStr = '<svg xmlns="http://www.w3.org/2000/svg"><rect width="10" height="10"/></svg>'
+    fs.writeFileSync(path.join(wt, 'test-wt.svg'), svgStr)
+    const imgWt = await call('readImage', root, 'test-wt.svg', null, linkedWorkspace.id)
+    assert.strictEqual(imgWt.ok, true)
+    assert.strictEqual(imgWt.mime, 'image/svg+xml')
+    assert.strictEqual(imgWt.canOpenExternal, false)
+    assert.deepStrictEqual(imgWt.workspace, { id: linkedWorkspace.id, branch: linkedWorkspace.branch })
+
+    fs.writeFileSync(at('fake.png'), svgStr)
+    const imgFake = await call('readImage', root, 'fake.png')
+    assert.strictEqual(imgFake.ok, false)
+    assert.strictEqual(imgFake.code, 'UNSUPPORTED')
+
+    // 3. createHtmlPreview
+    const htmlStr = '<!DOCTYPE html><html><head><link rel="stylesheet" href="style.css"></head><body><h1>Hello</h1><img src="test.png"></body></html>'
+    fs.writeFileSync(at('page.html'), htmlStr)
+    fs.writeFileSync(at('style.css'), 'h1 { color: red; }')
+    const previewRes = await call('createHtmlPreview', root, 'page.html')
+    assert.strictEqual(previewRes.ok, true)
+    assert.strictEqual(previewRes.file.path, 'page.html')
+    assert.strictEqual(previewRes.file.format, 'text')
+    assert.strictEqual(previewRes.file.content, htmlStr)
+    assert.strictEqual(previewRes.workspace, null)
+    assert.ok(previewRes.preview.id)
+    assert.strictEqual(previewRes.preview.url, 'agent-preview://' + previewRes.preview.id + '/files/page.html')
+
+    const nonHtmlRes = await call('createHtmlPreview', root, 'a.txt')
+    assert.strictEqual(nonHtmlRes.ok, false)
+    assert.strictEqual(nonHtmlRes.code, 'UNSUPPORTED')
+
+    const notFoundRes = await call('createHtmlPreview', root, 'nonexistent.html')
+    assert.strictEqual(notFoundRes.ok, false)
+    assert.strictEqual(notFoundRes.code, 'NOT_FOUND')
+
+    // 4. Protocol handler
+    const entryReq = new Request(previewRes.preview.url, { method: 'GET' })
+    const entryResp = await protocolHandlers['agent-preview'](entryReq)
+    assert.strictEqual(entryResp.status, 200)
+    assert.strictEqual(entryResp.headers.get('Content-Type'), 'text/html; charset=utf-8')
+    assert.ok(entryResp.headers.get('Content-Security-Policy').includes('agent-preview://' + previewRes.preview.id))
+    assert.ok(entryResp.headers.get('Content-Security-Policy').includes('sandbox'))
+    assert.strictEqual(entryResp.headers.get('X-Content-Type-Options'), 'nosniff')
+    assert.strictEqual(await entryResp.text(), htmlStr)
+
+    const postReq = new Request(previewRes.preview.url, { method: 'POST' })
+    const postResp = await protocolHandlers['agent-preview'](postReq)
+    assert.strictEqual(postResp.status, 405)
+
+    const cssUrl = 'agent-preview://' + previewRes.preview.id + '/files/style.css'
+    const cssReq = new Request(cssUrl, { method: 'GET' })
+    const cssResp = await protocolHandlers['agent-preview'](cssReq)
+    assert.strictEqual(cssResp.status, 200)
+    assert.strictEqual(cssResp.headers.get('Content-Type'), 'text/css; charset=utf-8')
+    assert.strictEqual(await cssResp.text(), 'h1 { color: red; }')
+
+    const imgAssetUrl = 'agent-preview://' + previewRes.preview.id + '/files/test.png'
+    const imgAssetResp = await protocolHandlers['agent-preview'](new Request(imgAssetUrl, { method: 'GET' }))
+    assert.strictEqual(imgAssetResp.status, 200)
+    assert.strictEqual(imgAssetResp.headers.get('Content-Type'), 'image/png')
+
+    fs.writeFileSync(at('script.js'), 'console.log(1)')
+    const jsUrl = 'agent-preview://' + previewRes.preview.id + '/files/script.js'
+    const jsResp = await protocolHandlers['agent-preview'](new Request(jsUrl, { method: 'GET' }))
+    assert.strictEqual(jsResp.status, 415)
+
+    const badUrls = [
+      'agent-preview://' + previewRes.preview.id + '/files/../secret.txt',
+      'agent-preview://' + previewRes.preview.id + '/files/%2e%2e/secret.txt',
+      'agent-preview://' + previewRes.preview.id + '/files/a%2fb.css',
+      'agent-preview://' + previewRes.preview.id + '/files/sub\\style.css'
+    ]
+    for (const badUrl of badUrls) {
+      const badResp = await protocolHandlers['agent-preview'](new Request(badUrl, { method: 'GET' }))
+      assert.ok(badResp.status >= 400, 'traversal phải bị từ chối: ' + badUrl)
+    }
+
+    // 5. webRequest filter
+    let allowedCss = false
+    webRequestCallback({ url: cssUrl, method: 'GET', resourceType: 'stylesheet', frame: { id: 2 } }, res => { allowedCss = !res.cancel })
+    assert.strictEqual(allowedCss, true)
+
+    let blockedExt = false
+    webRequestCallback({ url: 'https://evil.example/font.woff', method: 'GET', resourceType: 'font', frame: { id: 2 } }, res => { blockedExt = res.cancel })
+    assert.strictEqual(blockedExt, true)
+
+    let blockedScript = false
+    webRequestCallback({ url: jsUrl, method: 'GET', resourceType: 'script', frame: { id: 2 } }, res => { blockedScript = res.cancel })
+    assert.strictEqual(blockedScript, true)
+
+    // 6. Esc key notification
+    sent.length = 0
+    webContents.emit('before-input-event', {}, { type: 'keyDown', key: 'Escape' })
+    assert.ok(sent.some(([channel, id]) => channel === 'html-preview-escape' && id === previewRes.preview.id))
+
+    // 7. closeHtmlPreview
+    const closeRes = await call('closeHtmlPreview', previewRes.preview.id)
+    assert.strictEqual(closeRes.ok, true)
+    const deadResp = await protocolHandlers['agent-preview'](new Request(previewRes.preview.url, { method: 'GET' }))
+    assert.strictEqual(deadResp.status, 404)
+
+    // 8. openHtmlExternal
+    const badOpen = await call('openHtmlExternal', root, 'a.txt')
+    assert.strictEqual(badOpen.ok, false)
+    assert.strictEqual(badOpen.code, 'UNSUPPORTED')
+
+    dialogAnswer = 0
+    const cancelOpen = await call('openHtmlExternal', root, 'page.html')
+    assert.strictEqual(cancelOpen.ok, true)
+    assert.strictEqual(cancelOpen.opened, false)
+
+    dialogAnswer = 1
+    const okOpen = await call('openHtmlExternal', root, 'page.html')
+    assert.strictEqual(okOpen.ok, true)
+    assert.strictEqual(okOpen.opened, true)
+
+    await assert.rejects(call('openFile', root, 'page.html'))
+    await assert.rejects(call('openFile', root, 'test-wt.svg', null, linkedWorkspace.id))
+
+    fs.unlinkSync(at('test.png'))
+    fs.unlinkSync(path.join(wt, 'test-wt.svg'))
+    fs.unlinkSync(at('fake.png'))
+    fs.unlinkSync(at('page.html'))
+    fs.unlinkSync(at('style.css'))
+    fs.unlinkSync(at('script.js'))
+    console.log('ok (sprint 10 BE IPC & protocol)')
   }
   fs.rmSync(at('dirty.tmp'))
   const blockedId = entries[0].id
@@ -1723,6 +1889,63 @@ console.log('ok (windows args)')
       assert.ok(briefing.text.includes('![mô tả](.chat/attachments/'))
       console.log('ok (images)')
     }).catch(e => { console.error(e); process.exit(1) })
+}
+// SVG detection, image types, and bounded file reading
+{
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-svg-')); core.init(d)
+  const validSvg = '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect/></svg>'
+  const bomSvg = '\ufeff<svg xmlns="http://www.w3.org/2000/svg"><circle/></svg>'
+  const xmlDeclSvg = '<?xml version="1.0" encoding="utf-8"?>\n<!-- note -->\n<svg xmlns="http://www.w3.org/2000/svg"><path/></svg>'
+  const selfCloseSvg = '<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg" />'
+  for (const s of [validSvg, bomSvg, xmlDeclSvg, selfCloseSvg]) {
+    assert.strictEqual(core.isSvgBytes(Buffer.from(s, 'utf8')), true, 'must be recognized as SVG: ' + s)
+    assert.strictEqual(core.imageType(Buffer.from(s, 'utf8')), 'svg')
+  }
+
+  const badSvgs = [
+    '<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd"><svg xmlns="http://www.w3.org/2000/svg"></svg>',
+    '<!ENTITY secret SYSTEM "file:///etc/passwd"><svg xmlns="http://www.w3.org/2000/svg"></svg>',
+    '<?xml-stylesheet type="text/css" href="style.css"?><svg xmlns="http://www.w3.org/2000/svg"></svg>',
+    '<html><body><svg xmlns="http://www.w3.org/2000/svg"></svg></body></html>',
+    '<svg width="10"><rect/></svg>', // missing xmlns
+    '<svg', // truncated
+    'plain text',
+  ]
+  for (const bad of badSvgs) {
+    assert.strictEqual(core.isSvgBytes(Buffer.from(bad, 'utf8')), false, 'must reject: ' + bad)
+  }
+
+  // 5 image types
+  const pngBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0, 0, 0, 0, 0])
+  const jpgBytes = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 0x10, 0x4a, 0x46, 0x49, 0x46, 0, 0, 0, 0, 0, 0])
+  const gifBytes = Buffer.from('GIF89a\x01\x00\x01\x00\x80\x00\x00', 'latin1')
+  const webpBytes = Buffer.concat([Buffer.from('RIFF', 'latin1'), Buffer.alloc(4), Buffer.from('WEBP', 'latin1')])
+  assert.strictEqual(core.imageType(pngBytes), 'png')
+  assert.strictEqual(core.imageType(jpgBytes), 'jpg')
+  assert.strictEqual(core.imageType(gifBytes), 'gif')
+  assert.strictEqual(core.imageType(webpBytes), 'webp')
+
+  // readImage with SVG
+  fs.writeFileSync(path.join(d, 'reports/icon.svg'), validSvg)
+  // Fake extension
+  fs.writeFileSync(path.join(d, 'reports/fake.svg'), pngBytes)
+  fs.writeFileSync(path.join(d, 'reports/fake.png'), Buffer.from(validSvg, 'utf8'))
+
+  Promise.all([
+    core.readImage(d, 'reports/icon.svg'),
+    core.readImage(d, 'reports/fake.svg'),
+    core.readImage(d, 'reports/fake.png'),
+  ]).then(([svgRes, fakeSvgRes, fakePngRes]) => {
+    assert.strictEqual(svgRes.ok, true)
+    assert.strictEqual(svgRes.mime, 'image/svg+xml')
+    assert.strictEqual(svgRes.name, 'icon.svg')
+    assert.strictEqual(svgRes.canOpenExternal, false) // SVG canOpenExternal is always false
+    assert.strictEqual(fakeSvgRes.ok, false)
+    assert.strictEqual(fakeSvgRes.code, 'UNSUPPORTED')
+    assert.strictEqual(fakePngRes.ok, false)
+    assert.strictEqual(fakePngRes.code, 'UNSUPPORTED')
+    console.log('ok (svg & image types)')
+  }).catch(e => { console.error(e); process.exit(1) })
 }
 // the model a turn ran on: claude's init event names it; codex from -m or config.toml, named like its models_cache
 {

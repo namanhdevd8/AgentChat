@@ -1718,22 +1718,21 @@ function resolveProjectFile(dir, href, fromFile = null) {
     canOpenExternal: (relative.startsWith('reports/') || /^\.chat\d*\//.test(relative)) && EXTERNAL_EXTENSIONS.has(extension) }
 }
 
-async function readProjectFile(dir, href, fromFile = null) {
-  let info, handle
+async function readBoundedFile(info, limit, limitMessage) {
+  let handle
   try {
-    info = resolveProjectFile(dir, href, fromFile)
     handle = await rawFs.promises.open(info.real, rawFs.constants.O_RDONLY | (rawFs.constants.O_NOFOLLOW || 0))
     const before = await handle.stat(), meta = { path: info.relative, name: info.name, canOpenExternal: info.canOpenExternal }
     if (!before.isFile()) throw fail('UNSUPPORTED', 'Đường dẫn không phải file', meta)
-    if (before.size > PROJECT_FILE_LIMIT) throw fail('TOO_LARGE', 'File vượt quá 2 MiB', meta)
-    const buffer = Buffer.alloc(PROJECT_FILE_LIMIT + 1)
+    if (before.size > limit) throw fail('TOO_LARGE', limitMessage, meta)
+    const buffer = Buffer.alloc(limit + 1)
     let length = 0
     while (length < buffer.length) {
       const { bytesRead } = await handle.read(buffer, length, buffer.length - length, length)
       if (!bytesRead) break
       length += bytesRead
     }
-    if (length > PROJECT_FILE_LIMIT) throw fail('TOO_LARGE', 'File vượt quá 2 MiB', meta)
+    if (length > limit) throw fail('TOO_LARGE', limitMessage, meta)
     const after = await handle.stat()
     let currentReal
     try { currentReal = await rawFs.promises.realpath(info.real) } catch { throw fail('FILE_CHANGED', 'File thay đổi trong lúc đọc', meta) }
@@ -1744,6 +1743,17 @@ async function readProjectFile(dir, href, fromFile = null) {
       || after.dev !== current.dev || after.ino !== current.ino || after.size !== current.size || after.mtimeMs !== current.mtimeMs)
       throw fail('FILE_CHANGED', 'File thay đổi trong lúc đọc', meta)
     const bytes = buffer.subarray(0, length)
+    return { bytes, meta }
+  } finally { await handle?.close().catch(() => {}) }
+}
+
+async function readProjectFile(dir, href, fromFile = null) {
+  let meta
+  try {
+    const info = resolveProjectFile(dir, href, fromFile)
+    const res = await readBoundedFile(info, PROJECT_FILE_LIMIT, 'File vượt quá 2 MiB')
+    meta = res.meta
+    const bytes = res.bytes
     if (bytes.some(byte => byte < 32 && byte !== 9 && byte !== 10 && byte !== 13)) throw fail('UNSUPPORTED', 'File không phải văn bản UTF-8', meta)
     let content
     try { content = new TextDecoder('utf-8', { fatal: true }).decode(bytes) } catch { throw fail('UNSUPPORTED', 'File không phải văn bản UTF-8', meta) }
@@ -1752,26 +1762,77 @@ async function readProjectFile(dir, href, fromFile = null) {
       version: createHash('sha256').update(bytes).digest('hex') } }
   } catch (e) {
     const code = ['INVALID_PATH', 'OUTSIDE_PROJECT', 'NOT_FOUND', 'UNSUPPORTED', 'TOO_LARGE', 'FILE_CHANGED'].includes(e.code) ? e.code : 'IO_ERROR'
-    return { ok: false, code, message: e.message || 'Không đọc được file', ...(e.file ? { file: e.file } : {}) }
-  } finally { await handle?.close().catch(() => {}) }
+    return { ok: false, code, message: e.message || 'Không đọc được file', ...(e.file ? { file: e.file } : (meta ? { file: meta } : {})) }
+  }
 }
 
 // ---- images: pasted into the composer as ![ảnh](.chat/attachments/…), shown inline wherever markdown has ![alt](path).
 // Agents get only the path in their prompt and open it with their own tools (claude Read, codex view_image): no argv.
 const IMAGE_LIMIT = 10 * 1024 * 1024
-const IMAGE_MIME = { png: 'image/png', jpg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp' }
-const imageType = b => b.length < 12 ? null // by content, never by the name: SVG and anything else is refused
-  : b[0] === 0x89 && b.toString('latin1', 1, 4) === 'PNG' ? 'png'
-    : b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff ? 'jpg'
-      : b.toString('latin1', 0, 4) === 'GIF8' ? 'gif'
-        : b.toString('latin1', 0, 4) === 'RIFF' && b.toString('latin1', 8, 12) === 'WEBP' ? 'webp' : null
+const IMAGE_MIME = { png: 'image/png', jpg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', svg: 'image/svg+xml' }
+const IMAGE_EXTENSIONS = { '.png': 'png', '.jpg': 'jpg', '.jpeg': 'jpg', '.gif': 'gif', '.webp': 'webp', '.svg': 'svg' }
+
+function isSvgBytes(bytes) {
+  if (bytes.length < 16) return false
+  let text
+  try { text = new TextDecoder('utf-8', { fatal: true }).decode(bytes) }
+  catch { return false }
+  if (text.charCodeAt(0) === 0xfeff) text = text.slice(1)
+  if (/<!DOCTYPE/i.test(text) || /<!ENTITY/i.test(text)) return false
+  if (/<\?(?!xml[\s>])/i.test(text)) return false
+
+  let pos = 0
+  const skipWs = () => { while (pos < text.length && /\s/.test(text[pos])) pos++ }
+  skipWs()
+  if (text.startsWith('<?xml', pos)) {
+    const end = text.indexOf('?>', pos)
+    if (end === -1) return false
+    pos = end + 2
+    skipWs()
+  }
+  while (text.startsWith('<!--', pos)) {
+    const end = text.indexOf('-->', pos)
+    if (end === -1) return false
+    pos = end + 4
+    skipWs()
+  }
+  if (!text.slice(pos).match(/^<svg[\s>/]/i)) return false
+  let inQuote = null, tagEnd = -1
+  for (let i = pos + 4; i < text.length; i++) {
+    const ch = text[i]
+    if (inQuote) {
+      if (ch === inQuote) inQuote = null
+    } else if (ch === '"' || ch === "'") {
+      inQuote = ch
+    } else if (ch === '>') {
+      tagEnd = i
+      break
+    }
+  }
+  if (tagEnd === -1) return false
+  const svgTag = text.slice(pos, tagEnd + 1)
+  if (!/\bxmlns\s*=\s*["']http:\/\/www\.w3\.org\/2000\/svg["']/i.test(svgTag)) return false
+  const trimmed = svgTag.trimEnd()
+  if (trimmed.endsWith('/>')) return true
+  return /<\/svg\s*>/i.test(text)
+}
+
+const imageType = b => {
+  if (b.length < 12) return null
+  if (b[0] === 0x89 && b.toString('latin1', 1, 4) === 'PNG') return 'png'
+  if (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return 'jpg'
+  if (b.toString('latin1', 0, 4) === 'GIF8') return 'gif'
+  if (b.toString('latin1', 0, 4) === 'RIFF' && b.toString('latin1', 8, 12) === 'WEBP') return 'webp'
+  if (isSvgBytes(b)) return 'svg'
+  return null
+}
 
 function saveImage(dir, data) {
   if (!ArrayBuffer.isView(data)) throw fail('INVALID_ARGUMENT', 'Dữ liệu ảnh không hợp lệ')
   const bytes = Buffer.from(data.buffer, data.byteOffset, data.byteLength)
   if (bytes.length > IMAGE_LIMIT) throw fail('TOO_LARGE', 'Ảnh vượt quá 10 MiB')
   const type = imageType(bytes)
-  if (!type) throw fail('UNSUPPORTED', 'Chỉ nhận ảnh PNG, JPEG, GIF hoặc WebP')
+  if (!type || type === 'svg') throw fail('UNSUPPORTED', 'Chỉ nhận ảnh PNG, JPEG, GIF hoặc WebP')
   noLinkBox(dir)
   const folder = chat(dir, 'attachments')
   try { rawFs.mkdirSync(folder) } catch (e) { if (e.code !== 'EEXIST') throw e }
@@ -1783,18 +1844,23 @@ function saveImage(dir, data) {
 }
 
 async function readImage(dir, href, fromFile = null) {
-  let handle
+  let meta
   try {
     const info = resolveProjectFile(dir, href, fromFile)
-    handle = await rawFs.promises.open(info.real, rawFs.constants.O_RDONLY | (rawFs.constants.O_NOFOLLOW || 0))
-    if ((await handle.stat()).size > IMAGE_LIMIT) throw fail('TOO_LARGE', 'Ảnh vượt quá 10 MiB')
-    const bytes = await handle.readFile(), type = imageType(bytes)
-    if (!type || bytes.length > IMAGE_LIMIT) throw fail('UNSUPPORTED', 'File không phải ảnh PNG, JPEG, GIF hoặc WebP')
-    return { ok: true, path: info.relative, mime: IMAGE_MIME[type], bytes }
+    const res = await readBoundedFile(info, IMAGE_LIMIT, 'Ảnh vượt quá 10 MiB')
+    meta = res.meta
+    const bytes = res.bytes
+    const type = imageType(bytes)
+    if (!type) throw fail('UNSUPPORTED', 'File không phải ảnh PNG, JPEG, GIF, WebP hoặc SVG', meta)
+    const ext = path.extname(info.real).toLowerCase()
+    if (IMAGE_EXTENSIONS[ext] && IMAGE_EXTENSIONS[ext] !== type) throw fail('UNSUPPORTED', 'File không đúng định dạng ảnh', meta)
+    return { ok: true, path: info.relative, name: info.name, mime: IMAGE_MIME[type], bytes,
+      version: createHash('sha256').update(bytes).digest('hex'),
+      canOpenExternal: type !== 'svg' && info.canOpenExternal }
   } catch (e) {
-    const code = ['INVALID_PATH', 'OUTSIDE_PROJECT', 'NOT_FOUND', 'UNSUPPORTED', 'TOO_LARGE'].includes(e.code) ? e.code : 'IO_ERROR'
-    return { ok: false, code, message: e.message || 'Không đọc được ảnh' }
-  } finally { await handle?.close().catch(() => {}) }
+    const code = ['INVALID_PATH', 'OUTSIDE_PROJECT', 'NOT_FOUND', 'UNSUPPORTED', 'TOO_LARGE', 'FILE_CHANGED'].includes(e.code) ? e.code : 'IO_ERROR'
+    return { ok: false, code, message: e.message || 'Không đọc được ảnh', ...(e.file ? { file: e.file } : (meta ? { file: meta } : {})) }
+  }
 }
 
 const fmt = msgs => msgs.map(m => `[${m.from}] ${m.retracted ? '(tin đã được thu hồi, bỏ qua)' : m.text}`).join('\n')
@@ -2335,4 +2401,4 @@ module.exports = { CHAT_DIR, chat, chatName, useBox, boxes, createBox, CLI, acco
   timeoutMinutes, sessionTokenLimit, sessions, setSession, sessionRotationPending, readHandoff, writeHandoff,
   mentions, files, normalizeScope, ownsList, probe, winArg, spawnCli, shimTarget, normalizeAllowedCommands, scopeAllows, scopeLocks, lockConflict, snapshot, changedPaths, promptIndexed, run, runCommand, groupAlive,
   migrateTaskScope, parseTaskDefinitions, taskBoardIndexed, parseTaskStatusBlock, parseRunCommandBlock, parseHandoffBlock, validateTaskChanges,
-  decodedPath, resolveProjectFile, readProjectFile, saveImage, readImage, modelLabel }
+  decodedPath, resolveProjectFile, readProjectFile, readBoundedFile, isSvgBytes, imageType, IMAGE_MIME, IMAGE_EXTENSIONS, saveImage, readImage, modelLabel }

@@ -1,8 +1,14 @@
-const { app, BrowserWindow, ipcMain, dialog, shell, Menu, nativeTheme, screen } = require('electron')
+const { app, BrowserWindow, ipcMain, dialog, shell, Menu, nativeTheme, screen, protocol, session } = require('electron')
 const { execFileSync, execFile } = require('child_process')
-const { randomUUID, createHash } = require('crypto')
+const { randomUUID, createHash, randomBytes } = require('crypto')
 const { promisify } = require('util')
 const fs = require('fs'), path = require('path')
+
+if (protocol?.registerSchemesAsPrivileged) {
+  protocol.registerSchemesAsPrivileged([
+    { scheme: 'agent-preview', privileges: { standard: true, secure: true } }
+  ])
+}
 const rawFs = process.versions.electron ? require('original-fs') : fs
 const core = require('./core')
 
@@ -1351,13 +1357,154 @@ function resolveFile(dir, input, workspaceId = null) {
   return file.real
 }
 
-const validSender = event => { if (event.sender !== win?.webContents) throw new Error('Nguồn IPC không hợp lệ') }
+const validSender = event => {
+  if (event.sender !== win?.webContents || (win?.webContents?.mainFrame && event.senderFrame !== win.webContents.mainFrame))
+    throw new Error('Nguồn IPC không hợp lệ')
+}
 const apiError = error => {
   const detail = redactManagedPath(error.message || 'Thao tác thất bại')
   const message = error.permissionSaved ? `Đã lưu quyền nhưng chưa chạy lại: ${detail}` : detail
   return { ok: false, error: { code: error.code || 'IO_ERROR', message, ...(error.permissionSaved ? { permissionSaved: true } : {}) } }
 }
 const apiCall = async action => { try { return { ok: true, ...await action() } } catch (e) { return apiError(e) } }
+
+let activePreview = null, previewGen = 0
+function closeCurrentPreview() {
+  if (activePreview) {
+    activePreview.closed = true
+    activePreview = null
+    previewGen++
+  }
+}
+
+async function handleAgentPreview(request) {
+  const plain = (msg, status) => new Response(msg, {
+    status,
+    headers: { 'Content-Type': 'text/plain; charset=utf-8', 'X-Content-Type-Options': 'nosniff' }
+  })
+
+  if (request.method !== 'GET') return plain('Method Not Allowed', 405)
+
+  let url
+  try { url = new URL(request.url) } catch { return plain('Bad Request', 400) }
+  if (url.protocol !== 'agent-preview:') return plain('Bad Request', 400)
+  if (url.username || url.password || url.port) return plain('Forbidden', 403)
+
+  if (!activePreview || activePreview.closed || url.hostname !== activePreview.token) {
+    return plain('Not Found', 404)
+  }
+
+  const current = activePreview
+  const rawPath = request.url.slice(('agent-preview://' + url.host).length).split(/[?#]/, 1)[0]
+  if (!rawPath.startsWith('/files/')) return plain('Forbidden', 403)
+  if (/%2f/i.test(rawPath) || /%5c/i.test(rawPath) || rawPath.includes('\\') || /[\0-\x1f\x7f]/.test(rawPath)) {
+    return plain('Bad Request', 400)
+  }
+
+  const subPath = rawPath.slice('/files/'.length)
+  if (!subPath) return plain('Bad Request', 400)
+  const segments = subPath.split('/')
+  const decodedSegments = []
+  for (const seg of segments) {
+    if (!seg || seg === '.' || seg === '..') return plain('Bad Request', 400)
+    let dec
+    try { dec = decodeURIComponent(seg) } catch { return plain('Bad Request', 400) }
+    if (!dec || dec === '.' || dec === '..' || dec.includes('/') || dec.includes('\\') || /[\0-\x1f\x7f]/.test(dec)) {
+      return plain('Bad Request', 400)
+    }
+    decodedSegments.push(dec)
+  }
+  const relative = decodedSegments.join('/')
+
+  // Entry HTML
+  if (relative === current.entryRelativePath) {
+    if (current.closed) return plain('Not Found', 404)
+    const token = current.token
+    const csp = `default-src 'none'; script-src 'none'; style-src 'unsafe-inline' agent-preview://${token}; img-src agent-preview://${token}; font-src 'none'; connect-src 'none'; media-src 'none'; object-src 'none'; frame-src 'none'; worker-src 'none'; base-uri 'none'; form-action 'none'; sandbox`
+    return new Response(current.htmlContent, {
+      status: 200,
+      headers: {
+        'Content-Type': 'text/html; charset=utf-8',
+        'Content-Security-Policy': csp,
+        'X-Content-Type-Options': 'nosniff',
+        'Referrer-Policy': 'no-referrer',
+        'Cache-Control': 'no-store',
+        'X-DNS-Prefetch-Control': 'off',
+      }
+    })
+  }
+
+  // Assets
+  const ext = path.extname(relative).toLowerCase()
+  const isCss = ext === '.css'
+  const isImg = Boolean(core.IMAGE_EXTENSIONS[ext])
+  if (!isCss && !isImg) return plain('Unsupported Media Type', 415)
+
+  if (current.cache.has(relative)) {
+    const cached = current.cache.get(relative)
+    return new Response(cached.bytes, { status: 200, headers: cached.headers })
+  }
+
+  if (!current.resourcePaths.has(relative) && current.resourcePaths.size >= 128) {
+    return plain('Resource Limit Exceeded', 429)
+  }
+
+  let fileInfo
+  try {
+    fileInfo = core.resolveProjectFile(current.targetBase, relative)
+  } catch (e) {
+    const status = e.code === 'NOT_FOUND' ? 404 : e.code === 'OUTSIDE_PROJECT' ? 403 : 400
+    return plain(e.message || 'File Error', status)
+  }
+
+  const limit = isCss ? 2 * 1024 * 1024 : 10 * 1024 * 1024
+  let readRes
+  try {
+    readRes = await core.readBoundedFile(fileInfo, limit, isCss ? 'CSS vượt quá 2 MiB' : 'Ảnh vượt quá 10 MiB')
+  } catch (e) {
+    const status = e.code === 'TOO_LARGE' ? 413 : e.code === 'NOT_FOUND' ? 404 : 403
+    return plain(e.message || 'Read Error', status)
+  }
+
+  if (current.closed) return plain('Not Found', 404)
+
+  const bytes = readRes.bytes
+
+  if (isCss) {
+    if (bytes.some(b => b < 32 && b !== 9 && b !== 10 && b !== 13)) {
+      return plain('CSS không phải UTF-8 hợp lệ', 400)
+    }
+    try { new TextDecoder('utf-8', { fatal: true }).decode(bytes) }
+    catch { return plain('CSS không phải UTF-8 hợp lệ', 400) }
+  }
+
+  let mime
+  if (isImg) {
+    const detectedType = core.imageType(bytes)
+    if (!detectedType) return plain('File không phải ảnh hợp lệ', 415)
+    if (core.IMAGE_EXTENSIONS[ext] !== detectedType) return plain('File không đúng định dạng ảnh', 415)
+    mime = core.IMAGE_MIME[detectedType]
+  } else {
+    mime = 'text/css; charset=utf-8'
+  }
+
+  if (current.totalBytes + bytes.length > 32 * 1024 * 1024) {
+    return plain('Total Size Limit Exceeded', 413)
+  }
+
+  current.resourcePaths.add(relative)
+  current.totalBytes += bytes.length
+
+  const resHeaders = {
+    'Content-Type': mime,
+    'X-Content-Type-Options': 'nosniff',
+    'Referrer-Policy': 'no-referrer',
+    'Cache-Control': 'no-store',
+  }
+  current.cache.set(relative, { bytes, headers: resHeaders })
+
+  return new Response(bytes, { status: 200, headers: resHeaders })
+}
 
 // One box per folder is open at a time (core.chatName). Switching while that folder still has turns, locks, merges or a
 // permission grant in flight would land their results in the other box, so it waits until the folder is idle.
@@ -1371,6 +1518,7 @@ function assertIdle(root) {
 function switchBox(root, name) {
   if (!core.boxes(root).some(box => box.chat === name)) throw new Error('Box không còn tồn tại')
   assertIdle(root)
+  if (activePreview && activePreview.root === root) closeCurrentPreview()
   clearPending(root); loadedRoots.delete(root); summaryUnavailable.delete(root)
   core.useBox(root, name)
 }
@@ -1631,9 +1779,105 @@ ipcMain.handle('readProjectFile', async (event, dir, href, fromFile, workspaceId
   return { ...await core.readProjectFile(target.base, target.href, target.fromFile), workspace: target.workspace }
 })
 ipcMain.handle('saveImage', (event, dir, data) => { validSender(event); return apiCall(async () => ({ path: core.saveImage(knownProject(dir), data) })) })
-ipcMain.handle('readImage', (event, dir, href, fromFile, workspaceId) => {
+ipcMain.handle('readImage', async (event, dir, href, fromFile, workspaceId) => {
   validSender(event)
-  return core.readImage(viewerRoot(knownProject(dir), workspaceId, href), href, fromFile)
+  const root = knownProject(dir), target = viewerTarget(root, href, fromFile, workspaceId)
+  const res = await core.readImage(target.base, target.href, target.fromFile)
+  return { ...res, workspace: target.workspace }
+})
+ipcMain.handle('createHtmlPreview', async (event, dir, href, fromFile, workspaceId) => {
+  validSender(event)
+  const myGen = ++previewGen
+  try {
+    const root = knownProject(dir), target = viewerTarget(root, href, fromFile, workspaceId)
+    const ext = path.extname(target.href.split(/[?#]/, 1)[0]).toLowerCase()
+    if (ext !== '.html' && ext !== '.htm') {
+      return { ok: false, code: 'UNSUPPORTED', message: 'Chỉ xem trước file HTML' }
+    }
+    const readRes = await core.readProjectFile(target.base, target.href, target.fromFile)
+    if (!readRes.ok) return { ok: false, code: readRes.code, message: readRes.message }
+    const fileExt = path.extname(readRes.file.path).toLowerCase()
+    if (fileExt !== '.html' && fileExt !== '.htm') {
+      return { ok: false, code: 'UNSUPPORTED', message: 'Chỉ xem trước file HTML' }
+    }
+    if (myGen !== previewGen) {
+      return { ok: false, code: 'PREVIEW_EXPIRED', message: 'Phiên xem trước đã bị thay thế' }
+    }
+    closeCurrentPreview()
+    const token = randomBytes(16).toString('hex')
+    const encodedEntry = readRes.file.path.split('/').map(encodeURIComponent).join('/')
+    const url = `agent-preview://${token}/files/${encodedEntry}`
+    activePreview = {
+      id: token,
+      token,
+      root,
+      workspace: target.workspace,
+      targetBase: target.base,
+      entryRelativePath: readRes.file.path,
+      htmlContent: readRes.file.content,
+      resourcePaths: new Set([readRes.file.path]),
+      totalBytes: Buffer.byteLength(readRes.file.content, 'utf8'),
+      cache: new Map(),
+      closed: false,
+      navigated: false,
+    }
+    return {
+      ok: true,
+      file: {
+        path: readRes.file.path,
+        name: readRes.file.name,
+        format: 'text',
+        content: readRes.file.content,
+        version: readRes.file.version,
+      },
+      workspace: target.workspace,
+      preview: { id: token, url },
+    }
+  } catch (e) {
+    const code = ['INVALID_PATH', 'OUTSIDE_PROJECT', 'NOT_FOUND', 'UNSUPPORTED', 'TOO_LARGE', 'FILE_CHANGED'].includes(e.code) ? e.code : 'IO_ERROR'
+    return { ok: false, code, message: e.message || 'Không tạo được xem trước HTML' }
+  }
+})
+ipcMain.handle('closeHtmlPreview', (event, previewId) => {
+  validSender(event)
+  if (activePreview && activePreview.id === previewId) {
+    activePreview.closed = true
+    activePreview = null
+    previewGen++
+  }
+  return { ok: true }
+})
+ipcMain.handle('openHtmlExternal', async (event, dir, href, workspaceId = null) => {
+  validSender(event)
+  try {
+    const root = knownProject(dir), target = viewerTarget(root, href, null, workspaceId)
+    const fileInfo = core.resolveProjectFile(target.base, target.href)
+    const ext = path.extname(fileInfo.real).toLowerCase()
+    if (ext !== '.html' && ext !== '.htm') {
+      return { ok: false, code: 'UNSUPPORTED', message: 'Chỉ hỗ trợ mở file HTML' }
+    }
+    const branchInfo = target.workspace?.branch ? ` (nhánh ${target.workspace.branch})` : ''
+    const answer = await dialog.showMessageBox(win, {
+      type: 'question',
+      buttons: ['Huỷ', 'Mở'],
+      defaultId: 1,
+      cancelId: 0,
+      message: 'Mở HTML bằng ứng dụng mặc định?',
+      detail: `File: ${fileInfo.relative}${branchInfo}\nJavaScript và truy cập mạng có thể hoạt động.`
+    })
+    if (answer.response !== 1) return { ok: true, opened: false }
+    const verified = core.resolveProjectFile(target.base, target.href)
+    const verifiedExt = path.extname(verified.real).toLowerCase()
+    if (verifiedExt !== '.html' && verifiedExt !== '.htm') {
+      return { ok: false, code: 'UNSUPPORTED', message: 'Chỉ hỗ trợ mở file HTML' }
+    }
+    const error = await shell.openPath(verified.real)
+    if (error) return { ok: false, code: 'IO_ERROR', message: error }
+    return { ok: true, opened: true }
+  } catch (e) {
+    const code = ['INVALID_PATH', 'OUTSIDE_PROJECT', 'NOT_FOUND', 'UNSUPPORTED', 'TOO_LARGE', 'FILE_CHANGED'].includes(e.code) ? e.code : 'IO_ERROR'
+    return { ok: false, code, message: e.message || 'Không mở được file' }
+  }
 })
 ipcMain.handle('watchProject', (event, dir, file, workspaceId) => { validSender(event); return watchProject(dir, file, workspaceId) })
 ipcMain.handle('openFile', async (event, dir, file, workspaceId) => { validSender(event); const error = await shell.openPath(resolveFile(dir, file, workspaceId)); if (error) throw new Error(error) })
@@ -1858,10 +2102,83 @@ else app.whenReady().then(() => {
     backgroundColor: windowBg(),
     // macOS: the sidebar runs up under the traffic lights (index.html pads body.mac for them)
     ...(process.platform === 'darwin' && { titleBarStyle: 'hiddenInset', trafficLightPosition: { x: 18, y: 20 } }),
-    webPreferences: { preload: path.join(__dirname, 'preload.js') } })
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      nodeIntegration: false,
+      nodeIntegrationInSubFrames: false,
+      contextIsolation: true,
+      sandbox: true,
+    } })
+  if (session?.defaultSession?.protocol?.handle) {
+    session.defaultSession.protocol.handle('agent-preview', async request => handleAgentPreview(request))
+  }
+  if (session?.defaultSession?.webRequest?.onBeforeRequest) {
+    session.defaultSession.webRequest.onBeforeRequest({ urls: ['*://*/*', 'agent-preview://*/*'] }, (details, callback) => {
+      if (!win || win.isDestroyed?.()) return callback({ cancel: true })
+      if (details.webContentsId && win.webContents?.id && details.webContentsId !== win.webContents.id) {
+        return callback({ cancel: true })
+      }
+      const isMainFrame = details.frame && win.webContents?.mainFrame && details.frame === win.webContents.mainFrame
+      if (isMainFrame && details.resourceType !== 'subFrame') {
+        return callback({ cancel: false })
+      }
+      if (details.method !== 'GET') return callback({ cancel: true })
+      if (!activePreview || activePreview.closed) return callback({ cancel: true })
+      let url
+      try { url = new URL(details.url) } catch { return callback({ cancel: true }) }
+      if (url.protocol !== 'agent-preview:' || url.hostname !== activePreview.token) return callback({ cancel: true })
+      if (url.username || url.password || url.port) return callback({ cancel: true })
+      if (!url.pathname.startsWith('/files/')) return callback({ cancel: true })
+      if (details.resourceType === 'subFrame') {
+        const encodedEntry = activePreview.entryRelativePath.split('/').map(encodeURIComponent).join('/')
+        if (url.pathname !== `/files/${encodedEntry}`) return callback({ cancel: true })
+        return callback({ cancel: false })
+      }
+      if (details.resourceType === 'stylesheet') {
+        const ext = path.extname(url.pathname.split(/[?#]/, 1)[0]).toLowerCase()
+        if (ext !== '.css') return callback({ cancel: true })
+        return callback({ cancel: false })
+      }
+      if (details.resourceType === 'image') {
+        const ext = path.extname(url.pathname.split(/[?#]/, 1)[0]).toLowerCase()
+        if (!['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg'].includes(ext)) return callback({ cancel: true })
+        return callback({ cancel: false })
+      }
+      return callback({ cancel: true })
+    })
+  }
+  if (session?.defaultSession?.on) {
+    session.defaultSession.on('will-download', (event, item, wc) => {
+      if (wc && win.webContents && wc === win.webContents && activePreview && !activePreview.closed) {
+        event.preventDefault()
+      }
+    })
+  }
+  win.webContents.on('will-frame-navigate', event => {
+    if (event.isMainFrame) return
+    if (activePreview && !activePreview.closed) {
+      let parsed
+      try { parsed = new URL(event.url) } catch {}
+      if (parsed && parsed.protocol === 'agent-preview:' && parsed.hostname === activePreview.token) {
+        if (!activePreview.navigated) {
+          activePreview.navigated = true
+          return
+        }
+      }
+    }
+    event.preventDefault()
+  })
+  win.webContents.on('before-input-event', (event, input) => {
+    if (input.type === 'keyDown' && input.key === 'Escape') {
+      if (activePreview && !activePreview.closed) {
+        win?.webContents?.send('html-preview-escape', activePreview.id)
+      }
+    }
+  })
   if (maximized) win.maximize()
   nativeTheme.on('updated', () => win.setBackgroundColor(windowBg()))
   win.on('close', () => {
+    closeCurrentPreview()
     try { core.atomicWrite(windowFile(), JSON.stringify({ ...win.getNormalBounds(), maximized: win.isMaximized() })) } catch {}
   })
   // Closing never stops agents (the user chose that): CLIs keep running detached and may still edit files, but their
@@ -1876,7 +2193,7 @@ else app.whenReady().then(() => {
     if (answer !== 1) event.preventDefault()
   })
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
-  win.loadFile('index.html').then(() => win.webContents.on('will-navigate', event => event.preventDefault()))
+  win.loadFile('index.html').then(() => win.webContents.on('will-navigate', event => { event.preventDefault(); closeCurrentPreview() }))
   app.on('second-instance', () => { if (win.isMinimized()) win.restore(); win.show(); win.focus() })
 })
 app.on('window-all-closed', () => { clearProjectWatch(); app.quit() })
