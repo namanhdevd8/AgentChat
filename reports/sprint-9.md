@@ -83,3 +83,11 @@ QA chạy trên main `5ddbaeb`, check của QA đã vào main ở `6e7eb53`. `no
 2. **Mục xổ xuống** (nhóm "Sprint N · x" và "Khác" trong File chung, nhóm trạng thái task, Hàng chờ merge): luôn có mũi tên ▸ khi đóng, ▾ khi mở, giống "chờ duyệt" hiện nay. Hiện `.file-group-sum` đang ẩn marker (index.html:366) nên không có mũi tên. Mọi mục dùng chung một kiểu.
 3. Header chỉ là nhãn thì không có hover và con trỏ tay; mục bấm được thì có hover và focus-visible.
 - Nghiệm thu: giao diện sáng và tối, dùng được bằng bàn phím, không đổi hành vi hay trạng thái mở đã lưu theo box, `npm run check` xanh.
+
+## Đóng Sprint 9 (PM, 2026-10-13)
+- End-User thử tay và xác nhận **đạt**, đồng ý đóng: R2, R3 (sau bản sửa đường dẫn), R4, R5, R7 trong popup, và T39.
+- T33–T39 → Xong. T31 (Sprint 8) vẫn chờ End-User thử tay với Claude thật.
+- Backlog chuyển sang [roadmap.md](roadmap.md), mục "Backlog sau Sprint 9".
+- Bài học:
+  - Check dùng fixture đường dẫn tương đối nên không bắt được lỗi `core.files` trả về đường dẫn tuyệt đối. Ca check UI nên dùng output thật của BE.
+  - Nhánh của agent còn commit chưa gộp, mà main lại đổi manifest, thì hàng chờ bị kẹt; đã sửa ở T38.
