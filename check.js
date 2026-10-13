@@ -1156,6 +1156,229 @@ async function rendererS9Checks() {
   console.log('ok (sprint 9 FE R2/R3/T39)')
 }
 
+// ---- Sprint 10 FE: V1 layout/resizing, V2 image/SVG blobs & modes, V3 HTML preview iframe & sandbox ----
+async function rendererS10Checks() {
+  const ui = fs.readFileSync(path.join(__dirname, 'renderer.js'), 'utf8'), vm = require('vm')
+  const html = fs.readFileSync(path.join(__dirname, 'index.html'), 'utf8')
+
+  // 1. Static HTML & CSS contract assertions
+  assert.ok(html.includes("frame-src agent-preview:"), 'CSP: thiếu frame-src agent-preview:')
+  assert.ok(!html.includes("frame-src *") && !html.includes("frame-src 'unsafe-inline'"), 'CSP: không được nới lỏng frame-src')
+  assert.ok(html.includes('id="viewer-img-controls"') && html.includes('id="viewer-img-fit"') && html.includes('id="viewer-img-orig"'), 'V2: thiếu controls ảnh fit/100%')
+  assert.ok(html.includes('id="viewer-html-tabs"') && html.includes('id="viewer-tab-preview"') && html.includes('id="viewer-tab-source"'), 'V3: thiếu tab Xem trước | Mã nguồn')
+  assert.ok(html.includes('id="viewer-html-external"'), 'V3: thiếu nút Mở bằng trình duyệt')
+  assert.ok(html.includes('id="viewer-max"') && html.includes('id="viewer-resize-grip"'), 'V1: thiếu nút phóng to hoặc tay nắm đổi cỡ')
+  assert.ok(html.includes('id="viewer-notice"') && html.includes('Xem trước tĩnh · Không chạy JavaScript hoặc tải tài nguyên mạng'), 'V3: thiếu thông báo tĩnh')
+  assert.ok(html.includes('.viewer-dialog.maximized') && html.includes('.viewer-resize-grip'), 'V1: thiếu CSS maximized hoặc grip')
+  assert.ok(html.includes('.viewer-img.fit') && html.includes('.viewer-img.orig'), 'V2: thiếu CSS fit/orig')
+  assert.ok(html.includes('.viewer-iframe'), 'V3: thiếu CSS viewer-iframe')
+
+  // 2. VM DOM & functional tests
+  const part = (from, to) => ui.slice(ui.indexOf(from), ui.indexOf(to, ui.indexOf(from)))
+  const nodes = new Map(), store = new Map()
+  const el = (tag, className = '', textContent = '') => ({
+    tag, className, textContent, style: {}, children: [], attrs: {},
+    append(...c) { this.children.push(...c) },
+    appendChild(c) { this.children.push(c) },
+    replaceChildren(...c) { this.children = c },
+    setAttribute(k, v) { this.attrs[k] = v },
+    getAttribute(k) { return this.attrs[k] },
+    classList: {
+      _classes: new Set(className ? className.split(' ') : []),
+      add(c) { this._classes.add(c) },
+      remove(c) { this._classes.delete(c) },
+      contains(c) { return this._classes.has(c) }
+    },
+    querySelector(sel) {
+      const match = node => {
+        if (sel.startsWith('.')) {
+          const cls = sel.slice(1)
+          if ((node.className || '').split(' ').includes(cls)) return node
+        }
+        for (const child of node.children || []) {
+          const found = match(child)
+          if (found) return found
+        }
+        return null
+      }
+      for (const child of this.children || []) {
+        const found = match(child)
+        if (found) return found
+      }
+      return null
+    },
+    focus() { ctx.document.activeElement = this },
+    showModal() { this.open = true },
+    close() { this.open = false },
+    contains(target) { return target === this || this.children.some(c => c === target) }
+  })
+  const $ = id => {
+    const key = id.replace(/^#/, '')
+    if (!nodes.has(key)) nodes.set(key, el('div', '', ''))
+    return nodes.get(key)
+  }
+
+  let closedPreviews = [], createdPreviews = [], readImages = [], openedExternal = [], blobCounter = 0, revokedBlobs = []
+  const listeners = new Map()
+  const fakeBlobUrl = () => `blob:agent-preview/${++blobCounter}`
+
+  const ctx = vm.createContext({
+    $, el, dir: '/test-dir', base: p => p.split(/[\\/]/).pop(),
+    document: { activeElement: null, getElementById: id => $(id) },
+    window: { innerWidth: 1200, innerHeight: 800, addEventListener() {} },
+    Blob: function (bytes, opts) { this.bytes = bytes; this.type = opts?.type },
+    URL: { createObjectURL: fakeBlobUrl, revokeObjectURL: u => revokedBlobs.push(u) },
+    localStorage: {
+      getItem: k => store.has(k) ? store.get(k) : null,
+      setItem: (k, v) => store.set(k, String(v))
+    },
+    api: {
+      readProjectFile: async (d, h) => ({ ok: true, file: { path: h, name: h, format: 'text', content: 'text content' } }),
+      readImage: async (d, h, from, wsId) => {
+        readImages.push({ d, h, from, wsId })
+        const isSvg = h.endsWith('.svg')
+        return {
+          ok: true, path: h, name: h,
+          mime: isSvg ? 'image/svg+xml' : 'image/png',
+          bytes: Buffer.from(isSvg ? '<svg></svg>' : 'fake-bytes'),
+          version: 'sha-img-1', canOpenExternal: !isSvg, workspace: null
+        }
+      },
+      createHtmlPreview: async (d, h, from, wsId) => {
+        createdPreviews.push({ d, h, from, wsId })
+        return {
+          ok: true,
+          file: { path: h, name: h, format: 'text', content: '<h1>hello</h1>', version: 'sha-html-1' },
+          workspace: null,
+          preview: { id: 'prev-123', url: 'agent-preview://tok-123/files/' + h }
+        }
+      },
+      closeHtmlPreview: async id => { closedPreviews.push(id); return { ok: true } },
+      openHtmlExternal: async (d, h, wsId) => { openedExternal.push({ d, h, wsId }); return { ok: true, opened: true } },
+      watchProject: async () => {},
+      on: (ev, fn) => listeners.set(ev, fn)
+    }
+  })
+
+  vm.runInContext(part('let currentViewerPath', 'async function refreshFiles'), ctx)
+  vm.runInContext(part("$('#viewer-close').onclick", "$('#reloadTasks').onclick"), ctx)
+
+  // Test V1: load layout defaults & persistence
+  const dump = o => JSON.parse(JSON.stringify(o))
+  assert.deepStrictEqual(dump(ctx.loadViewerLayout()), { width: 880, height: 720, maximized: false })
+  store.set('viewer-layout:v1', 'corrupt JSON{')
+  assert.deepStrictEqual(dump(ctx.loadViewerLayout()), { width: 880, height: 720, maximized: false }, 'corrupt JSON must fallback to defaults')
+  store.set('viewer-layout:v1', JSON.stringify({ width: 'NaN', height: 700 }))
+  assert.deepStrictEqual(dump(ctx.loadViewerLayout()), { width: 880, height: 720, maximized: false }, 'NaN dimension must fallback to defaults')
+  store.set('viewer-layout:v1', JSON.stringify({ width: 900, height: 600, maximized: true }))
+  assert.deepStrictEqual(dump(ctx.loadViewerLayout()), { width: 900, height: 600, maximized: true })
+
+  // Test V1: clamping
+  const c1 = ctx.clampViewerDims(2000, 2000)
+  assert.ok(c1.width <= 1200 - 32 && c1.height <= 800 - 32, 'clamp must not exceed viewport minus margin')
+  const c2 = ctx.clampViewerDims(100, 100)
+  assert.ok(c2.width >= 480 && c2.height >= 320, 'clamp must enforce min bounds')
+
+  // Test V1: maximize & restore
+  ctx.applyViewerLayout()
+  assert.strictEqual($('#viewer').style.width, '880px')
+  assert.strictEqual($('#viewer-max').attrs['aria-pressed'], 'false')
+  ctx.toggleViewerMaximize()
+  assert.strictEqual($('#viewer').style.width, 'calc(100vw - 32px)')
+  assert.strictEqual($('#viewer-max').attrs['aria-pressed'], 'true')
+  assert.strictEqual(JSON.parse(store.get('viewer-layout:v1')).maximized, true)
+  assert.strictEqual(JSON.parse(store.get('viewer-layout:v1')).width, 880, 'normal width must be preserved when maximized')
+  ctx.toggleViewerMaximize()
+  assert.strictEqual($('#viewer').style.width, '880px')
+  assert.strictEqual($('#viewer-max').attrs['aria-pressed'], 'false')
+
+  // Test V1: keyboard resize grip
+  ctx.handleViewerResizeKey({ key: 'ArrowRight', preventDefault() {} })
+  assert.strictEqual($('#viewer').style.width, '912px', 'ArrowRight must step by 32px (880 + 32 = 912)')
+  ctx.handleViewerResizeKey({ key: 'ArrowDown', preventDefault() {} })
+  assert.strictEqual($('#viewer').style.height, '752px', 'ArrowDown must step by 32px (720 + 32 = 752)')
+
+  // Test V2: images & SVG via readImage + blob URL
+  const buttonOpener = el('button', '', 'open')
+  ctx.document.activeElement = buttonOpener
+  await ctx.openFileViewer('photo.png')
+  assert.strictEqual(readImages.length, 1)
+  assert.strictEqual(readImages[0].h, 'photo.png')
+  const imgWrap = $('#viewer-body').children[0]
+  assert.strictEqual(imgWrap.className, 'viewer-img-wrap')
+  const imgEl = imgWrap.children[0]
+  assert.ok(imgEl.src.startsWith('blob:agent-preview/'))
+  assert.strictEqual($('#viewer-img-fit').attrs['aria-pressed'], 'true', 'default image mode must be fit')
+  ctx.setImageMode('orig')
+  assert.strictEqual($('#viewer-img-orig').attrs['aria-pressed'], 'true')
+  assert.ok(imgEl.className.includes('orig'))
+
+  // SVG via <img>, canOpenExternal=false
+  await ctx.openFileViewer('icon.svg')
+  assert.strictEqual(readImages.length, 2)
+  assert.strictEqual($('#viewer-external').disabled, true, 'SVG external button must be disabled')
+  assert.strictEqual(revokedBlobs.length, 1, 'previous image blob must be revoked')
+
+  // Test V3: HTML preview iframe with sandbox & tabs
+  await ctx.openFileViewer('test.html')
+  assert.strictEqual(createdPreviews.length, 1)
+  const iframe = $('#viewer-body').children[0]
+  assert.strictEqual(iframe.tag, 'iframe')
+  assert.strictEqual(iframe.attrs.sandbox, '', 'sandbox attribute must be empty string')
+  assert.strictEqual(iframe.attrs.referrerpolicy, 'no-referrer')
+  assert.ok(iframe.src.startsWith('agent-preview://'))
+  assert.strictEqual($('#viewer-notice').style.display, '')
+  assert.strictEqual($('#viewer-tab-preview').attrs['aria-selected'], 'true')
+
+  // Tab switch to source
+  ctx.setHtmlTab('source')
+  assert.strictEqual($('#viewer-tab-source').attrs['aria-selected'], 'true')
+  assert.strictEqual($('#viewer-notice').style.display, 'none')
+  const pre = $('#viewer-body').children[1]
+  assert.strictEqual(pre.tag, 'pre')
+  assert.strictEqual(pre.textContent, '<h1>hello</h1>', 'source tab must show raw HTML')
+  assert.strictEqual(iframe.style.display, 'none')
+
+  // openHtmlExternal
+  await $('#viewer-html-external').onclick()
+  assert.strictEqual(openedExternal.length, 1)
+  assert.strictEqual(openedExternal[0].h, 'test.html')
+
+  // Escape via html-preview-escape event closes preview and restores focus
+  const escHandler = listeners.get('html-preview-escape')
+  assert.ok(typeof escHandler === 'function', 'html-preview-escape listener must be registered')
+  escHandler('prev-123')
+  assert.strictEqual($('#viewer').open, false, 'dialog must be closed on escape')
+  assert.strictEqual(closedPreviews.includes('prev-123'), true, 'closeHtmlPreview must be called')
+  // Test loadImages: passes workspace?.id, zoomable click routes to openFileViewer
+  let loadImgArgs = []
+  ctx.openFileViewer = (href, from, ws) => { loadImgArgs.push({ href, from, ws }) }
+  let lastReadImageWsId = undefined
+  ctx.api.readImage = async (d, href, from, wsId) => {
+    lastReadImageWsId = wsId
+    return { ok: true, path: 'docs/diagram.svg', mime: 'image/svg+xml', bytes: Buffer.from('<svg></svg>'), workspace: { id: 'ws1', branch: 'b1' } }
+  }
+  const imgTag = el('img')
+  imgTag.dataset = { src: 'docs/diagram.svg' }
+  imgTag.alt = 'diagram'
+  imgTag.closest = () => null
+  imgTag.replaceWith = () => {}
+  const mdWrap = el('div')
+  mdWrap.querySelectorAll = () => [imgTag]
+  ctx.logHasAfter = false
+  vm.runInContext(part('function loadImages', 'function renderMarkdown'), ctx)
+  ctx.loadImages(mdWrap, { dir: '/test-dir', workspace: { id: 'ws1', branch: 'b1' } })
+  await new Promise(r => setImmediate(r))
+  assert.strictEqual(lastReadImageWsId, 'ws1', 'loadImages must pass workspace?.id, not the workspace object')
+  assert.ok(imgTag.classList.contains('zoomable'), 'image without anchor must be zoomable')
+  imgTag.onclick()
+  assert.strictEqual(loadImgArgs.length, 1)
+  assert.strictEqual(loadImgArgs[0].href, 'docs/diagram.svg')
+  assert.deepStrictEqual(loadImgArgs[0].ws, { id: 'ws1', branch: 'b1' })
+
+  console.log('ok (sprint 10 FE V1/V2/V3)')
+}
+
 // ---- Sprint 6 H + J through the real main.js: Electron stubbed, a sample git repo, a fake codex. Own process: main.js registers IPC globally ----
 function mainChecks() {
   const r = require('child_process').spawnSync(process.execPath, [__filename, '--main'], { encoding: 'utf8', timeout: 300000,
@@ -1802,7 +2025,7 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
     console.log('ok (boxes)')
   }
 }
-logChecks().then(needsChecks).then(timelineChecks).then(taskChecks).then(auditChecks).then(viewerChecks).then(runChecks).then(sprint7Checks).then(sprint8Checks).then(sprint9Checks).then(sprint6Checks).then(rendererChecks).then(rendererFileChecks).then(rendererS9Checks).then(mainChecks).then(() => console.log('ok'), e => { console.error(e); process.exit(1) })
+logChecks().then(needsChecks).then(timelineChecks).then(taskChecks).then(auditChecks).then(viewerChecks).then(runChecks).then(sprint7Checks).then(sprint8Checks).then(sprint9Checks).then(sprint6Checks).then(rendererChecks).then(rendererFileChecks).then(rendererS9Checks).then(rendererS10Checks).then(mainChecks).then(() => console.log('ok'), e => { console.error(e); process.exit(1) })
 
 // PM creates a task and moves it in the same turn (no revision yet): "" is accepted only for PM on a todo task
 {

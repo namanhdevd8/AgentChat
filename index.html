@@ -2,7 +2,7 @@
 <html lang="vi">
 <head>
 <meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' blob:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; script-src 'self'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' blob:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; script-src 'self'; frame-src agent-preview:">
 <title>Agent Chat</title>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap">
 <script src="./node_modules/markdown-it/dist/browser/markdown-it.umd.min.js"></script>
@@ -401,14 +401,46 @@
   .none { font-size: 12.5px; color: var(--muted); padding: 2px 0; }
 
   /* in-app viewer dialog */
-  .viewer-dialog { width: min(880px, 94vw); height: min(720px, 90vh); max-height: 90vh; }
-  .viewer-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .viewer-dialog { width: min(880px, 94vw); height: min(720px, 90vh); max-height: 90vh; position: relative; }
+  .viewer-dialog.maximized {
+    width: calc(100vw - 32px) !important;
+    height: calc(100vh - 32px) !important;
+    max-width: calc(100vw - 32px) !important;
+    max-height: calc(100vh - 32px) !important;
+    resize: none !important;
+    margin: 16px auto !important;
+  }
+  .viewer-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; flex: none; }
   .vtitle-wrap { min-width: 0; }
   .vtitle-wrap h2 { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .vhead-actions { display: flex; gap: 6px; flex: none; }
-  .viewer-body { flex: 1; overflow-y: auto; padding: 20px 24px; font-size: 14px; }
+  .vhead-actions { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; flex: none; }
+  .viewer-notice { padding: 6px 16px; background: var(--hover); color: var(--muted); font-size: 12px; border-bottom: 1px solid var(--line); flex: none; }
+  .viewer-body { flex: 1; min-height: 0; overflow-y: auto; padding: 20px 24px; font-size: 14px; display: flex; flex-direction: column; position: relative; }
+  .viewer-body:has(.viewer-iframe), .viewer-body:has(.viewer-img-wrap) { padding: 0; overflow: hidden; }
   .viewer-text { margin: 0; padding: 12px; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; font: 12.5px/1.5 var(--mono); white-space: pre-wrap; word-break: break-all; }
-  .viewer-error { padding: 12px 14px; background: var(--danger-bg); color: var(--danger); border-radius: 8px; font-weight: 500; font-size: 13px; }
+  .viewer-error { padding: 12px 14px; background: var(--danger-bg); color: var(--danger); border-radius: 8px; font-weight: 500; font-size: 13px; margin: 16px; }
+  .viewer-img-wrap { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; overflow: auto; flex: 1; padding: 16px; box-sizing: border-box; }
+  .viewer-img { display: block; }
+  .viewer-img.fit { max-width: 100%; max-height: 100%; width: auto; height: auto; object-fit: contain; }
+  .viewer-img.orig { max-width: none; max-height: none; width: auto; height: auto; }
+  .viewer-iframe { width: 100%; height: 100%; flex: 1; border: 0; display: block; background: #fff; }
+  .viewer-resize-grip {
+    position: absolute;
+    bottom: 2px;
+    right: 2px;
+    width: 14px;
+    height: 14px;
+    cursor: se-resize;
+    user-select: none;
+    background: linear-gradient(135deg, transparent 50%, var(--faint) 50%, var(--faint) 65%, transparent 65%, transparent 80%, var(--faint) 80%);
+    opacity: 0.5;
+    z-index: 10;
+  }
+  .viewer-resize-grip:hover, .viewer-resize-grip:focus-visible {
+    opacity: 1;
+    outline: 1px solid var(--accent);
+  }
+  .viewer-dialog.maximized .viewer-resize-grip { display: none; }
 
   /* dialogs */
   dialog { width: min(780px, 92vw); max-height: 88vh; padding: 0; background: var(--surface); color: var(--ink); border: 1px solid var(--line); box-shadow: 0 24px 64px rgb(0 0 0 / .18); }
@@ -795,12 +827,24 @@
       <small id="viewer-path">path/to/file</small>
     </div>
     <div class="vhead-actions">
+      <div id="viewer-img-controls" class="seg viewer-img-controls" role="group" aria-label="Chế độ xem ảnh" style="display:none">
+        <button id="viewer-img-fit" class="box press btn sm on" type="button" aria-pressed="true" title="Xem vừa kích thước khung">Vừa khung</button>
+        <button id="viewer-img-orig" class="box press btn sm" type="button" aria-pressed="false" title="Xem theo kích thước gốc (100%)">100%</button>
+      </div>
+      <div id="viewer-html-tabs" class="seg viewer-html-tabs" role="tablist" aria-label="Chế độ xem HTML" style="display:none">
+        <button id="viewer-tab-preview" class="box press btn sm on" role="tab" aria-selected="true" type="button">Xem trước</button>
+        <button id="viewer-tab-source" class="box press btn sm" role="tab" aria-selected="false" type="button">Mã nguồn</button>
+      </div>
       <button id="viewer-reload" class="box press btn sm" title="Tải lại nội dung" type="button">Tải lại</button>
+      <button id="viewer-html-external" class="box press btn sm" title="Mở HTML bằng ứng dụng mặc định của hệ điều hành" type="button" style="display:none">Mở bằng trình duyệt</button>
       <button id="viewer-external" class="box press btn sm" title="Mở bằng ứng dụng mặc định của hệ điều hành" type="button">Mở bằng app ngoài</button>
+      <button id="viewer-max" class="box press btn sm" title="Phóng to khung xem" aria-pressed="false" type="button">Phóng to</button>
       <button id="viewer-close" class="box press btn sm danger" title="Đóng khung xem (Esc)" type="button">Đóng</button>
     </div>
   </div>
+  <div id="viewer-notice" class="viewer-notice" style="display:none">Xem trước tĩnh · Không chạy JavaScript hoặc tải tài nguyên mạng</div>
   <div id="viewer-body" class="viewer-body"></div>
+  <div id="viewer-resize-grip" class="viewer-resize-grip" tabindex="0" role="separator" aria-label="Tay nắm đổi kích thước" aria-description="Dùng các phím mũi tên để tăng giảm kích thước khung xem mỗi lần 32px" title="Kéo góc hoặc dùng phím mũi tên để đổi kích thước"></div>
 </dialog>
 <dialog id="switcher" class="box switcher" aria-label="Chuyển không gian">
   <input id="switcher-input" placeholder="Chuyển tới không gian…" autocomplete="off" spellcheck="false" aria-controls="switcher-list">
