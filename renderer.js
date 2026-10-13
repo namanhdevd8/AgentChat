@@ -3416,12 +3416,26 @@ async function refreshFiles() {
       if (raw) storedStates = JSON.parse(raw) || {}
     } catch (_) {}
 
+    const toRel = p => {
+      let norm = String(p || '').replace(/\\/g, '/')
+      const normRoot = String(reqDir || '').replace(/\\/g, '/').replace(/\/+$/, '')
+      if (normRoot) {
+        const prefix = normRoot + '/'
+        if (norm.toLowerCase().startsWith(prefix.toLowerCase())) {
+          norm = norm.slice(prefix.length)
+        }
+      } else if (norm.startsWith('/')) {
+        norm = norm.replace(/^\/+/, '')
+      }
+      return norm.replace(/^\.\//, '')
+    }
+
     // Pinned files: active box memory.md, then reports/roadmap.md
     const isBoxMemory = f => {
-      const norm = f.replace(/\\/g, '/')
-      return norm === `${reqBox}/memory.md` || (norm === '.chat/memory.md' && reqBox === '.chat')
+      const rel = toRel(f)
+      return rel === `${reqBox}/memory.md` || (rel === '.chat/memory.md' && (!reqBox || reqBox === '.chat'))
     }
-    const isRoadmap = f => f.replace(/\\/g, '/') === 'reports/roadmap.md'
+    const isRoadmap = f => toRel(f) === 'reports/roadmap.md'
 
     const pinnedFiles = []
     const memoryFile = list.find(isBoxMemory)
@@ -3438,9 +3452,9 @@ async function refreshFiles() {
     const otherFiles = []
 
     for (const f of rest) {
-      const norm = f.replace(/\\/g, '/')
+      const rel = toRel(f)
       const b = base(f)
-      if (norm.startsWith('reports/')) {
+      if (rel.startsWith('reports/')) {
         const m = /^sprint-([1-9]\d*)(?:-[^.]+)?\.md$/i.exec(b)
         if (m) {
           const n = parseInt(m[1], 10)
