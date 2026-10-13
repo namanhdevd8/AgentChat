@@ -3,7 +3,7 @@
 const { spawn, execFile } = require('child_process')
 const { createHash, randomBytes, randomUUID } = require('crypto')
 const { promisify } = require('util')
-const { pathToFileURL } = require('url')
+const { pathToFileURL, fileURLToPath } = require('url')
 const readline = require('readline')
 const MarkdownIt = require('markdown-it')
 const fs = require('fs'), path = require('path'), os = require('os')
@@ -1679,9 +1679,16 @@ function decodedPath(value) {
   if (typeof value !== 'string' || !value) throw fail('INVALID_PATH', 'Đường dẫn không hợp lệ')
   const raw = value.split(/[?#]/, 1)[0]
   let decoded
-  try { decoded = decodeURIComponent(raw) } catch { throw fail('INVALID_PATH', 'Đường dẫn mã hóa không hợp lệ') }
+  try {
+    if (/^file:/i.test(raw)) {
+      const url = new URL(raw)
+      if (url.hostname && url.hostname !== 'localhost') throw new Error('Remote file URL')
+      decoded = fileURLToPath(url)
+    } else decoded = decodeURIComponent(raw)
+  } catch { throw fail('INVALID_PATH', 'Đường dẫn mã hóa không hợp lệ') }
+  if (isWin) decoded = decoded.replace(/\\/g, '/')
   if (!decoded || /[\0-\x1f\x7f]/.test(decoded) || decoded.includes('\\') || decoded.startsWith('//')
-    || /^[A-Za-z][A-Za-z0-9+.-]*:/.test(decoded)) throw fail('INVALID_PATH', 'Đường dẫn không hợp lệ')
+    || (/^[A-Za-z][A-Za-z0-9+.-]*:/.test(decoded) && !(isWin && /^[A-Za-z]:\//.test(decoded)))) throw fail('INVALID_PATH', 'Đường dẫn không hợp lệ')
   return decoded
 }
 
@@ -2328,4 +2335,4 @@ module.exports = { CHAT_DIR, chat, chatName, useBox, boxes, createBox, CLI, acco
   timeoutMinutes, sessionTokenLimit, sessions, setSession, sessionRotationPending, readHandoff, writeHandoff,
   mentions, files, normalizeScope, ownsList, probe, winArg, spawnCli, shimTarget, normalizeAllowedCommands, scopeAllows, scopeLocks, lockConflict, snapshot, changedPaths, promptIndexed, run, runCommand, groupAlive,
   migrateTaskScope, parseTaskDefinitions, taskBoardIndexed, parseTaskStatusBlock, parseRunCommandBlock, parseHandoffBlock, validateTaskChanges,
-  resolveProjectFile, readProjectFile, saveImage, readImage, modelLabel }
+  decodedPath, resolveProjectFile, readProjectFile, saveImage, readImage, modelLabel }
