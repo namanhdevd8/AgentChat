@@ -1980,7 +1980,8 @@ function exec(dir, agent, session, { signal, onProgress, onSession, onSpawn, cos
       catch (e) { childError ||= e; result = { id: state.id, text: null, usage: emptyUsage(true), error: e.message } }
       if (!signal?.aborted && code && !result.error) result.error = se.trim().slice(-500) || `exit ${code}`
       // parser-level errors ("no final result") hide why the CLI died; stderr usually says
-      else if (!signal?.aborted && result.error && se.trim() && !result.error.includes(se.trim().slice(-200))) result.error += ` — ${se.trim().slice(-300)}`
+      // …unless stderr only repeats it (agy: the same message again inside AGY_ERROR JSON)
+      else if (!signal?.aborted && result.error && se.trim() && !result.error.includes(se.trim().slice(-200)) && !se.includes(result.error)) result.error += ` — ${se.trim().slice(-300)}`
       // no final result: say how it ended (exit code, events seen, stray stdout), the only clues when stderr is empty
       if (!signal?.aborted && /^Thiếu kết quả cuối/.test(result.error || ''))
         result.error = result.error.replace(/^(Thiếu kết quả cuối từ \S+)/, `$1 (mã thoát ${code ?? '?'}, ${events} sự kiện${viaStdin ? ', prompt qua stdin' : ''})`)
