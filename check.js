@@ -39,7 +39,7 @@ assert.deepStrictEqual(cx.parse(J({ type: 'thread.started', thread_id: 't1' }, '
   { type: 'item.completed', item: { type: 'command_execution', command: 'ls', aggregated_output: 'SECRET' } },
   { type: 'item.completed', item: { type: 'agent_message', text: 'hi' } },
   { type: 'turn.completed', usage: { input_tokens: 10, cached_input_tokens: 8, output_tokens: 0 } })),
-{ id: 't1', text: 'hi', usage: U(10, 0), error: null }) // 0 is a valid count
+{ id: 't1', text: 'hi', usage: U(10, 0), contextInputTokens: null, error: null }) // 0 is a valid count
 assert.ok(cx.parse(J({ type: 'thread.started', thread_id: 't1' }, { type: 'item.completed', item: { type: 'agent_message', text: 'nửa' } })).error) // no terminal
 assert.ok(cx.parse(J({ type: 'thread.started', thread_id: 't1' }, { type: 'turn.failed', error: { message: 'boom' } })).error.includes('boom'))
 assert.deepStrictEqual(cx.parse(J({ type: 'turn.completed', usage: { input_tokens: -1, output_tokens: '5' } })).usage, U(null, null, null, true))
@@ -50,7 +50,7 @@ const claudeOut = total => J({ type: 'system', subtype: 'init', session_id: 's1'
   { type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Read', input: { file_path: '/p/a.js' } }] } },
   { type: 'assistant', parent_tool_use_id: 'x', message: { content: [{ type: 'text', text: 'subagent' }] } },
   { type: 'result', subtype: 'success', result: 'ok', session_id: 's1', usage: { input_tokens: 3, output_tokens: 4 }, total_cost_usd: total })
-assert.deepStrictEqual(cl.parse(claudeOut(0.10), { costBaseline: 0 }), { id: 's1', text: 'ok', usage: U(3, 4, 0.1), error: null })
+assert.deepStrictEqual(cl.parse(claudeOut(0.10), { costBaseline: 0 }), { id: 's1', text: 'ok', usage: U(3, 4, 0.1), contextInputTokens: null, error: null })
 assert.strictEqual(cl.parse(claudeOut(0.16), { costBaseline: 0.10 }).usage.costUsd, 0.06) // 0.10 → 0.16 = 0.10 + 0.06
 const noBase = cl.parse(claudeOut(0.16), { costBaseline: null }) // adopted / checkpoint lost after stop
 assert.strictEqual(noBase.usage.costUsd, null); assert.strictEqual(noBase.usage.partial, true)
@@ -68,7 +68,7 @@ const agyOut = J({ event: 'init', conversation_id: 'c1' },
   step(1, { input_tokens: 5, output_tokens: 2 }), step(1, { input_tokens: 5, output_tokens: 2 }), // repeated event
   step(2, { input_tokens: 1, output_tokens: 1 }),
   { event: 'result', result: { response: 'ok', status: 'SUCCESS', usage: { input_tokens: 999, output_tokens: 999 } } })
-assert.deepStrictEqual(ag.parse(agyOut, { resumed: true }), { id: 'c1', text: 'ok', usage: U(6, 3), error: null })
+assert.deepStrictEqual(ag.parse(agyOut, { resumed: true }), { id: 'c1', text: 'ok', usage: U(6, 3), contextInputTokens: null, error: null })
 assert.deepStrictEqual(ag.parse('{"conversation_id":"c1","response":"ok"}').text, 'ok') // old single-JSON fixture
 assert.ok(ag.parse(J({ event: 'result', result: { response: 'x', status: 'ERROR' } })).error)
 assert.ok(ag.parse(J({ event: 'init', conversation_id: 'c1' })).error) // no terminal
@@ -76,9 +76,9 @@ assert.ok(ag.parse(J({ event: 'init', conversation_id: 'c1' })).error) // no ter
 // progress labels: one plain line, project-relative, no raw output
 const label = (cli, e) => core.CLI[cli].event(e, core.CLI[cli].state({}), { dir: '/p' })
 assert.strictEqual(label('claude', { type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Edit', input: { file_path: '/p/core.js' } }] } }), 'sửa core.js')
-assert.strictEqual(label('claude', { type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Bash', input: { command: 'npm run check' } }] } }), 'chạy npm run check')
-assert.strictEqual(label('codex', { type: 'item.started', item: { type: 'command_execution', command: 'npm run check' } }), 'chạy npm run check')
-assert.strictEqual(label('agy', { event: 'step_update', step_update: { tool_name: 'run_command', tool_info: { parameters: { CommandLine: 'ls' } } } }), 'chạy ls')
+assert.strictEqual(label('claude', { type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Bash', input: { command: 'npm run check' } }] } }), 'Đang chạy lệnh')
+assert.strictEqual(label('codex', { type: 'item.started', item: { type: 'command_execution', command: 'npm run check' } }), 'Đang chạy lệnh')
+assert.strictEqual(label('agy', { event: 'step_update', step_update: { tool_name: 'run_command', tool_info: { parameters: { CommandLine: 'ls' } } } }), 'Đang chạy lệnh')
 
 assert.throws(() => core.saveTeam(dir, [{ name: 'a b', cli: 'claude' }]))
 assert.throws(() => core.saveTeam(dir, [{ name: 'dev', cli: 'claude' }, { name: 'DEV', cli: 'codex' }]))
@@ -418,6 +418,33 @@ if (process.env.FAKE_MODE === 'slow') {
   setTimeout(() => { out(b.subarray(cut)); out(JSON.stringify({ type: 'turn.completed', usage: usage(3, 2) })) }, 50)
 }
 `, { mode: 0o755 })
+fs.writeFileSync(path.join(bin, 'claude'), `#!${process.execPath}
+const fs = require('fs'), out = s => process.stdout.write(s)
+const argv = process.argv.slice(2)
+let p = ''
+const pIdx = argv.indexOf('-p')
+if (pIdx >= 0) {
+  if (argv[pIdx + 1] && !argv[pIdx + 1].startsWith('--')) p = argv[pIdx + 1]
+  else {
+    try { p = fs.readFileSync(0, 'utf8') } catch {}
+    argv.splice(pIdx + 1, 0, p)
+  }
+}
+fs.appendFileSync(${JSON.stringify(argsLog)}, JSON.stringify([...argv, p]) + '\\n')
+const tid = process.env.FAKE_TID || 'S1'
+out(JSON.stringify({ type: 'system', subtype: 'init', session_id: tid }) + '\\n')
+const inVal = process.env.FAKE_IN === 'null' ? null : Number(process.env.FAKE_IN || 3)
+const mode = process.env.FAKE_MODE
+const reply = (text, ctx) => {
+  if (ctx != null) out(JSON.stringify({ type: 'assistant', message: { id: 'M' + tid, content: [{ type: 'text', text: text || '' }], usage: { input_tokens: ctx } } }) + '\\n')
+  out(JSON.stringify({ type: 'result', subtype: 'success', result: text || '', session_id: tid, usage: { input_tokens: inVal, output_tokens: 2 } }) + '\\n')
+}
+if (mode === 'text') reply(process.env.FAKE_TEXT || 'ok', inVal)
+else if (mode === 'empty') {
+  if (p.includes('Bạn chưa gửi tin trả lời')) reply('đã trả lời', inVal)
+  else reply('', inVal)
+} else reply('xin chào', inVal)
+`, { mode: 0o755 })
 process.env.PATH = bin + path.delimiter + process.env.PATH
 const alive = pid => { try { process.kill(pid, 0); return true } catch (e) { return e.code !== 'ESRCH' } }
 const lastArgs = () => JSON.parse(fs.readFileSync(argsLog, 'utf8').trim().split('\n').pop())
@@ -522,7 +549,7 @@ async function runChecks() {
 async function sprint7Checks() {
   const d = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-chat-s7-')); core.init(d)
   const agentsFile = path.join(d, '.chat', 'agents.json')
-  fs.writeFileSync(agentsFile, JSON.stringify([{ name: 'pm', cli: 'claude', role: 'PM' }, { name: 'k', cli: 'codex', role: 'Dev' }]))
+  fs.writeFileSync(agentsFile, JSON.stringify([{ name: 'pm', cli: 'claude', role: 'PM' }, { name: 'k', cli: 'claude', role: 'Dev' }]))
   // config: missing → 150000, 0 kept, old payload keeps value, junk refused
   assert.deepStrictEqual(core.team(d).map(a => a.sessionTokenLimit), [150000, 150000])
   assert.strictEqual(fs.readFileSync(agentsFile, 'utf8').includes('sessionTokenLimit'), false) // opening doesn't rewrite
@@ -531,7 +558,7 @@ async function sprint7Checks() {
   tm = core.saveTeam(d, core.team(d).map(({ sessionTokenLimit, ...a }) => a)); assert.strictEqual(tm[0].sessionTokenLimit, 0)
   for (const bad of [-1, 1.5, '1', null, NaN]) assert.throws(() => core.saveTeam(d, core.team(d).map((a, i) => i ? a : { ...a, sessionTokenLimit: bad })), undefined, String(bad))
   const good = fs.readFileSync(agentsFile, 'utf8')
-  fs.writeFileSync(agentsFile, JSON.stringify([{ name: 'k', cli: 'codex', role: 'Dev', sessionTokenLimit: -5 }]))
+  fs.writeFileSync(agentsFile, JSON.stringify([{ name: 'k', cli: 'claude', role: 'Dev', sessionTokenLimit: -5 }]))
   assert.ok(core.team(d)[0].sessionConfigError)
   const bad = await core.run(d, core.team(d)[0]); assert.strictEqual(bad.outcome, 'error') // no spawn with a broken limit
   fs.writeFileSync(agentsFile, good)
@@ -539,12 +566,12 @@ async function sprint7Checks() {
   const k = core.team(d).find(a => a.name === 'k'), calls = () => fs.readFileSync(argsLog, 'utf8').trim().split('\n').length
   const go = async (env, a = k, runId) => {
     Object.assign(process.env, { FAKE_MODE: 'text', FAKE_TEXT: 'ok', FAKE_TID: 'S1', FAKE_IN: '3' }, env)
-    const n = calls(), r = await core.run(d, a, { runId }); return { ...r, calls: calls() - n, args: lastArgs(), s: core.sessions(d).k }
+    const n = calls(), r = await core.run(d, a, { runId }); return { ...r, calls: calls() - n, args: lastArgs(), s: core.sessions(d)[a.name] }
   }
   let r = await go({ FAKE_IN: '150000' }, k, 'run-1')
-  assert.deepStrictEqual([r.s.id, r.s.lastTurn.inputTokens, r.s.lastTurn.runId, r.sessionRotation], ['S1', 150000, 'run-1', null])
+  assert.deepStrictEqual([r.s.id, r.s.lastTurn.inputTokens, r.s.lastTurn.contextInputTokens, r.s.lastTurn.runId, r.sessionRotation], ['S1', 150000, 150000, 'run-1', null])
   assert.ok(!core.sessionRotationPending(k, r.s)) // = limit → no rotation
-  r = await go({ FAKE_IN: '150001' }, k, 'run-2'); assert.ok(r.args.includes('resume') && r.args.includes('S1'))
+  r = await go({ FAKE_IN: '150001' }, k, 'run-2'); assert.ok(r.args.some(a => a.includes('resume')) && r.args.includes('S1'))
   assert.ok(core.sessionRotationPending(k, r.s))
   await core.appendLogIndexed(d, { from: 'user', text: 'tin gần đây K2' }); fs.appendFileSync(path.join(d, '.chat', 'memory.md'), '- nhớ K1\n')
   // K2 parser: 3–5 lines, may precede task-status, never with run-command
@@ -561,28 +588,34 @@ async function sprint7Checks() {
   assert.strictEqual(core.readHandoff(d, 'k', 'other-ws'), null) // workspace mismatch → ignored
   // K1: > limit → next turn is fresh (no resume id), full briefing + current handoff, rotation reported once
   r = await go({ FAKE_TID: 'S2' }, k, 'run-3')
-  assert.ok(!r.args.includes('resume') && !r.args.includes('S1'), r.args.join(' '))
+  assert.ok(!r.args.some(a => a.includes('resume')) && !r.args.includes('S1'), r.args.join(' '))
   const fresh = r.args[r.args.length - 1]
   for (const want of ['- nhớ K1', 'tin gần đây K2', '- đang làm K1', 'Bàn giao từ lượt gần nhất', '```handoff']) assert.ok(fresh.includes(want), want)
-  assert.deepStrictEqual(r.sessionRotation, { previousSessionId: 'S1', previousRunId: 'run-2', inputTokens: 150001, limit: 150000, handoffStatus: 'current' })
-  assert.deepStrictEqual([r.s.id, r.s.lastTurn.inputTokens], ['S2', 3])
-  r = await go({ FAKE_TID: 'S2' }, k, 'run-4'); assert.ok(r.args.includes('resume') && r.args.includes('S2') && !r.sessionRotation)
+  assert.deepStrictEqual(r.sessionRotation, { previousSessionId: 'S1', previousRunId: 'run-2', contextInputTokens: 150001, limit: 150000, handoffStatus: 'current' })
+  assert.deepStrictEqual([r.s.id, r.s.lastTurn.inputTokens, r.s.lastTurn.contextInputTokens], ['S2', 3, 3])
+  r = await go({ FAKE_TID: 'S2' }, k, 'run-4'); assert.ok(r.args.some(a => a.includes('resume')) && r.args.includes('S2') && !r.sessionRotation)
   // limit 0 = off; changing the limit applies to the next turn
   await go({ FAKE_TID: 'S2', FAKE_IN: '200000' })
-  r = await go({ FAKE_TID: 'S2' }, { ...k, sessionTokenLimit: 0 }); assert.ok(r.args.includes('resume') && !r.sessionRotation)
+  r = await go({ FAKE_TID: 'S2' }, { ...k, sessionTokenLimit: 0 }); assert.ok(r.args.some(a => a.includes('resume')) && !r.sessionRotation)
   await go({ FAKE_TID: 'S2', FAKE_IN: '200000' })
-  r = await go({ FAKE_TID: 'S2' }, { ...k, sessionTokenLimit: 300000 }); assert.ok(r.args.includes('resume'))
+  r = await go({ FAKE_TID: 'S2' }, { ...k, sessionTokenLimit: 300000 }); assert.ok(r.args.some(a => a.includes('resume')))
   // null input → no guess; 80k + 80k in one turn (empty retry) keeps the id and only rotates the next turn
-  r = await go({ FAKE_TID: 'S2', FAKE_IN: 'null' }); assert.strictEqual(r.s.lastTurn.inputTokens, null)
-  r = await go({ FAKE_TID: 'S2' }); assert.ok(r.args.includes('resume'))
+  r = await go({ FAKE_TID: 'S2', FAKE_IN: 'null' }); assert.strictEqual(r.s.lastTurn.contextInputTokens, null)
+  r = await go({ FAKE_TID: 'S2' }); assert.ok(r.args.some(a => a.includes('resume')))
   r = await go({ FAKE_MODE: 'empty', FAKE_TID: 'S2', FAKE_IN: '80000' })
-  assert.deepStrictEqual([r.calls, r.usage.inputTokens, r.s.lastTurn.inputTokens, r.s.id], [2, 160000, 160000, 'S2'])
-  assert.ok(r.args.includes('resume') && r.args.includes('S2')) // the retry stayed in S2
-  r = await go({ FAKE_TID: 'S3' }); assert.ok(!r.args.includes('resume') && r.sessionRotation?.previousSessionId === 'S2')
+  assert.deepStrictEqual([r.calls, r.usage.inputTokens, r.s.lastTurn.inputTokens, r.s.lastTurn.contextInputTokens, r.s.id], [2, 160000, 160000, 80000, 'S2'])
+  assert.ok(r.args.some(a => a.includes('resume')) && r.args.includes('S2')) // the retry stayed in S2
+  r = await go({ FAKE_TID: 'S2', FAKE_IN: '150001' })
+  r = await go({ FAKE_TID: 'S3' }); assert.ok(!r.args.some(a => a.includes('resume')) && r.sessionRotation?.previousSessionId === 'S2')
   // resume:false → measurement record only (id null), never resumed or rotated
   r = await go({ FAKE_TID: 'S9', FAKE_IN: '999999' }, { ...k, resume: false }, 'run-nr')
-  assert.deepStrictEqual([r.s.id, r.s.lastTurn.inputTokens], [null, 999999])
-  r = await go({ FAKE_TID: 'S9' }, { ...k, resume: false }, 'run-nr2'); assert.ok(!r.args.includes('resume') && !r.sessionRotation)
+  assert.deepStrictEqual([r.s.id, r.s.lastTurn.inputTokens, r.s.lastTurn.contextInputTokens], [null, 999999, 999999])
+  r = await go({ FAKE_TID: 'S9' }, { ...k, resume: false }, 'run-nr2'); assert.ok(!r.args.some(a => a.includes('resume')) && !r.sessionRotation)
+  // Codex / legacy: returns contextInputTokens: null and never rotates
+  const codexDev = { name: 'codex-dev', cli: 'codex', role: 'Dev', sessionTokenLimit: 150000 }
+  const rCodex = await go({ FAKE_IN: '999999' }, codexDev, 'run-cx')
+  assert.strictEqual(rCodex.s.lastTurn.contextInputTokens, null)
+  assert.ok(!core.sessionRotationPending(codexDev, rCodex.s))
   // summary job (trackSession:false) does not touch the session record
   const before = JSON.stringify(core.sessions(d)); process.env.FAKE_TID = 'SX'
   await core.run(d, k, { trackSession: false, initialPrompt: 'tóm tắt' }); assert.strictEqual(JSON.stringify(core.sessions(d)), before)
@@ -966,17 +999,19 @@ const granted = (i >= 0 && argv.slice(i + 1).includes('Bash(npm test)')) || argv
 const retry = p.includes('Bạn chưa gửi tin trả lời'), deny = !granted && !retry && mode !== 'emptynodeny'
 const denials = deny ? [{ tool_name: 'Bash', tool_use_id: 'u1', tool_input: { command: 'npm test' } },
   { tool_name: 'Bash', tool_input: { command: 'npm test && rm -rf /' } }, { tool_name: '<b>x</b> @dev-a', tool_input: {} }] : []
-const text = granted ? 'đã chạy npm test' : retry ? 'đã trả lời' : mode.startsWith('empty') ? '' : 'bị chặn'
+const customReply = JSON.parse(process.env.FAKE_REPLY || '{}')['dev-r']
+const text = customReply !== undefined ? customReply : (granted ? 'đã chạy npm test' : retry ? 'đã trả lời' : mode.startsWith('empty') ? '' : 'bị chặn')
 out({ type: 'system', subtype: 'init', session_id: 'C' + process.pid })
+out({ type: 'assistant', message: { id: 'M' + process.pid, content: [{ type: 'text', text: text || '' }], usage: { input_tokens: Number(process.env.FAKE_IN || 1) } } })
 out({ type: 'result', subtype: 'success', is_error: false, result: text, session_id: 'C' + process.pid,
-  usage: { input_tokens: 1, output_tokens: 1 }, total_cost_usd: 0.001, permission_denials: denials })
+  usage: { input_tokens: Number(process.env.FAKE_IN || 1), output_tokens: 1 }, total_cost_usd: 0.001, permission_denials: denials })
 `, { mode: 0o755 })
   process.env.PATH = mbin + path.delimiter + process.env.PATH
 
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'agent-chat-git-'))), at = f => path.join(root, f)
   core.init(root)
   fs.writeFileSync(at('.chat/agents.json'), JSON.stringify(['dev-a', 'dev-b', 'dev-c', 'dev-r'].map(name =>
-    ({ name, cli: 'codex', role: 'Dev', owns: ['*.txt'], resume: name === 'dev-r', allowedCommands: ['npm run check'],
+    ({ name, cli: name === 'dev-r' ? 'claude' : 'codex', role: 'Dev', owns: ['*.txt'], resume: name === 'dev-r', allowedCommands: ['npm run check'],
       ...(name === 'dev-r' ? { sessionTokenLimit: 100 } : {}) }))))
   fs.writeFileSync(at('a.txt'), Array.from({ length: 10 }, (_, i) => `l${i}`).join('\n'))
   fs.writeFileSync(at('package.json'), JSON.stringify({ name: 'fixture', private: true, scripts: { check: 'node chk.js' } }))
@@ -1015,12 +1050,12 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
   assert.strictEqual(reply.text, 'Xong.')
   assert.ok(fs.readFileSync(at('.chat/handoff/dev-r.md'), 'utf8').includes('- nhờ @dev-a sau'))
   let sm = await call('sessions', root)
-  assert.deepStrictEqual([sm['dev-r'].lastTurn.inputTokens, sm['dev-r'].sessionTokenLimit, sm['dev-r'].rotationPending], [500, 100, true])
+  assert.deepStrictEqual([sm['dev-r'].lastTurn.inputTokens, sm['dev-r'].lastTurn.contextInputTokens, sm['dev-r'].sessionTokenLimit, sm['dev-r'].rotationPending], [500, 500, 100, true])
   process.env.FAKE_IN = '1'; mark = log().length; await call('send', root, '@dev-r tiếp')
   const rotated = await waitFor('tin xoay phiên', () => log().slice(mark).find(m => m.kind === 'session-rotated'))
   assert.ok(rotated.text.includes('dev-r mở phiên mới') && rotated.text.includes('vượt ngưỡng 100'), rotated.text)
   await waitFor('trả lời dev-r lần 2', () => log().slice(mark).some(m => m.from === 'dev-r'))
-  sm = await call('sessions', root); assert.deepStrictEqual([sm['dev-r'].lastTurn.inputTokens, sm['dev-r'].rotationPending], [1, false])
+  sm = await call('sessions', root); assert.deepStrictEqual([sm['dev-r'].lastTurn.inputTokens, sm['dev-r'].lastTurn.contextInputTokens, sm['dev-r'].rotationPending], [1, 1, false])
   assert.ok(!log().some(m => m.from === 'dev-a')) // "@dev-a" inside the handoff never routed
   delete process.env.FAKE_REPLY; delete process.env.FAKE_IN
 
@@ -1219,6 +1254,16 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
   await waitFor(`${me} bị chặn vì file ngoài phạm vi`, () => failed(mark).some(t => t.includes('chưa được app ghi nhận: left.md')))
   fs.rmSync(path.join(ws(), 'left.md'))
   delete process.env.FAKE_EDITS
+
+  // T38 hotfix: main bumps package.json version while agent has unmerged commits -> merges successfully
+  const pkg = JSON.parse(fs.readFileSync(at('package.json'), 'utf8'))
+  pkg.version = '0.6.0'
+  fs.writeFileSync(at('package.json'), JSON.stringify(pkg, null, 2))
+  git('add', 'package.json'); git('commit', '-q', '-m', 'bump version to 0.6.0')
+  mark = log().length
+  await edit({ [me]: [['a.txt', 4, 'R4']] }, `@${me} sửa dòng 4 khi main bump version`)
+  entries = await settle(1, `merge lượt ${me} sau khi main bump version`)
+  assert.deepStrictEqual([entries.map(e => e.state), lines()[4], failed(mark)], [['merged'], 'R4', []]); clean()
 
   // A stopped pending retry stays paused, without overwriting other queue entries.
   const stoppedConfig = core.projectSettings(root)

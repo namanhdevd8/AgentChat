@@ -150,12 +150,31 @@ async function verifyWorkspace(root, record) {
   return expected
 }
 
-async function bootstrapDependencies(root, cwd) {
-  const manifests = ['package.json', 'package-lock.json']
-  for (const file of manifests) {
-    const left = path.join(root, file), right = path.join(cwd, file)
-    if (fs.existsSync(left) !== fs.existsSync(right) || (fs.existsSync(left) && !fs.readFileSync(left).equals(fs.readFileSync(right)))) return false
+function manifestsCompatible(root, cwd) {
+  const rootPkgPath = path.join(root, 'package.json'), cwdPkgPath = path.join(cwd, 'package.json')
+  if (!fs.existsSync(rootPkgPath) || !fs.existsSync(cwdPkgPath)) return false
+  try {
+    const rootBuf = fs.readFileSync(rootPkgPath), cwdBuf = fs.readFileSync(cwdPkgPath)
+    if (rootBuf.equals(cwdBuf)) {
+      const rootLock = path.join(root, 'package-lock.json'), cwdLock = path.join(cwd, 'package-lock.json')
+      if (fs.existsSync(rootLock) === fs.existsSync(cwdLock)) {
+        if (!fs.existsSync(rootLock) || fs.readFileSync(rootLock).equals(fs.readFileSync(cwdLock))) return true
+      }
+    }
+    const rootPkg = JSON.parse(rootBuf.toString('utf8'))
+    const cwdPkg = JSON.parse(cwdBuf.toString('utf8'))
+    const depKeys = ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies', 'overrides']
+    for (const k of depKeys) {
+      if (JSON.stringify(rootPkg[k] || {}) !== JSON.stringify(cwdPkg[k] || {})) return false
+    }
+    return true
+  } catch {
+    return false
   }
+}
+
+async function bootstrapDependencies(root, cwd) {
+  if (!manifestsCompatible(root, cwd)) return false
   const source = path.join(root, 'node_modules'), target = path.join(cwd, 'node_modules')
   if (!fs.existsSync(source)) return false
   if (!fs.existsSync(target)) {
@@ -356,8 +375,8 @@ async function commitWorkspace(job, result, changed, auditComplete, outside) {
       const settings = core.projectSettings(job.root).settings
       updateRegistry(job.root, latest => {
         if (!latest.queue.some(entry => entry.runId === job.runId && entry.headSha === headSha)) latest.queue.push({ id: randomUUID(), agent: job.name,
-          runId: job.runId, workspaceId: job.workspaceId, headSha, checks: [...settings.mergeChecks], state: job.depsReady === false ? 'needs-deps' : 'queued',
-          baseSha: probe.sha, candidateSha: null, error: job.depsReady === false ? { code: 'NEEDS_DEPS', message: 'Workspace chưa có dependency phù hợp', files: [], log: '' } : null,
+          runId: job.runId, workspaceId: job.workspaceId, headSha, checks: [...settings.mergeChecks], state: 'queued',
+          baseSha: probe.sha, candidateSha: null, error: null,
           pgid: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() })
         latest.targetSha = probe.sha
       })
@@ -397,7 +416,12 @@ async function processMerge(root, id) {
   const now = () => new Date().toISOString()
   // re-checked at every state change: the user may stop (paused) or retry the entry while we wait for the dialog or the lock
   const stillQueued = item => item.state === 'queued' && !item.supersededBy
-  const refuse = async (code, message) => { updateEntry(root, id, item => { if (stillQueued(item)) mergeError(item, code, message) }); await emitWorktreeState(root).catch(() => {}) }
+  const refuse = async (code, message) => {
+    updateEntry(root, id, item => { if (stillQueued(item)) mergeError(item, code, message) })
+    await emitWorktreeState(root).catch(() => {})
+    const cur = readWorktrees(root).queue.find(item => item.id === id)
+    if (cur?.error) await post(root, 'system', `@${cur.agent} chưa gộp được nhánh: ${message}`, { kind: 'merge', queueId: cur.id, owner: cur.agent, headSha: cur.headSha, error: cur.error })
+  }
   try { await ensureTrustedConfig(root) } catch (e) { return refuse('CONFIG_UNTRUSTED', e.message) }
   const owner = core.team(root).find(agent => agent.name === entry.agent)
   if (!owner) return refuse('CHECK_NOT_ALLOWED', 'Agent sở hữu nhánh không còn trong nhóm')
@@ -557,7 +581,8 @@ const heads = () => jobs.filter((job, i) => !job.finished && !jobs.slice(0, i).s
 const activeFor = dir => {
   const root = rootOf(dir)
   return heads().filter(job => job.root === root && job.headStarted)
-    .map(job => ({ name: job.name, runId: job.runId, label: job.label, stopping: job.stopping, phase: job.phase, blockedBy: job.blockedBy, chain: chainInfo(job),
+    .map(job => ({ name: job.name, runId: job.runId, label: job.label, detail: job.detail ?? null, detailTruncated: !!job.detailTruncated,
+      stopping: job.stopping, phase: job.phase, blockedBy: job.blockedBy, chain: chainInfo(job),
       startedAt: job.startedAt, activeAt: job.activeAt }))
 }
 const orphanFor = dir => {
@@ -566,11 +591,19 @@ const orphanFor = dir => {
 }
 const chainInfo = job => job.chain ? { turns: job.chain.turns, limit: job.chain.chainLimit } : null
 // activeAt: the last new step (CLI progress or a phase change), so the UI can tell a long silence from a busy turn
-function progress(job, label = job.label) {
+function progress(job, label = job.label, extra) {
+  if (extra !== undefined) {
+    job.detail = extra.detail ?? null
+    job.detailTruncated = !!extra.detailTruncated
+  } else if (label !== job.label) {
+    job.detail = null
+    job.detailTruncated = false
+  }
   job.label = label
   job.activeAt = Date.now()
   win?.webContents.send('progress', job.dir, job.name,
-    { runId: job.runId, label, phase: job.phase, blockedBy: job.blockedBy || [], stopping: job.stopping, chain: chainInfo(job),
+    { runId: job.runId, label, detail: job.detail ?? null, detailTruncated: !!job.detailTruncated,
+      phase: job.phase, blockedBy: job.blockedBy || [], stopping: job.stopping, chain: chainInfo(job),
       startedAt: job.startedAt, activeAt: job.activeAt })
 }
 
@@ -580,6 +613,7 @@ async function terminal(job, result, waiting = false) {
       : result.outcome === 'error' ? `@${job.name} lỗi: ${result.text}` : result.text
   const msg = await post(job.dir, result.outcome === 'success' ? job.name : 'system', text,
     { runId: job.runId, agent: job.name, cli: job.agent.cli, ...(result.model ? { model: result.model } : {}), outcome: result.outcome, usage: result.usage,
+      contextInputTokens: result.contextInputTokens ?? null,
       ...(result.taskUpdates?.length ? { taskUpdates: result.taskUpdates } : {}),
       ...(result.commandResults?.length ? { commandResults: result.commandResults } : {}), ...(result.logExtra || {}) },
     result.taskChanges ? { taskChanges: result.taskChanges, actor: job.name } : {})
@@ -867,7 +901,7 @@ async function executeJob(job) {
       cwd: job.cwd || job.root, workspaceId: job.workspaceId,
       runId: job.runId, trackSession: job.kind !== 'summary', sessionTokenLimit: runAgent.sessionTokenLimit,
       signal: job.controller.signal,
-      onProgress: label => { if (!job.stopping) progress(job, label) },
+      onProgress: (label, extra) => { if (!job.stopping) progress(job, label, extra) },
       onSpawn: pid => { job.spawned = true; job.pgid = pid; persistRegistry(job.root) },
       onSessionChanged: () => { try { emitSessions(job.root) } catch (e) { console.error('Không gửi được trạng thái phiên:', e) } },
       ...(job.retryContext ? { retryContext: job.retryContext } : {}),
@@ -956,8 +990,10 @@ async function executeJob(job) {
     if (result.sessionRotation) {
       const handoff = result.sessionRotation.handoffStatus === 'missing' ? ' Không có bàn giao hợp lệ từ lượt trước.'
         : result.sessionRotation.handoffStatus === 'older' ? ' Dùng bàn giao từ lượt cũ hơn.' : ''
-      await post(job.dir, 'system', `${job.name} mở phiên mới: lượt trước ${result.sessionRotation.inputTokens.toLocaleString('vi-VN')} token vào, vượt ngưỡng ${result.sessionRotation.limit.toLocaleString('vi-VN')}.${handoff}`,
-        { kind: 'session-rotated', relatedRunId: job.runId })
+      const tokens = result.sessionRotation.contextInputTokens?.toLocaleString('vi-VN') ?? 0
+      const limit = result.sessionRotation.limit?.toLocaleString('vi-VN') ?? 0
+      await post(job.dir, 'system', `${job.name} mở phiên mới: ngữ cảnh bước cuối lượt trước ${tokens} token, vượt ngưỡng ${limit}.${handoff}`,
+        { kind: 'session-rotated', relatedRunId: job.runId, contextInputTokens: result.sessionRotation.contextInputTokens, limit: result.sessionRotation.limit })
     }
     if (workspaceError) await post(job.dir, 'system', `Không thể tạo commit cho @${job.name}: ${workspaceError.message}`,
       { kind: 'merge', owner: job.name, relatedRunId: job.runId, error: { code: workspaceError.code || 'GIT_ERROR', message: workspaceError.message,

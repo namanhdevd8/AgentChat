@@ -126,7 +126,39 @@ const shownPath = (dir, file) => {
   const relative = path.relative(root, absolute)
   return clean(relative && !relative.startsWith('..' + path.sep) && relative !== '..' ? relative : file)
 }
-const fileLabel = (verb, dir, file) => shownPath(dir, file) && `${verb} ${shownPath(dir, file)}`
+function safeNonNegativeInteger(v) {
+  return typeof v === 'number' && Number.isSafeInteger(v) && v >= 0
+}
+
+function parseContextTokens(usage) {
+  if (!usage || typeof usage !== 'object' || Array.isArray(usage)) return null
+  const input = usage.input_tokens
+  if (!safeNonNegativeInteger(input)) return null
+  let total = input
+  for (const k of ['cache_read_input_tokens', 'cache_creation_input_tokens']) {
+    if (usage[k] === undefined) continue
+    if (!safeNonNegativeInteger(usage[k])) return null
+    total += usage[k]
+    if (!Number.isSafeInteger(total)) return null
+  }
+  return total
+}
+
+function formatDetail(raw) {
+  if (typeof raw !== 'string' || !raw) return { detail: null, detailTruncated: false }
+  const cleaned = raw.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '')
+  if (cleaned.length > 8192) return { detail: cleaned.slice(0, 8192), detailTruncated: true }
+  return { detail: cleaned, detailTruncated: false }
+}
+
+const fileLabel = (verb, dir, file, s) => {
+  if (typeof file !== 'string' || !file) {
+    if (s) s.progressDetail = { detail: null, detailTruncated: false }
+    return ''
+  }
+  if (s) s.progressDetail = formatDetail(file)
+  return `${verb} ${path.basename(file)}`
+}
 const errorText = e => clean(typeof e === 'string' ? e : e?.message || (typeof e?.error === 'string' ? e.error : e?.error?.message) || e?.status)
 const sumUsage = list => {
   const sum = field => list.every(u => u[field] != null) ? list.reduce((n, u) => n + u[field], 0) : null
@@ -141,8 +173,10 @@ function claudeResult(s, baseline) {
     if (baseline != null && s.rawCostUsd >= baseline) usage.costUsd = Number((s.rawCostUsd - baseline).toFixed(12))
     else usage.partial = true
   }
-  return { id: s.id, text: s.text, usage, ...(s.permissionDenials.length ? { permissionDenials: s.permissionDenials } : {}),
-    ...(s.model ? { model: s.model } : {}), error: !s.terminal ? 'Thiếu kết quả cuối từ Claude' : s.error }
+  const error = !s.terminal ? 'Thiếu kết quả cuối từ Claude' : s.error
+  const contextInputTokens = (!error && safeNonNegativeInteger(s.contextInputTokens)) ? s.contextInputTokens : null
+  return { id: s.id, text: s.text, usage, contextInputTokens, ...(s.permissionDenials.length ? { permissionDenials: s.permissionDenials } : {}),
+    ...(s.model ? { model: s.model } : {}), error }
 }
 
 function claudePermissionArgs(agent) {
@@ -162,26 +196,39 @@ function codexPermissionArgs(agent) {
   return ['-c', 'sandbox_mode="workspace-write"', '-c', 'approval_policy="never"', '-c', `sandbox_workspace_write.network_access=${network}`]
 }
 
-function codexLabel(e, dir) {
+function codexLabel(e, dir, s) {
   const item = e.item || {}
   const failed = item.status === 'failed' || item.status === 'error'
-  if (item.type === 'command_execution') return `${failed ? 'lỗi' : e.type === 'item.completed' ? 'đã chạy' : 'chạy'} ${clean(item.command)}`
+  if (item.type === 'command_execution') {
+    if (s) s.progressDetail = formatDetail(item.command)
+    return failed ? 'Lỗi chạy lệnh' : e.type === 'item.completed' ? 'Đã chạy lệnh' : 'Đang chạy lệnh'
+  }
   if (item.type === 'file_change') {
     const file = item.changes?.[0]?.path
-    return fileLabel(failed ? 'lỗi' : e.type === 'item.completed' ? 'đã sửa' : 'sửa', dir, file)
+    return fileLabel(failed ? 'lỗi' : e.type === 'item.completed' ? 'đã sửa' : 'sửa', dir, file, s)
   }
+  if (s) s.progressDetail = { detail: null, detailTruncated: false }
   if (item.type === 'mcp_tool_call') return `${failed ? 'lỗi' : 'gọi'} ${clean([item.server, item.tool].filter(Boolean).join('/'))}`
   if (item.type === 'agent_message') return 'đang trả lời…'
 }
 
-function agyLabel(update, dir) {
+function agyLabel(update, dir, s) {
   const info = update.tool_info || {}, name = update.tool_name || info.name
-  if (!name) return 'đang trả lời…'
+  if (!name) {
+    if (s) s.progressDetail = { detail: null, detailTruncated: false }
+    return 'đang trả lời…'
+  }
   const params = info.parameters || update.parameters || {}
-  const done = /DONE|SUCCESS|COMPLETED/.test(String(update.state || update.status || '').toUpperCase())
-  if (name === 'run_command') return `${done ? 'đã chạy' : 'chạy'} ${clean(params.CommandLine) || name}`
+  const rawStatus = String(update.state || update.status || '').toUpperCase()
+  const done = /DONE|SUCCESS|COMPLETED/.test(rawStatus)
+  const failed = /FAIL|ERROR/.test(rawStatus)
+  if (name === 'run_command') {
+    if (s) s.progressDetail = formatDetail(params.CommandLine || '')
+    return failed ? 'Lỗi chạy lệnh' : done ? 'Đã chạy lệnh' : 'Đang chạy lệnh'
+  }
   const file = params.file_path || params.path || params.FilePath || params.AbsolutePath
-  if (file) return fileLabel(`${done ? 'đã ' : ''}${/write|edit|replace/i.test(name) ? 'sửa' : 'đọc'}`, dir, file)
+  if (file) return fileLabel(`${done ? 'đã ' : ''}${/write|edit|replace/i.test(name) ? 'sửa' : 'đọc'}`, dir, file, s)
+  if (s) s.progressDetail = { detail: null, detailTruncated: false }
   return clean(done ? `đã ${name}` : name)
 }
 
@@ -192,21 +239,45 @@ const CLI = {
     args: (p, id, a = {}) => ['-p', p, '--output-format', 'stream-json', '--verbose', ...claudePermissionArgs(a),
       ...opt('--add-dir', a.sharedChat), ...opt('--model', a.model), ...opt('--effort', a.effort), ...opt('--resume', id)],
     stdinArgs: (id, a) => { const v = CLI.claude.args('', id, a); v.splice(1, 1); return v }, // `-p` with no prompt reads stdin
-    state: () => ({ id: null, text: null, usage: null, rawCostUsd: null, permissionDenials: [], error: null, terminal: false, model: null }),
+    state: () => ({ id: null, text: null, usage: null, rawCostUsd: null, permissionDenials: [], error: null, terminal: false, model: null, contextInputTokens: null, currentMessageId: null, seenMessageIds: new Set(), progressDetail: { detail: null, detailTruncated: false } }),
     event(e, s, { dir }) {
       s.id ||= e.session_id
+      if (e.type === 'system' && (e.subtype === 'compact' || e.subtype === 'reset')) {
+        s.contextInputTokens = null
+        s.currentMessageId = null
+        s.seenMessageIds.clear()
+      }
       if (e.type === 'system' && e.subtype === 'init') { s.id = e.session_id || s.id; s.model = typeof e.model === 'string' ? e.model : s.model }
       if (e.type === 'assistant' && !e.parent_tool_use_id && !e.message?.parent_tool_use_id) {
-        const content = Array.isArray(e.message?.content) ? e.message.content : []
+        const msg = e.message || {}
+        const msgId = typeof msg.id === 'string' && msg.id.trim() ? msg.id : null
+        if (!msgId) {
+          s.currentMessageId = null
+          s.contextInputTokens = null
+        } else if (msgId === s.currentMessageId) {
+          if (msg.usage !== undefined) s.contextInputTokens = parseContextTokens(msg.usage)
+        } else if (!s.seenMessageIds.has(msgId)) {
+          s.seenMessageIds.add(msgId)
+          s.currentMessageId = msgId
+          s.contextInputTokens = parseContextTokens(msg.usage)
+        }
+        const content = Array.isArray(msg.content) ? msg.content : []
         const tool = content.find(x => x.type === 'tool_use')
         if (tool) {
           const file = tool.input?.file_path
-          if (tool.name === 'Read') return fileLabel('đọc', dir, file)
-          if (tool.name === 'Edit' || tool.name === 'Write') return fileLabel('sửa', dir, file)
-          if (tool.name === 'Bash') return `chạy ${clean(tool.input?.command)}`
+          if (tool.name === 'Read') return fileLabel('đọc', dir, file, s)
+          if (tool.name === 'Edit' || tool.name === 'Write') return fileLabel('sửa', dir, file, s)
+          if (tool.name === 'Bash') {
+            s.progressDetail = formatDetail(tool.input?.command)
+            return 'Đang chạy lệnh'
+          }
+          s.progressDetail = { detail: null, detailTruncated: false }
           return clean(tool.name)
         }
-        if (content.some(x => x.type === 'text')) return 'đang trả lời…'
+        if (content.some(x => x.type === 'text')) {
+          s.progressDetail = { detail: null, detailTruncated: false }
+          return 'đang trả lời…'
+        }
       }
       if (e.type === 'result' || (!e.type && Object.hasOwn(e, 'result'))) {
         s.terminal = true
@@ -227,15 +298,15 @@ const CLI = {
     args: (p, id, a = {}) => ['exec', ...opt('--add-dir', a.sharedChat), ...(id ? ['resume'] : []), '--json', '--skip-git-repo-check', ...codexPermissionArgs(a),
       ...opt('-m', a.model), ...opt('-c', a.effort && `model_reasoning_effort="${a.effort}"`), ...(id ? [id] : []), p],
     stdinArgs: (id, a) => CLI.codex.args('-', id, a), // "-" = read the prompt from stdin
-    state: () => ({ id: null, text: null, usage: null, error: null, terminal: false }),
+    state: () => ({ id: null, text: null, usage: null, error: null, terminal: false, progressDetail: { detail: null, detailTruncated: false } }),
     event(e, s, context) {
       if (e.type === 'thread.started') s.id = e.thread_id
       if (e.type === 'item.completed' && e.item?.type === 'agent_message') s.text = e.item.text
       if (e.type === 'turn.completed') { s.terminal = true; s.usage = rawUsage(e.usage) }
       if (e.type === 'turn.failed' || e.type === 'error') { s.terminal = true; s.error = errorText(e.error || e) || 'Codex báo lỗi' }
-      if (/^item\.(started|updated|completed)$/.test(e.type)) return codexLabel(e, context.dir)
+      if (/^item\.(started|updated|completed)$/.test(e.type)) return codexLabel(e, context.dir, s)
     },
-    result: s => ({ id: s.id, text: s.text, usage: s.usage || emptyUsage(true),
+    result: s => ({ id: s.id, text: s.text, usage: s.usage || emptyUsage(true), contextInputTokens: null,
       error: !s.terminal ? 'Thiếu kết quả cuối từ Codex' : s.error }),
   },
   agy: {
@@ -244,7 +315,7 @@ const CLI = {
     args: (p, id, a = {}) => ['-p', p, '--output-format', 'stream-json', '--print-timeout', '0', '--mode', a.readOnly ? 'plan' : 'accept-edits',
       ...(a.permissions?.mode === 'full' && !a.readOnly ? ['--dangerously-skip-permissions'] : []), ...opt('--add-dir', a.sharedChat),
       ...opt('--model', a.model), ...opt('--effort', a.effort), ...opt('--conversation', id)],
-    state: context => ({ id: null, text: null, usage: null, error: null, terminal: false, steps: new Map(), afterBoundary: !context.resumed }),
+    state: context => ({ id: null, text: null, usage: null, error: null, terminal: false, steps: new Map(), afterBoundary: !context.resumed, progressDetail: { detail: null, detailTruncated: false } }),
     event(e, s, context) {
       if (e.event === 'init') s.id = e.conversation_id || e.init?.conversation_id || s.id
       if (e.event === 'user_input') { s.afterBoundary = true; s.steps.clear() }
@@ -259,7 +330,7 @@ const CLI = {
           s.steps.set(`${s.id || ''}:${index}`, rawUsage(update.usage || e.usage))
           s.usage = sumUsage([...s.steps.values()])
         }
-        return agyLabel(update, context.dir)
+        return agyLabel(update, context.dir, s)
       }
       if (e.event === 'result' || (!e.event && (e.response != null || e.result != null))) {
         const result = typeof e.result === 'object' ? e.result : e
@@ -271,7 +342,7 @@ const CLI = {
         if (status !== 'SUCCESS') s.error = errorText(result.error || status) || 'Agy báo lỗi'
       }
     },
-    result: s => ({ id: s.id, text: s.text, usage: s.usage || emptyUsage(true),
+    result: s => ({ id: s.id, text: s.text, usage: s.usage || emptyUsage(true), contextInputTokens: null,
       error: !s.terminal ? 'Thiếu kết quả cuối từ agy' : s.error }),
   },
 }
@@ -1506,8 +1577,8 @@ function setSession(dir, name, s, workspaceId = null) {
 }
 
 function sessionRotationPending(agent, session) {
-  const input = value(session?.lastTurn?.inputTokens, true), limit = sessionTokenLimit(agent)
-  return agent.resume !== false && !!session?.id && session.cli === agent.cli && limit > 0 && input != null && input > limit
+  const context = session?.lastTurn?.contextInputTokens, limit = sessionTokenLimit(agent)
+  return agent.resume !== false && !!session?.id && session.cli === agent.cli && limit > 0 && safeNonNegativeInteger(context) && context > limit
 }
 
 function handoffPath(dir, name) {
@@ -1939,7 +2010,7 @@ function exec(dir, agent, session, { signal, onProgress, onSession, onSpawn, cos
       if (viaStdin) { c.stdin.on('error', () => {}); c.stdin.end(p) }
     }
     catch (e) { return reject(e) }
-    let se = '', childError, killError, lastLabel, lastId, termination = Promise.resolve()
+    let se = '', childError, killError, lastLabel, lastDetail, lastTruncated, lastId, termination = Promise.resolve()
     let events = 0, junk = '' // for diagnosing a CLI that ends without a final result
     c.stdout.setEncoding('utf8')
     const lines = readline.createInterface({ input: c.stdout, crlfDelay: Infinity })
@@ -1953,7 +2024,13 @@ function exec(dir, agent, session, { signal, onProgress, onSession, onSpawn, cos
           const baseline = onSession?.(state.id)
           if (baseline !== undefined) context.costBaseline = baseline
         }
-        if (!signal?.aborted && label && label !== lastLabel) { lastLabel = label; onProgress?.(label) }
+        const extra = state.progressDetail || { detail: null, detailTruncated: false }
+        if (!signal?.aborted && label && (label !== lastLabel || extra.detail !== lastDetail || extra.detailTruncated !== lastTruncated)) {
+          lastLabel = label
+          lastDetail = extra.detail
+          lastTruncated = extra.detailTruncated
+          onProgress?.(label, extra)
+        }
       } catch (e) { childError ||= e }
     })
     c.stderr.on('data', d => { se = (se + d).slice(-8192) })
@@ -1977,7 +2054,7 @@ function exec(dir, agent, session, { signal, onProgress, onSession, onSpawn, cos
       if (killError && !orphanState) orphanState = 'unknown'
       let result
       try { result = cli.result(state, context) }
-      catch (e) { childError ||= e; result = { id: state.id, text: null, usage: emptyUsage(true), error: e.message } }
+      catch (e) { childError ||= e; result = { id: state.id, text: null, usage: emptyUsage(true), contextInputTokens: null, error: e.message } }
       if (!signal?.aborted && code && !result.error) result.error = se.trim().slice(-500) || `exit ${code}`
       // parser-level errors ("no final result") hide why the CLI died; stderr usually says
       else if (!signal?.aborted && result.error && se.trim() && !result.error.includes(se.trim().slice(-200))) result.error += ` — ${se.trim().slice(-300)}`
@@ -2010,7 +2087,7 @@ function runCommand(dir, command, { signal, onProgress, onSpawn, agent } = {}) {
   const failed = error => ({ command, exitCode: null, signal: null, stdout: '', stderr: '', truncated: false,
     durationMs: Math.max(0, Math.round(performance.now() - started)), error })
   if (signal?.aborted) return Promise.resolve({ ...failed('Lệnh đã bị dừng'), durationMs: 0 })
-  onProgress?.(`chạy ${command}…`)
+  onProgress?.('Đang chạy lệnh', formatDetail(command))
   const bin = agent && account(agent.cli)?.bin
   const sandbox = (bin === 'codex' || bin === 'agy') && agent.permissions?.mode !== 'full' ? account(bin === 'codex' ? agent.cli : 'codex') : null
   const missingCodex = `Cần cài codex CLI để app chạy lệnh trong sandbox cho ${bin}`
@@ -2207,8 +2284,9 @@ async function run(dir, agent, options = {}) {
   if (outcome !== 'success') usage.partial = true
   const id = r.id || session?.id
   const hasRunId = typeof options.runId === 'string' && !!options.runId
+  const contextInputTokens = outcome === 'success' && safeNonNegativeInteger(r.contextInputTokens) ? r.contextInputTokens : null
   const lastTurn = { runId: hasRunId ? options.runId : randomUUID(),
-    inputTokens: value(usage.inputTokens, true), partial: !!usage.partial, at: new Date().toISOString() }
+    inputTokens: value(usage.inputTokens, true), contextInputTokens, partial: !!usage.partial, at: new Date().toISOString() }
   if (trackSession && (agent.resume === false ? hasRunId : (id || !rotationSource))) {
     let saved
     if (agent.resume !== false && id) {
@@ -2230,10 +2308,11 @@ async function run(dir, agent, options = {}) {
     options.onSessionChanged?.()
   }
   const sessionRotation = rotationSource && id && id !== rotationSource.id ? { previousSessionId: rotationSource.id,
-    previousRunId: rotationSource.lastTurn.runId, inputTokens: rotationSource.lastTurn.inputTokens,
-    limit: agent.sessionTokenLimit, handoffStatus: initial.handoffStatus || 'missing' } : null
+    previousRunId: rotationSource.lastTurn.runId, contextInputTokens: rotationSource.lastTurn.contextInputTokens,
+    limit: sessionTokenLimit(agent), handoffStatus: initial.handoffStatus || 'missing' } : null
   const permissionDenials = normalizePermissionDenials(denialEntries, agent)
   return { outcome, text: outcome === 'error' ? (r.killError?.message || r.error || 'Lỗi không xác định') : (r.text || '').trim() || '(không có phản hồi)', usage,
+    contextInputTokens,
     model: modelLabel(agent, acc, r.model),
     commandResults, permissionDenials, sessionRotation, emptyResponse: outcome === 'success' && !(r.text || '').trim(),
     orphanState: r.orphanState || orphanState, pgid: r.pgid || pgid }
