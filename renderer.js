@@ -1341,7 +1341,7 @@ function loadImages(container, context = {}) {
       continue
     }
     img.title = alt
-    api.readImage(d, href, context.fromFile || null, context.workspace || null).then(res => {
+    api.readImage(d, href, context.fromFile || null, context.workspace?.id || null).then(res => {
       if (!res?.ok) throw new Error(res?.message || 'không mở được')
       const url = URL.createObjectURL(new Blob([res.bytes], { type: res.mime })), before = img.offsetHeight
       img.onerror = () => URL.revokeObjectURL(url)
@@ -1354,9 +1354,9 @@ function loadImages(container, context = {}) {
         else if (!logHasAfter && log.scrollHeight - log.clientHeight - log.scrollTop - grew <= 48) log.scrollTop = log.scrollHeight
       }
       img.src = url
-      if (/^(reports|\.chat\d*)\//.test(res.path) && !img.closest('a')) { // what openFile accepts
+      if (!img.closest('a')) {
         img.classList.add('zoomable')
-        img.onclick = () => api.openFile(d, res.path, context.workspace || null).catch(err => showToast(err.message.replace(/^.*?Error: /, '')))
+        img.onclick = () => openFileViewer(fileHref(res.path), context.fromFile || null, res.workspace || context.workspace || null)
       }
     }).catch(err => img.replaceWith(el('span', 'img-missing', `[${alt}: ${err.message.replace(/^.*?Error: /, '')}]`)))
   }
@@ -3333,86 +3333,492 @@ let currentViewerWorkspace = null
 let viewerGen = 0
 let lastFocusBeforeViewer = null
 
+let viewerNormalLayout = { width: 880, height: 720 }
+let viewerIsMaximized = false
+let viewerSaveTimer = null
+let isProgrammaticLayout = false
+let currentViewerBlobUrl = null
+let currentPreviewId = null
+let currentHtmlFile = null
+let currentHtmlTab = 'preview'
+let currentImageMode = 'fit'
+
+function getPathExtension(p) {
+  if (!p) return ''
+  try {
+    p = decodeURIComponent(p)
+  } catch {}
+  const clean = p.split(/[?#]/)[0]
+  const lastDot = clean.lastIndexOf('.')
+  if (lastDot === -1) return ''
+  return clean.slice(lastDot + 1).toLowerCase()
+}
+
+function loadViewerLayout() {
+  const defaults = { width: 880, height: 720, maximized: false }
+  try {
+    if (typeof localStorage === 'undefined') return defaults
+    const raw = localStorage.getItem('viewer-layout:v1')
+    if (!raw) return defaults
+    const parsed = JSON.parse(raw)
+    if (!parsed || typeof parsed !== 'object') return defaults
+    const w = Number(parsed.width)
+    const h = Number(parsed.height)
+    const max = Boolean(parsed.maximized)
+    if (!Number.isFinite(w) || w <= 0 || !Number.isFinite(h) || h <= 0) return defaults
+    return { width: Math.round(w), height: Math.round(h), maximized: max }
+  } catch {
+    return defaults
+  }
+}
+
+function getViewportDims() {
+  const w = (typeof window !== 'undefined' && window.innerWidth) || 1200
+  const h = (typeof window !== 'undefined' && window.innerHeight) || 800
+  return { w, h }
+}
+
+function clampViewerDims(w, h) {
+  const { w: availW, h: availH } = getViewportDims()
+  const maxW = Math.max(100, availW - 32)
+  const maxH = Math.max(100, availH - 32)
+  const minW = Math.min(480, maxW)
+  const minH = Math.min(320, maxH)
+  return {
+    width: Math.min(Math.max(Math.round(w), minW), maxW),
+    height: Math.min(Math.max(Math.round(h), minH), maxH)
+  }
+}
+
+function saveViewerLayout(immediate = false) {
+  if (viewerSaveTimer && typeof clearTimeout === 'function') {
+    clearTimeout(viewerSaveTimer)
+    viewerSaveTimer = null
+  }
+  const doSave = () => {
+    try {
+      if (typeof localStorage === 'undefined') return
+      const payload = {
+        width: Math.round(viewerNormalLayout.width),
+        height: Math.round(viewerNormalLayout.height),
+        maximized: Boolean(viewerIsMaximized)
+      }
+      localStorage.setItem('viewer-layout:v1', JSON.stringify(payload))
+    } catch {}
+  }
+  if (immediate || typeof setTimeout !== 'function') {
+    doSave()
+  } else {
+    viewerSaveTimer = setTimeout(doSave, 150)
+  }
+}
+
+function addClass(element, cls) {
+  if (!element) return
+  if (element.classList && typeof element.classList.add === 'function') {
+    element.classList.add(cls)
+  } else {
+    const classes = (element.className || '').split(' ').filter(Boolean)
+    if (!classes.includes(cls)) {
+      classes.push(cls)
+      element.className = classes.join(' ')
+    }
+  }
+}
+
+function removeClass(element, cls) {
+  if (!element) return
+  if (element.classList && typeof element.classList.remove === 'function') {
+    element.classList.remove(cls)
+  } else {
+    const classes = (element.className || '').split(' ').filter(c => c !== cls)
+    element.className = classes.join(' ')
+  }
+}
+
+function applyViewerLayout() {
+  const dialog = $('#viewer')
+  if (!dialog) return
+  dialog.style = dialog.style || {}
+  const maxBtn = $('#viewer-max')
+
+  isProgrammaticLayout = true
+  if (viewerIsMaximized) {
+    addClass(dialog, 'maximized')
+    dialog.style.width = 'calc(100vw - 32px)'
+    dialog.style.height = 'calc(100vh - 32px)'
+    dialog.style.resize = 'none'
+    if (maxBtn) {
+      maxBtn.textContent = 'Thu nhỏ'
+      maxBtn.title = 'Thu nhỏ khung xem'
+      if (typeof maxBtn.setAttribute === 'function') maxBtn.setAttribute('aria-pressed', 'true')
+    }
+  } else {
+    removeClass(dialog, 'maximized')
+    const clamped = clampViewerDims(viewerNormalLayout.width, viewerNormalLayout.height)
+    dialog.style.width = clamped.width + 'px'
+    dialog.style.height = clamped.height + 'px'
+    dialog.style.resize = 'both'
+    if (maxBtn) {
+      maxBtn.textContent = 'Phóng to'
+      maxBtn.title = 'Phóng to khung xem'
+      if (typeof maxBtn.setAttribute === 'function') maxBtn.setAttribute('aria-pressed', 'false')
+    }
+  }
+  if (typeof setTimeout === 'function') {
+    setTimeout(() => { isProgrammaticLayout = false }, 0)
+  } else {
+    isProgrammaticLayout = false
+  }
+}
+
+function toggleViewerMaximize() {
+  viewerIsMaximized = !viewerIsMaximized
+  applyViewerLayout()
+  saveViewerLayout(true)
+}
+
+function handleViewerResizeKey(e) {
+  if (viewerIsMaximized) return
+  let deltaW = 0, deltaH = 0
+  if (e.key === 'ArrowRight') deltaW = 32
+  else if (e.key === 'ArrowLeft') deltaW = -32
+  else if (e.key === 'ArrowDown') deltaH = 32
+  else if (e.key === 'ArrowUp') deltaH = -32
+  else return
+
+  if (typeof e.preventDefault === 'function') e.preventDefault()
+  const clamped = clampViewerDims(viewerNormalLayout.width + deltaW, viewerNormalLayout.height + deltaH)
+  viewerNormalLayout.width = clamped.width
+  viewerNormalLayout.height = clamped.height
+  applyViewerLayout()
+  saveViewerLayout(false)
+}
+
+function revokeViewerBlob() {
+  if (currentViewerBlobUrl) {
+    try {
+      URL.revokeObjectURL(currentViewerBlobUrl)
+    } catch {}
+    currentViewerBlobUrl = null
+  }
+}
+
+function closeCurrentHtmlPreview() {
+  if (currentPreviewId) {
+    const pid = currentPreviewId
+    currentPreviewId = null
+    if (typeof api !== 'undefined' && typeof api.closeHtmlPreview === 'function') {
+      api.closeHtmlPreview(pid).catch(() => {})
+    }
+  }
+  currentHtmlFile = null
+}
+
+function setImageMode(mode) {
+  currentImageMode = mode
+  const bodyEl = $('#viewer-body')
+  const img = bodyEl?.querySelector ? bodyEl.querySelector('.viewer-img') : null
+  if (img) {
+    img.className = 'viewer-img ' + (mode === 'orig' ? 'orig' : 'fit')
+  }
+  const fitBtn = $('#viewer-img-fit')
+  const origBtn = $('#viewer-img-orig')
+  if (fitBtn) {
+    if (typeof fitBtn.setAttribute === 'function') fitBtn.setAttribute('aria-pressed', mode === 'fit' ? 'true' : 'false')
+    if (mode === 'fit') addClass(fitBtn, 'on'); else removeClass(fitBtn, 'on')
+  }
+  if (origBtn) {
+    if (typeof origBtn.setAttribute === 'function') origBtn.setAttribute('aria-pressed', mode === 'orig' ? 'true' : 'false')
+    if (mode === 'orig') addClass(origBtn, 'on'); else removeClass(origBtn, 'on')
+  }
+}
+
+function setHtmlTab(tab) {
+  currentHtmlTab = tab
+  const previewBtn = $('#viewer-tab-preview')
+  const sourceBtn = $('#viewer-tab-source')
+  const noticeEl = $('#viewer-notice')
+  const bodyEl = $('#viewer-body')
+
+  if (tab === 'preview') {
+    if (previewBtn) {
+      if (typeof previewBtn.setAttribute === 'function') previewBtn.setAttribute('aria-selected', 'true')
+      addClass(previewBtn, 'on')
+    }
+    if (sourceBtn) {
+      if (typeof sourceBtn.setAttribute === 'function') sourceBtn.setAttribute('aria-selected', 'false')
+      removeClass(sourceBtn, 'on')
+    }
+    if (noticeEl) { noticeEl.style = noticeEl.style || {}; noticeEl.style.display = '' }
+    if (bodyEl?.querySelector) {
+      const iframe = bodyEl.querySelector('.viewer-iframe')
+      const sourcePre = bodyEl.querySelector('.viewer-text')
+      if (iframe) { iframe.style = iframe.style || {}; iframe.style.display = '' }
+      if (sourcePre) { sourcePre.style = sourcePre.style || {}; sourcePre.style.display = 'none' }
+    }
+  } else {
+    if (sourceBtn) {
+      if (typeof sourceBtn.setAttribute === 'function') sourceBtn.setAttribute('aria-selected', 'true')
+      addClass(sourceBtn, 'on')
+    }
+    if (previewBtn) {
+      if (typeof previewBtn.setAttribute === 'function') previewBtn.setAttribute('aria-selected', 'false')
+      removeClass(previewBtn, 'on')
+    }
+    if (noticeEl) { noticeEl.style = noticeEl.style || {}; noticeEl.style.display = 'none' }
+    if (bodyEl?.querySelector) {
+      const iframe = bodyEl.querySelector('.viewer-iframe')
+      let sourcePre = bodyEl.querySelector('.viewer-text')
+      if (iframe) { iframe.style = iframe.style || {}; iframe.style.display = 'none' }
+      if (!sourcePre && currentHtmlFile) {
+        sourcePre = el('pre', 'viewer-text')
+        sourcePre.textContent = currentHtmlFile.content
+        bodyEl.append(sourcePre)
+      } else if (sourcePre) {
+        sourcePre.style = sourcePre.style || {}
+        sourcePre.style.display = ''
+      }
+    }
+  }
+}
+
 async function openFileViewer(href, fromFile = null, workspace = null) {
   if (!dir || !href) return
   const thisGen = ++viewerGen
-  lastFocusBeforeViewer = document.activeElement
-  currentViewerHref = href
-  currentViewerWorkspace = workspace
 
   const dialog = $('#viewer')
   const titleEl = $('#viewer-title')
   const pathEl = $('#viewer-path')
   const bodyEl = $('#viewer-body')
   const extBtn = $('#viewer-external')
+  const imgControls = $('#viewer-img-controls')
+  const htmlTabs = $('#viewer-html-tabs')
+  const htmlExtBtn = $('#viewer-html-external')
+  const noticeEl = $('#viewer-notice')
+
+  if (typeof document !== 'undefined') {
+    if (!dialog?.open) {
+      lastFocusBeforeViewer = document.activeElement
+    }
+  }
+
+  currentViewerHref = href
+  currentViewerWorkspace = workspace
+
+  const storedLayout = loadViewerLayout()
+  viewerNormalLayout = { width: storedLayout.width, height: storedLayout.height }
+  viewerIsMaximized = storedLayout.maximized
+  applyViewerLayout()
 
   let branchLabel = workspace?.branch ? ` [Nhánh ${workspace.branch}]` : ''
-  titleEl.textContent = base(href) + branchLabel
-  pathEl.textContent = href
-  bodyEl.replaceChildren(el('div', 'none', 'Đang tải…'))
-  extBtn.disabled = true
+  if (titleEl) titleEl.textContent = base(href) + branchLabel
+  if (pathEl) pathEl.textContent = href
+  if (bodyEl) bodyEl.replaceChildren(el('div', 'none', 'Đang tải…'))
+  if (extBtn) extBtn.disabled = true
 
-  if (!dialog.open) {
+  if (imgControls) { imgControls.style = imgControls.style || {}; imgControls.style.display = 'none' }
+  if (htmlTabs) { htmlTabs.style = htmlTabs.style || {}; htmlTabs.style.display = 'none' }
+  if (htmlExtBtn) { htmlExtBtn.style = htmlExtBtn.style || {}; htmlExtBtn.style.display = 'none' }
+  if (noticeEl) { noticeEl.style = noticeEl.style || {}; noticeEl.style.display = 'none' }
+
+  if (dialog && !dialog.open && typeof dialog.showModal === 'function') {
     dialog.showModal()
   }
-  $('#viewer-close').focus()
+  const closeBtn = $('#viewer-close')
+  if (closeBtn && typeof closeBtn.focus === 'function') {
+    closeBtn.focus()
+  }
+
+  const ext = getPathExtension(href)
+  const isImage = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'].includes(ext)
+  const isHtml = ['html', 'htm'].includes(ext)
 
   try {
-    const res = await api.readProjectFile(dir, href, fromFile, workspace?.id)
-    if (thisGen !== viewerGen) return
-    if (Object.hasOwn(res, 'workspace')) workspace = res.workspace
-    currentViewerWorkspace = workspace
-    branchLabel = workspace?.branch ? ` [Nhánh ${workspace.branch}]` : ''
-
-    if (res.ok) {
-      const file = res.file
-      currentViewerPath = file.path
-      currentViewerHref = fileHref(file.path)
-      currentViewerCanExternal = !!file.canOpenExternal
-      titleEl.textContent = (file.name || base(file.path)) + branchLabel
-      pathEl.textContent = file.path
-      extBtn.disabled = !file.canOpenExternal
-
-      if (file.format === 'markdown') {
-        const rendered = renderMarkdown(file.content, { dir, fromFile: currentViewerHref, workspace })
-        bodyEl.replaceChildren(rendered)
-      } else {
-        const pre = el('pre', 'viewer-text')
-        pre.textContent = file.content
-        bodyEl.replaceChildren(pre)
+    if (isHtml && typeof api !== 'undefined' && typeof api.createHtmlPreview === 'function') {
+      const res = await api.createHtmlPreview(dir, href, fromFile, workspace?.id)
+      if (thisGen !== viewerGen) {
+        if (res?.preview?.id && typeof api.closeHtmlPreview === 'function') {
+          api.closeHtmlPreview(res.preview.id).catch(() => {})
+        }
+        return
       }
+      if (Object.hasOwn(res, 'workspace')) workspace = res.workspace
+      currentViewerWorkspace = workspace
+      branchLabel = workspace?.branch ? ` [Nhánh ${workspace.branch}]` : ''
 
-      api.watchProject(dir, currentViewerHref, workspace?.id).catch(() => {})
+      if (res.ok) {
+        if (currentPreviewId && currentPreviewId !== res.preview.id) {
+          closeCurrentHtmlPreview()
+        }
+        currentPreviewId = res.preview.id
+        currentHtmlFile = res.file
+        currentViewerPath = res.file.path
+        currentViewerHref = fileHref(res.file.path)
+        currentViewerCanExternal = true
+
+        if (titleEl) titleEl.textContent = (res.file.name || base(res.file.path)) + branchLabel
+        if (pathEl) pathEl.textContent = res.file.path
+        if (extBtn) { extBtn.style = extBtn.style || {}; extBtn.style.display = 'none' }
+        if (htmlExtBtn) { htmlExtBtn.style = htmlExtBtn.style || {}; htmlExtBtn.style.display = '' }
+        if (htmlTabs) { htmlTabs.style = htmlTabs.style || {}; htmlTabs.style.display = '' }
+        if (noticeEl) { noticeEl.style = noticeEl.style || {}; noticeEl.style.display = '' }
+
+        const iframe = el('iframe', 'viewer-iframe')
+        if (typeof iframe.setAttribute === 'function') {
+          iframe.setAttribute('sandbox', '')
+          iframe.setAttribute('referrerpolicy', 'no-referrer')
+          iframe.setAttribute('title', res.file.name || base(res.file.path))
+        }
+        iframe.src = res.preview.url
+
+        const pre = el('pre', 'viewer-text')
+        pre.textContent = res.file.content
+        pre.style = pre.style || {}
+        pre.style.display = 'none'
+
+        if (bodyEl) bodyEl.replaceChildren(iframe, pre)
+        setHtmlTab('preview')
+        if (api.watchProject) api.watchProject(dir, currentViewerHref, workspace?.id).catch(() => {})
+      } else {
+        currentViewerPath = res.file?.path || href
+        currentViewerHref = res.file?.path ? fileHref(res.file.path) : href
+        currentViewerCanExternal = false
+        if (titleEl) titleEl.textContent = (res.file?.name || base(href)) + branchLabel
+        if (pathEl) pathEl.textContent = currentViewerPath
+        if (extBtn) { extBtn.style = extBtn.style || {}; extBtn.style.display = 'none' }
+        if (htmlExtBtn) { htmlExtBtn.style = htmlExtBtn.style || {}; htmlExtBtn.style.display = 'none' }
+        if (htmlTabs) { htmlTabs.style = htmlTabs.style || {}; htmlTabs.style.display = 'none' }
+        if (noticeEl) { noticeEl.style = noticeEl.style || {}; noticeEl.style.display = 'none' }
+        const errDiv = el('div', 'viewer-error', res.message || 'Không thể xem trước HTML')
+        if (bodyEl) bodyEl.replaceChildren(errDiv)
+      }
+    } else if (isImage && typeof api !== 'undefined' && typeof api.readImage === 'function') {
+      const res = await api.readImage(dir, href, fromFile, workspace?.id)
+      if (thisGen !== viewerGen) return
+      if (Object.hasOwn(res, 'workspace')) workspace = res.workspace
+      currentViewerWorkspace = workspace
+      branchLabel = workspace?.branch ? ` [Nhánh ${workspace.branch}]` : ''
+
+      if (res.ok) {
+        currentViewerPath = res.path
+        currentViewerHref = fileHref(res.path)
+        currentViewerCanExternal = !!res.canOpenExternal
+        if (titleEl) titleEl.textContent = (res.name || base(res.path)) + branchLabel
+        if (pathEl) pathEl.textContent = res.path
+        if (extBtn) {
+          extBtn.style = extBtn.style || {}
+          extBtn.style.display = ''
+          extBtn.disabled = !currentViewerCanExternal
+        }
+        if (imgControls) { imgControls.style = imgControls.style || {}; imgControls.style.display = '' }
+
+        revokeViewerBlob()
+        const blob = new Blob([res.bytes], { type: res.mime })
+        currentViewerBlobUrl = URL.createObjectURL(blob)
+
+        const wrap = el('div', 'viewer-img-wrap')
+        const img = el('img', 'viewer-img fit')
+        img.alt = res.name || base(res.path)
+        img.onerror = () => {
+          if (thisGen !== viewerGen) return
+          if (bodyEl) bodyEl.replaceChildren(el('div', 'viewer-error', 'Ảnh lỗi hoặc không được hỗ trợ'))
+        }
+        img.src = currentViewerBlobUrl
+        wrap.append(img)
+        if (bodyEl) bodyEl.replaceChildren(wrap)
+        setImageMode('fit')
+        if (api.watchProject) api.watchProject(dir, currentViewerHref, workspace?.id).catch(() => {})
+      } else {
+        currentViewerPath = res.path || href
+        currentViewerHref = res.path ? fileHref(res.path) : href
+        currentViewerCanExternal = !!res.canOpenExternal
+        if (titleEl) titleEl.textContent = (res.name || base(href)) + branchLabel
+        if (pathEl) pathEl.textContent = currentViewerPath
+        if (extBtn) {
+          extBtn.style = extBtn.style || {}
+          extBtn.style.display = ''
+          extBtn.disabled = !currentViewerCanExternal
+        }
+        const errDiv = el('div', 'viewer-error', res.message || 'Không thể đọc ảnh')
+        if (bodyEl) bodyEl.replaceChildren(errDiv)
+      }
     } else {
-      currentViewerPath = res.file?.path || href
-      currentViewerHref = res.file?.path ? fileHref(res.file.path) : href
-      currentViewerCanExternal = !!res.file?.canOpenExternal
-      titleEl.textContent = (res.file?.name || base(href)) + branchLabel
-      pathEl.textContent = currentViewerPath
-      extBtn.disabled = !currentViewerCanExternal
-      const errDiv = el('div', 'viewer-error', res.message || 'Không thể đọc file')
-      bodyEl.replaceChildren(errDiv)
+      if (extBtn) { extBtn.style = extBtn.style || {}; extBtn.style.display = '' }
+      const res = await api.readProjectFile(dir, href, fromFile, workspace?.id)
+      if (thisGen !== viewerGen) return
+      if (Object.hasOwn(res, 'workspace')) workspace = res.workspace
+      currentViewerWorkspace = workspace
+      branchLabel = workspace?.branch ? ` [Nhánh ${workspace.branch}]` : ''
+
+      if (res.ok) {
+        const file = res.file
+        currentViewerPath = file.path
+        currentViewerHref = fileHref(file.path)
+        currentViewerCanExternal = !!file.canOpenExternal
+        if (titleEl) titleEl.textContent = (file.name || base(file.path)) + branchLabel
+        if (pathEl) pathEl.textContent = file.path
+        if (extBtn) extBtn.disabled = !file.canOpenExternal
+
+        if (file.format === 'markdown') {
+          const rendered = renderMarkdown(file.content, { dir, fromFile: currentViewerHref, workspace })
+          if (bodyEl) bodyEl.replaceChildren(rendered)
+        } else {
+          const pre = el('pre', 'viewer-text')
+          pre.textContent = file.content
+          if (bodyEl) bodyEl.replaceChildren(pre)
+        }
+        if (api.watchProject) api.watchProject(dir, currentViewerHref, workspace?.id).catch(() => {})
+      } else {
+        currentViewerPath = res.file?.path || href
+        currentViewerHref = res.file?.path ? fileHref(res.file.path) : href
+        currentViewerCanExternal = !!res.file?.canOpenExternal
+        if (titleEl) titleEl.textContent = (res.file?.name || base(href)) + branchLabel
+        if (pathEl) pathEl.textContent = currentViewerPath
+        if (extBtn) extBtn.disabled = !currentViewerCanExternal
+        const errDiv = el('div', 'viewer-error', res.message || 'Không thể đọc file')
+        if (bodyEl) bodyEl.replaceChildren(errDiv)
+      }
     }
   } catch (e) {
     if (thisGen !== viewerGen) return
     currentViewerPath = href
     currentViewerCanExternal = false
-    extBtn.disabled = true
+    if (extBtn) extBtn.disabled = true
     const errDiv = el('div', 'viewer-error', e.message.replace(/^.*?Error: /, ''))
-    bodyEl.replaceChildren(errDiv)
+    if (bodyEl) bodyEl.replaceChildren(errDiv)
   }
 }
 
 function closeViewer() {
   ++viewerGen
   const dialog = $('#viewer')
-  if (dialog.open) dialog.close()
+  if (dialog?.open && typeof dialog.close === 'function') dialog.close()
+  revokeViewerBlob()
+  closeCurrentHtmlPreview()
   currentViewerPath = null
   currentViewerHref = null
   currentViewerCanExternal = false
   currentViewerWorkspace = null
-  if (dir) api.watchProject(dir, null).catch(() => {})
-  lastFocusBeforeViewer?.focus()
+
+  const imgCtrl = $('#viewer-img-controls')
+  if (imgCtrl) { imgCtrl.style = imgCtrl.style || {}; imgCtrl.style.display = 'none' }
+  const htmlTabs = $('#viewer-html-tabs')
+  if (htmlTabs) { htmlTabs.style = htmlTabs.style || {}; htmlTabs.style.display = 'none' }
+  const htmlExt = $('#viewer-html-external')
+  if (htmlExt) { htmlExt.style = htmlExt.style || {}; htmlExt.style.display = 'none' }
+  const noticeEl = $('#viewer-notice')
+  if (noticeEl) { noticeEl.style = noticeEl.style || {}; noticeEl.style.display = 'none' }
+  const extBtn = $('#viewer-external')
+  if (extBtn) { extBtn.style = extBtn.style || {}; extBtn.style.display = '' }
+
+  if (dir && typeof api !== 'undefined' && typeof api.watchProject === 'function') {
+    api.watchProject(dir, null).catch(() => {})
+  }
+  if (lastFocusBeforeViewer && typeof lastFocusBeforeViewer.focus === 'function') {
+    lastFocusBeforeViewer.focus()
+  }
+  lastFocusBeforeViewer = null
 }
 
 async function refreshFiles() {
@@ -3751,8 +4157,53 @@ $('#viewer-external').onclick = async () => {
     }
   }
 }
-$('#viewer').onclose = () => {
-  closeViewer()
+$('#viewer-html-external').onclick = async () => {
+  if (currentViewerPath && typeof api !== 'undefined' && typeof api.openHtmlExternal === 'function') {
+    try {
+      await api.openHtmlExternal(dir, currentViewerPath, currentViewerWorkspace?.id)
+    } catch (e) {
+      showToast(e.message.replace(/^.*?Error: /, ''))
+    }
+  }
+}
+$('#viewer-max').onclick = () => toggleViewerMaximize()
+$('#viewer-resize-grip').onkeydown = e => handleViewerResizeKey(e)
+$('#viewer-img-fit').onclick = () => setImageMode('fit')
+$('#viewer-img-orig').onclick = () => setImageMode('orig')
+$('#viewer-tab-preview').onclick = () => setHtmlTab('preview')
+$('#viewer-tab-source').onclick = () => setHtmlTab('source')
+$('#viewer').onclose = () => closeViewer()
+$('#viewer').oncancel = () => closeViewer()
+
+window.addEventListener('resize', () => {
+  const v = $('#viewer')
+  if (v?.open) applyViewerLayout()
+})
+
+if (typeof ResizeObserver !== 'undefined') {
+  const vDialog = typeof document !== 'undefined' && document.getElementById ? document.getElementById('viewer') : null
+  if (vDialog) {
+    const ro = new ResizeObserver(() => {
+      if (isProgrammaticLayout || viewerIsMaximized || !vDialog.open) return
+      const w = vDialog.offsetWidth
+      const h = vDialog.offsetHeight
+      if (w > 0 && h > 0) {
+        const clamped = clampViewerDims(w, h)
+        viewerNormalLayout.width = clamped.width
+        viewerNormalLayout.height = clamped.height
+        saveViewerLayout(false)
+      }
+    })
+    ro.observe(vDialog)
+  }
+}
+
+if (typeof api !== 'undefined' && typeof api.on === 'function') {
+  api.on('html-preview-escape', previewId => {
+    if (currentPreviewId && currentPreviewId === previewId) {
+      closeViewer()
+    }
+  })
 }
 $('#reloadTasks').onclick = () => loadTasks()
 
