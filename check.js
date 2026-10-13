@@ -1,6 +1,7 @@
 // node check.js — sanity check for @mention routing, project files, stream parsers, usage and Stop
 const assert = require('assert'), fs = require('fs'), os = require('os'), path = require('path')
 const core = require('./core')
+if (process.argv[2] === '--electron') return void electronChecks()
 if (process.argv[2] === '--main') return void mainHarness().then(() => process.exit(0), e => { console.error(e); process.exit(1) })
 
 const t = [{ name: 'dev' }, { name: 'dev-fe' }, { name: 'pm' }]
@@ -1379,6 +1380,123 @@ async function rendererS10Checks() {
   console.log('ok (sprint 10 FE V1/V2/V3)')
 }
 
+// ---- T45 (QA): V1/V2/V3 on the real Electron, real main.js + renderer.js. Opt-in, opens a window: `node check.js --electron` ----
+// Not in `npm run check` (the merge queue has no display). Fixture project + a loopback server that counts every request.
+function electronChecks() {
+  const { spawnSync } = require('child_process'), tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'qa-e2e-')), appDir = path.join(tmp, 'app')
+  fs.mkdirSync(appDir) // loadFile('index.html') resolves against the entry's folder: mirror the project there with symlinks
+  for (const f of fs.readdirSync(__dirname)) fs.symlinkSync(path.join(__dirname, f), path.join(appDir, f))
+  fs.writeFileSync(path.join(appDir, 'qa-entry.js'), `(${qaElectronEntry})()`)
+  const r = spawnSync(path.join(__dirname, 'node_modules', '.bin', 'electron'), [path.join(appDir, 'qa-entry.js')], { encoding: 'utf8', timeout: 150000,
+    env: { ...process.env, QA_MAIN: path.join(appDir, 'main.js'), SHELL: '/nonexistent' } })
+  fs.rmSync(tmp, { recursive: true, force: true })
+  const line = String(r.stdout + r.stderr).split('\n').find(l => l.startsWith('E2E '))
+  if (!line) { console.error(String(r.stdout + r.stderr).slice(-3000)); process.exit(1) }
+  const out = JSON.parse(line.slice(4))
+  console.log(`Electron ${out.electron || '?'}${out.timeout ? ' — HẾT GIỜ' : ''}`)
+  for (const x of out.results) console.log(`${x.ok ? 'ok  ' : 'FAIL'} ${x.name}${x.ok ? '' : ' — ' + x.info}`)
+  process.exit(!out.timeout && out.results.length && out.results.every(x => x.ok) ? 0 : 1)
+}
+function qaElectronEntry() { // runs inside Electron, serialized by electronChecks
+  const { app, BrowserWindow, session } = require('electron')
+  const fs = require('fs'), path = require('path'), os = require('os'), http = require('http')
+  const MAIN = process.env.QA_MAIN
+  const ud = fs.mkdtempSync(path.join(os.tmpdir(), 'qa-e2e-ud-')); app.setPath('userData', ud)
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'qa-e2e-root-')))
+  const results = [], hits = [], consoleMsgs = [], served = [], navs = []
+  const check = (name, ok, info = '') => { results.push({ name, ok: !!ok, info }); }
+  const server = http.createServer((req, res) => { hits.push(req.url); res.end('x') })
+  server.listen(0, '127.0.0.1', async () => {
+    const P = `http://127.0.0.1:${server.address().port}`
+    const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==', 'base64')
+    const w = (f, d) => { fs.mkdirSync(path.dirname(path.join(root, f)), { recursive: true }); fs.writeFileSync(path.join(root, f), d) }
+    w('img.png', png); w('sub/bg.png', png)
+    w('pic.svg', `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="20" height="20" onload="console.log('SVG-RAN')"><script>console.log('SVG-RAN')</script><image href="${P}/svg-img" width="5" height="5"/><rect width="20" height="20" fill="red"/></svg>`)
+    w('style.css', `@import "sub/deep.css"; @import url("${P}/css-import"); body{background:#00ff00} .bg{background:url(sub/bg.png);width:5px;height:5px} .ext{background:url(${P}/css-url)}`)
+    w('sub/deep.css', 'h1{color:#0000ff}')
+    w('page.html', `<!doctype html><html><head><meta charset="utf-8">
+  <meta http-equiv="refresh" content="1;url=${P}/meta-refresh">
+  <meta http-equiv="Content-Security-Policy" content="default-src *; script-src * 'unsafe-inline'">
+  <base href="${P}/base/">
+  <link rel="stylesheet" href="style.css"><link rel="stylesheet" href="${P}/ext.css">
+  <link rel="prefetch" href="${P}/prefetch"><link rel="preconnect" href="${P}"><link rel="dns-prefetch" href="${P}">
+  <script>console.log('JS-RAN'); try { parent.document.title = 'PWNED' } catch (e) {}; new Image().src = '${P}/js-img'</script>
+  <script src="${P}/ext.js"></script>
+  <style>a#go{position:fixed;left:0;top:0;width:200px;height:60px;display:block;background:#f0f}</style></head>
+  <body onload="console.log('ONLOAD-RAN')"><a id="go" href="${P}/click" target="_top">go</a>
+  <h1>Tiêu đề</h1><img src="img.png"><img src="${P}/ext-img"><img srcset="${P}/srcset 1x"><div class="bg"></div><div class="ext"></div>
+  <form action="${P}/form" method="post"><input name="a" value="1" autofocus></form>
+  <a href="javascript:console.log('JSLINK-RAN')">js</a><a href="${P}/dl" download>dl</a>
+  <iframe src="${P}/inner"></iframe><iframe srcdoc="<script>console.log('SRCDOC-RAN')</script>"></iframe>
+  <object data="${P}/obj"></object><embed src="${P}/embed">
+  <svg onload="console.log('INLINE-SVG-RAN')"><image href="${P}/inline-svg-img" width="5" height="5"/></svg>
+  <video src="${P}/video"></video><audio src="${P}/audio"></audio>
+  </body></html>`)
+    fs.writeFileSync(path.join(ud, 'projects.json'), JSON.stringify([root]))
+    require(MAIN)
+    await app.whenReady()
+    const core = require(path.join(path.dirname(MAIN), 'core.js'))
+    const fonts = []
+    session.defaultSession.webRequest.onCompleted({ urls: ['agent-preview://*/*', 'https://fonts.googleapis.com/*'] }, d => d.url.startsWith('https:') ? fonts.push('ok') : served.push([new URL(d.url).pathname, d.statusCode, d.resourceType]))
+    session.defaultSession.webRequest.onErrorOccurred({ urls: ['https://fonts.googleapis.com/*'] }, d => fonts.push(d.error))
+    let win; while (!(win = BrowserWindow.getAllWindows()[0])) await new Promise(r => setTimeout(r, 50))
+    win.webContents.on('console-message', (...a) => { const m = typeof a[0] === 'object' && a[0].message !== undefined ? a[0].message : a[2]; consoleMsgs.push(String(m)) })
+    win.webContents.on('did-frame-navigate', (e, url, code, status, isMain) => navs.push([url, isMain]))
+    await new Promise(r => win.webContents.isLoading() ? win.webContents.once('did-finish-load', r) : r())
+    try { core.trustConfig(root, core.configTrust(root).texts) } catch {}
+    const js = code => win.webContents.executeJavaScript(code, true)
+    const sleep = ms => new Promise(r => setTimeout(r, ms))
+    await js(`openProject(${JSON.stringify(root)})`); await sleep(800)
+    await js(`openFileViewer('page.html')`); await sleep(2500)
+    const iframe = await js(`(() => { const f = document.querySelector('#viewer iframe'); if (!f) return null; const r = f.getBoundingClientRect();
+      let doc = 'blocked'; try { doc = f.contentDocument === null ? null : 'READABLE' } catch {}
+      return { sandbox: f.getAttribute('sandbox'), ref: f.getAttribute('referrerpolicy'), src: f.src, x: r.x, y: r.y, w: r.width, h: r.height, doc, title: document.title } })()`)
+    check('iframe có sandbox="" + no-referrer + agent-preview', iframe && iframe.sandbox === '' && iframe.ref === 'no-referrer' && iframe.src.startsWith('agent-preview://'), JSON.stringify(iframe))
+    check('parent không đọc được DOM preview, trang không đổi title app', iframe && iframe.doc !== 'READABLE' && iframe.title !== 'PWNED', JSON.stringify(iframe))
+    const okServed = p => served.some(([u, s]) => u.endsWith(p) && s === 200)
+    check('nạp được entry, CSS tương đối, @import cấp 2, ảnh, ảnh nền CSS', ['page.html', 'style.css', 'sub/deep.css', 'img.png', 'sub/bg.png'].every(okServed), JSON.stringify(served))
+    // click the full-width link at the iframe's top-left; then Enter on the focused form field
+    if (iframe) {
+      const x = Math.round(iframe.x + 20), y = Math.round(iframe.y + 20)
+      win.webContents.sendInputEvent({ type: 'mouseDown', x, y, button: 'left', clickCount: 1 }); win.webContents.sendInputEvent({ type: 'mouseUp', x, y, button: 'left', clickCount: 1 })
+      win.webContents.sendInputEvent({ type: 'mouseDown', x, y, button: 'middle', clickCount: 1 }); win.webContents.sendInputEvent({ type: 'mouseUp', x, y, button: 'middle', clickCount: 1 })
+      await sleep(1500)
+    }
+    const frameUrls = win.webContents.mainFrame.framesInSubtree.map(f => f.url)
+    check('không JS nào chạy (script, onload, javascript:, srcdoc, SVG)', !consoleMsgs.some(m => /-RAN/.test(m)), consoleMsgs.filter(m => /-RAN/.test(m)).join(','))
+    check('server loopback nhận 0 request (preview)', hits.length === 0, hits.join(' '))
+    check('iframe vẫn ở entry sau meta refresh và click link (frame lồng bị CSP chặn)', frameUrls.filter(u => u.startsWith('agent-preview://')).length === 1
+      && frameUrls.some(u => /^agent-preview:\/\/[0-9a-f]+\/files\/page\.html$/.test(u)), JSON.stringify(frameUrls))
+    check('cửa sổ chính không bị điều hướng', win.webContents.getURL().startsWith('file:') && win.webContents.getURL().endsWith('index.html'), win.webContents.getURL())
+    // Esc with focus inside the iframe closes the viewer
+    if (iframe) { const x = Math.round(iframe.x + iframe.w / 2), y = Math.round(iframe.y + iframe.h / 2)
+      win.webContents.sendInputEvent({ type: 'mouseDown', x, y, button: 'left', clickCount: 1 }); win.webContents.sendInputEvent({ type: 'mouseUp', x, y, button: 'left', clickCount: 1 }); await sleep(200) }
+    win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Escape' }); win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Escape' }); await sleep(500)
+    check('Esc khi focus trong iframe đóng viewer', !(await js(`document.querySelector('#viewer').open`)))
+    // SVG with script as an image in the viewer
+    consoleMsgs.length = 0; const hitsBefore = hits.length
+    await js(`openFileViewer('pic.svg')`); await sleep(1500)
+    const svgImg = await js(`(() => { const i = document.querySelector('#viewer-body img'); return i ? { src: i.src.slice(0, 5), w: i.naturalWidth } : null })()`)
+    check('SVG hiện bằng <img blob:>, script/onload không chạy, không tải href ngoài', svgImg && svgImg.src === 'blob:' && svgImg.w > 0 && !consoleMsgs.some(m => /RAN/.test(m)) && hits.length === hitsBefore, JSON.stringify(svgImg) + consoleMsgs.join(','))
+    await js(`closeViewer()`)
+    // V1: small window → dialog inside the viewport, Đóng visible; maximize/restore keeps the normal size
+    win.setSize(960, 560); await sleep(400)
+    await js(`openFileViewer('style.css')`); await sleep(800)
+    const geo = await js(`(() => { const d = document.querySelector('#viewer').getBoundingClientRect(), c = document.querySelector('#viewer-close').getBoundingClientRect();
+      return { vw: innerWidth, vh: innerHeight, d: [d.left, d.top, d.right, d.bottom], c: [c.left, c.top, c.right, c.bottom] } })()`)
+    check('V1: cửa sổ nhỏ, khung xem nằm trong viewport, nút Đóng thấy được', geo.d[0] >= 0 && geo.d[1] >= 0 && geo.d[2] <= geo.vw && geo.d[3] <= geo.vh && geo.c[2] <= geo.vw && geo.c[1] >= 0, JSON.stringify(geo))
+    await js(`closeViewer()`)
+    // main frame UI requests are not cancelled by the preview gate (same session)
+    await js(`openFileViewer('page.html')`); await sleep(1000) // a preview is active again
+    await js(`document.head.append(Object.assign(document.createElement('link'), { rel: 'stylesheet', href: 'https://fonts.googleapis.com/css2?family=Inter&qa=' + Date.now() }))`); await sleep(3000)
+    check('font Google của UI chính không bị cổng preview huỷ (kể cả khi preview đang mở)', fonts.length > 0 && !fonts.includes('net::ERR_BLOCKED_BY_CLIENT'), JSON.stringify(fonts))
+    await js(`closeViewer()`)
+    console.log('E2E ' + JSON.stringify({ electron: process.versions.electron, results }))
+    app.exit(results.every(r => r.ok) ? 0 : 1)
+  })
+  setTimeout(() => { console.log('E2E ' + JSON.stringify({ timeout: true, results })); app.exit(2) }, 60000)
+}
+
 // ---- Sprint 6 H + J through the real main.js: Electron stubbed, a sample git repo, a fake codex. Own process: main.js registers IPC globally ----
 function mainChecks() {
   const r = require('child_process').spawnSync(process.execPath, [__filename, '--main'], { encoding: 'utf8', timeout: 300000,
@@ -1390,8 +1508,8 @@ function mainChecks() {
 async function mainHarness() {
   const Module = require('module'), { execFileSync } = require('child_process')
   const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-chat-ud-')), handlers = {}, sent = []
-  let dialogs = 0, dialogAnswer = 0, pickPath = null
-  const mainFrame = { id: 1 }
+  let dialogs = 0, dialogAnswer = 0, pickPath = null, onDialog = null
+  const openedPaths = [], mainFrame = { id: 1 }
   const webContents = { send: (...a) => sent.push(a), setWindowOpenHandler() {},
     on(event, fn) { if (!this._listeners) this._listeners = {}; (this._listeners[event] = this._listeners[event] || []).push(fn) },
     emit(event, ...args) { for (const fn of this._listeners?.[event] || []) fn(...args) }, mainFrame, id: 1 }
@@ -1413,9 +1531,9 @@ async function mainHarness() {
   }
   const electron = { app: { getPath: () => userData, requestSingleInstanceLock: () => true, whenReady: () => Promise.resolve(), on() {}, quit() {} },
     BrowserWindow: function () { return { webContents, loadFile: () => Promise.resolve(), isMinimized: () => false, on(e, fn) { webContents.on(e, fn) }, isDestroyed: () => false } },
-    ipcMain: { handle: (name, fn) => { handlers[name] = fn } }, shell: { openPath: async () => '' },
+    ipcMain: { handle: (name, fn) => { handlers[name] = fn } }, shell: { openPath: async p => { openedPaths.push(p); return '' } },
     Menu: { setApplicationMenu() {}, buildFromTemplate: t => t }, nativeTheme: { themeSource: 'system', on() {} }, screen: { getAllDisplays: () => [] },
-    dialog: { showMessageBox: async () => { dialogs++; return { response: dialogAnswer, checkboxChecked: true } },
+    dialog: { showMessageBox: async () => { dialogs++; await onDialog?.(); return { response: dialogAnswer, checkboxChecked: true } },
       showMessageBoxSync: () => 0,
       showOpenDialog: async () => ({ canceled: !pickPath, filePaths: [pickPath] }) },
     protocol, session }
@@ -1825,6 +1943,90 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
     fs.unlinkSync(at('style.css'))
     fs.unlinkSync(at('script.js'))
     console.log('ok (sprint 10 BE IPC & protocol)')
+  }
+  // T45 (QA, independent): V2/V3 hold the T41 read scope, caps hold under parallel requests, old tokens die, the gates fail closed
+  {
+    const handle = req => protocolHandlers['agent-preview'](new Request(req, { method: 'GET' }))
+    const outsideDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'qa-s10-'))), wt = linkedWorkspace.path
+    const png = n => Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(n)])
+    fs.writeFileSync(path.join(outsideDir, 'x.html'), '<p>BÍ MẬT</p>'); fs.writeFileSync(path.join(outsideDir, 'x.css'), 'p{}/*BÍ MẬT*/')
+    fs.writeFileSync(path.join(outsideDir, 'x.png'), png(16))
+    fs.symlinkSync(path.join(outsideDir, 'x.html'), at('leak.html')); fs.symlinkSync(path.join(outsideDir, 'x.html'), path.join(wt, 'leak.html'))
+    fs.symlinkSync(path.join(outsideDir, 'x.css'), at('leak.css')); fs.symlinkSync(path.join(outsideDir, 'x.png'), at('leak.png'))
+    const integrationDir = path.join(path.dirname(path.dirname(wt)), 'integration', require('crypto').randomUUID())
+    fs.mkdirSync(integrationDir, { recursive: true }); fs.writeFileSync(path.join(integrationDir, 'x.html'), '<p>BÍ MẬT</p>')
+    const toURL = require('url').pathToFileURL
+    // the T41 attempts, through the two new readers
+    for (const [href, from = null, ws] of [[toURL(path.join(outsideDir, 'x.html')).href], [root + '/../' + path.basename(outsideDir) + '/x.html'],
+      ['file://' + root + '/%2e%2e/' + path.basename(outsideDir) + '/x.html'], ['leak.html'], [toURL(path.join(wt, 'leak.html')).href], ['leak.html', null, linkedWorkspace.id],
+      [toURL(path.join(integrationDir, 'x.html')).href], ['x.html', path.relative(root, path.join(outsideDir, 'y.md'))], ['page.html', null, '00000000-0000-0000-0000-000000000000'],
+      ['file://evil.example' + at('page.html')]]) {
+      let res; try { res = await call('createHtmlPreview', root, href, from, ws) } catch (e) { res = { ok: false, threw: e.message } }
+      assert.ok(!res.ok && !JSON.stringify(res).includes('BÍ MẬT'), `T45: xem trước HTML ngoài phạm vi: ${href} → ${JSON.stringify(res).slice(0, 160)}`)
+    }
+    for (const href of [toURL(path.join(outsideDir, 'x.png')).href, 'leak.png', '../' + path.basename(outsideDir) + '/x.png']) {
+      let res; try { res = await call('readImage', root, href) } catch (e) { res = { ok: false } }
+      assert.ok(!res.ok, `T45: readImage ngoài phạm vi: ${href}`)
+    }
+    // assets: symlink out, second HTML, script, json/font, encoded separators; then old token after a new preview
+    fs.writeFileSync(at('qa.html'), '<link rel=stylesheet href="leak.css">'); fs.writeFileSync(at('two.html'), '<p>2</p>'); fs.writeFileSync(at('d.json'), '{}')
+    let pv = await call('createHtmlPreview', root, 'qa.html'); assert.ok(pv.ok, JSON.stringify(pv))
+    const u = rel => `agent-preview://${pv.preview.id}/files/${rel}`
+    for (const rel of ['leak.css', 'leak.png', 'two.html', 'd.json', 'x.woff', '.git/config', '%2e%2e/a.txt', 'a%5cb.css', '%252e%252e/a.css']) {
+      const r = await handle(u(rel)); const body = await r.text()
+      assert.ok(r.status >= 400 && !body.includes('BÍ MẬT') && !body.includes('<p>2</p>'), `T45: asset ${rel} → ${r.status}`)
+    }
+    const first = pv.preview
+    const pv2 = await call('createHtmlPreview', root, 'two.html'); assert.ok(pv2.ok)
+    assert.strictEqual((await handle(first.url)).status, 404, 'T45: token cũ vẫn phục vụ sau khi mở preview mới')
+    assert.deepStrictEqual(await call('closeHtmlPreview', first.id), { ok: true })
+    assert.strictEqual((await handle(pv2.preview.url)).status, 200, 'đóng nhầm id cũ không được đóng preview hiện tại')
+    // navigation gate: the first load of the entry only, nothing else, never again
+    const nav = (url, isMainFrame = false) => { let prevented = false; webContents.emit('will-frame-navigate', { url, isMainFrame, preventDefault: () => { prevented = true } }); return prevented }
+    assert.deepStrictEqual([nav(pv2.preview.url), nav(pv2.preview.url), nav('https://evil.example/'), nav('javascript:alert(1)'), nav(pv2.preview.url.replace('two.html', 'qa.html'))],
+      [false, true, true, true, true], 'T45: chặn điều hướng iframe sau lần nạp đầu')
+    // request gate: fail closed for unknown frames, other webContents, other methods/types/schemes
+    const gate = d => { let out; webRequestCallback({ method: 'GET', webContentsId: 1, frame: { id: 2 }, ...d }, r => { out = r.cancel }); return out }
+    const css = `agent-preview://${pv2.preview.id}/files/style.css`
+    assert.deepStrictEqual([gate({ url: css, resourceType: 'stylesheet' }), gate({ url: css, resourceType: 'stylesheet', method: 'POST' }),
+      gate({ url: css, resourceType: 'stylesheet', webContentsId: 9 }), gate({ url: css, resourceType: 'script' }), gate({ url: css, resourceType: 'xhr' }),
+      gate({ url: 'https://fonts.example/x.css', resourceType: 'stylesheet' }), gate({ url: 'http://127.0.0.1:9/x.png', resourceType: 'image' }),
+      gate({ url: css.replace(pv2.preview.id, first.id), resourceType: 'stylesheet' }), gate({ url: pv2.preview.url.replace('two.html', 'qa.html'), resourceType: 'subFrame' }),
+      gate({ url: 'https://evil.example/', resourceType: 'subFrame', frame: mainFrame }), gate({ url: css, resourceType: 'stylesheet', frame: undefined }),
+      gate({ url: 'https://fonts.googleapis.com/css2', resourceType: 'stylesheet', frame: mainFrame })],
+    [false, true, true, true, true, true, true, true, true, true, false, false])
+    // caps: 128 distinct paths and 32 MiB per preview must hold when requests arrive together
+    fs.mkdirSync(at('cap'), { recursive: true })
+    for (let i = 0; i < 200; i++) fs.writeFileSync(at(`cap/${i}.png`), png(16))
+    for (let i = 0; i < 5; i++) fs.writeFileSync(at(`cap/big${i}.png`), png(8 * 1024 * 1024))
+    pv = await call('createHtmlPreview', root, 'qa.html')
+    const many = await Promise.all(Array.from({ length: 200 }, (_, i) => handle(u(`cap/${i}.png`))))
+    const servedMany = many.filter(r => r.status === 200).length
+    pv = await call('createHtmlPreview', root, 'qa.html')
+    const big = await Promise.all(Array.from({ length: 5 }, (_, i) => handle(u(`cap/big${i}.png`))))
+    const servedBig = big.filter(r => r.status === 200).length
+    try {
+      assert.ok(servedMany <= 127 && servedBig <= 3, `gửi cùng lúc: 200 ảnh → phục vụ ${servedMany} (trần 128 path gồm entry); 5 ảnh 8 MiB → phục vụ ${servedBig} (trần 32 MiB)`)
+      console.log('ĐÃ SỬA T45-cap-song-song: bỏ try trong check.js')
+    } catch (e) { console.log(`BUG T45-cap-song-song: ${e.message}`) }
+    // open in browser: the file confirmed in the dialog is the one opened; a symlink swapped meanwhile is refused
+    fs.writeFileSync(at('a1.html'), '<p>1</p>'); fs.writeFileSync(at('a2.html'), '<p>2</p>'); fs.symlinkSync('a1.html', at('swap.html'))
+    dialogAnswer = 1; openedPaths.length = 0
+    onDialog = () => { fs.rmSync(at('swap.html')); fs.symlinkSync(path.join(outsideDir, 'x.html'), at('swap.html')) }
+    let ext = await call('openHtmlExternal', root, 'swap.html')
+    assert.ok(!ext.opened && openedPaths.length === 0, 'T45: symlink đổi ra ngoài trong lúc xác nhận vẫn được mở')
+    fs.rmSync(at('swap.html')); fs.symlinkSync('a1.html', at('swap.html'))
+    onDialog = () => { fs.rmSync(at('swap.html')); fs.symlinkSync('a2.html', at('swap.html')) }
+    ext = await call('openHtmlExternal', root, 'swap.html'); onDialog = null; dialogAnswer = 0
+    try {
+      assert.ok(!ext.opened && openedPaths.length === 0, `symlink đổi sang file khác trong dự án trong lúc xác nhận → vẫn mở ${openedPaths.map(p => path.basename(p))}`)
+      console.log('ĐÃ SỬA T45-doi-symlink-luc-xac-nhan: bỏ try trong check.js')
+    } catch (e) { console.log(`BUG T45-doi-symlink-luc-xac-nhan: ${e.message}`) }
+    await call('closeHtmlPreview', pv.preview.id)
+    for (const f of ['leak.html', 'leak.css', 'leak.png', 'qa.html', 'two.html', 'd.json', 'a1.html', 'a2.html', 'swap.html']) fs.rmSync(at(f), { force: true })
+    fs.rmSync(path.join(wt, 'leak.html')); fs.rmSync(at('cap'), { recursive: true, force: true })
+    fs.rmSync(integrationDir, { recursive: true, force: true }); fs.rmSync(outsideDir, { recursive: true, force: true })
+    console.log('ok (T45 V2/V3 scope)')
   }
   fs.rmSync(at('dirty.tmp'))
   const blockedId = entries[0].id
