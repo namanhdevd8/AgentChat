@@ -49,3 +49,13 @@ PM phát hiện ngày 2026-10-13: hai nhánh pm (`8a53be0`) và techlead (`d4daf
 - T38 sửa `bootstrapDependencies` để bỏ qua manifest chỉ khác `version`, và không còn chặn hàng chờ bằng `needs-deps` lúc xếp hàng. Cần kiểm tra cả ca đổi `dependencies` thật vẫn bị chặn.
 - Nhánh dev-be (`0961b62`) và dev-fe (`f5a3057`) đều là checkpoint của lượt bị ngắt (quota/500). Khi nghiệm thu, coi `npm run check` trong hàng chờ merge là kết quả chính thức, không dựa vào lời báo pass.
 - Quan sát 2026-10-13 04:32Z: dev-be tự merge main để sửa xung đột (merge commit `c4db05b`, gộp thử với main `7b3749c` thì sạch). Lượt đó báo success, nhưng hàng chờ merge không có mục mới; mục cũ vẫn ở CONFLICT, phải bấm Thử lại. Techlead/QA xem đây có phải lỗi của luồng commitWorkspace khi agent tự commit không.
+
+## Nghiệm thu T37 lần 1 (PM, 2026-10-13): chưa đạt, còn 2 lỗi ở hàng chờ merge
+QA chạy trên main `5ddbaeb`, check của QA đã vào main ở `6e7eb53`. `node check.js` xanh, còn 2 lỗi được ghi thành xfail (in ra dòng `BUG …`).
+- **Đạt:** R7 xoay phiên theo bước cuối (có tính cache, chặn số sai, codex/agy trả null); R4 chi tiết lệnh tối đa 8192 ký tự; R2 luật gom tin; R3 ghim và nhóm theo sprint; nhãn R5; mỗi lỗi gộp chỉ ra một tin.
+- **Lỗi 1, `T37-tu-merge-main`:** agent tự `git merge main` trong workspace thì các file main mang vào bị tính là ngoài phạm vi, nên `commitWorkspace` (main.js:360) trả null và không xếp hàng. Mục cũ kẹt mãi, và app còn báo sai rằng agent sửa file đó. Đây đúng là chuyện đã xảy ra với dev-be lúc 04:32Z.
+  - Mong muốn: phần kiểm phạm vi chỉ xét những file mà nhánh khác so với main (merge-base với target), không xét file đến từ main. Lượt success vẫn tạo mục gộp mới, và cảnh báo ngoài phạm vi không gán nhầm cho agent.
+- **Lỗi 2, `T37-doi-deps-van-gop`** (hồi quy do T38): `bootstrapDependencies` chạy trước khi merge nhánh vào integration (main.js:452), nên luôn so main với main và luôn đạt. Kết quả là nhánh đổi `dependencies` thật vẫn chạy check bằng node_modules cũ rồi được gộp.
+  - Mong muốn: kiểm manifest **sau khi** merge nhánh vào integration. Nếu deps đổi thật thì dừng ở trạng thái `needs-deps` và có một tin hệ thống, không tự cài. Nếu chỉ đổi `version` thì vẫn gộp như T38.
+- Giao dev-be sửa cả hai lỗi trong T38 (T38 quay lại Đang làm). Sửa xong thì đổi 2 xfail này thành assert thường trong `check.js`. QA chạy lại hai ca này rồi T37 mới đóng.
+- T34 → Xong. T35 và T36 giữ Chờ duyệt cho tới khi End-User thử tay trong Electron: cuộn khi gom tin, phím trên File chung, theme sáng/tối, cửa sổ hẹp.
