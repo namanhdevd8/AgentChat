@@ -74,7 +74,7 @@
   .icon.sm { width: 22px; height: 22px; font-size: 13px; }
 
   /* section labels: small mono, lowercase */
-  nav h3, body > aside h3, .stats-panel h3, .settings-nav-title, .settings-perm-hdr, .task-group-sum {
+  nav h3, .stats-panel h3, .settings-nav-title, .settings-perm-hdr, .task-group-sum {
     font: 500 11.5px/1.4 var(--mono); text-transform: lowercase; letter-spacing: 0; color: var(--muted);
   }
 
@@ -305,7 +305,14 @@
   body > aside { padding: 0 16px 16px; overflow-y: auto; border-left: 1px solid var(--line); }
   body > aside section.box { padding: 14px 0; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; }
   body > aside section:last-child { border-bottom: 0; }
-  body > aside h3 { margin: 0; }
+  body > aside h3 {
+    margin: 0;
+    font: 600 13px/1.4 var(--sans);
+    color: var(--ink);
+    letter-spacing: -.01em;
+    display: flex;
+    align-items: center;
+  }
   /* sits just inside the panel's left padding, so it never covers the chat log's scrollbar */
   .aside-grip { position: fixed; top: 0; bottom: 0; right: calc(var(--aside) - 6px); z-index: 10; width: 6px; cursor: col-resize; touch-action: none; -webkit-app-region: no-drag; }
   .aside-grip:hover, .aside-grip:focus-visible, body.resizing .aside-grip { outline: 0; background: linear-gradient(var(--accent), var(--accent)) left / 2px 100% no-repeat; }
@@ -329,11 +336,36 @@
     display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
   .need-text:hover { color: var(--accent); }
   .need-actions { display: flex; flex-wrap: wrap; gap: 6px; }
-  .task-group-sum { display: flex; align-items: center; gap: 6px; padding: 4px 0; cursor: pointer; list-style: none; user-select: none; }
-  .task-group-sum::-webkit-details-marker { display: none; }
-  .task-group-sum::before { content: ''; border-left: 4px solid currentColor; border-top: 3.5px solid transparent; border-bottom: 3.5px solid transparent; transition: transform .12s; }
-  .task-group[open] > .task-group-sum::before { transform: rotate(90deg); }
-  .task-group-sum:hover { color: var(--ink); }
+  /* dropdown summaries: task groups, sprint file groups, merge queue */
+  :is(.task-group-sum, .file-group-sum, .merge-summary) {
+    cursor: pointer;
+    user-select: none;
+    list-style: none;
+  }
+  :is(.task-group-sum, .file-group-sum, .merge-summary)::-webkit-details-marker {
+    display: none;
+  }
+  :is(.task-group-sum, .file-group-sum, .merge-summary)::before {
+    content: '';
+    display: inline-block;
+    flex: none;
+    border-left: 4px solid currentColor;
+    border-top: 3.5px solid transparent;
+    border-bottom: 3.5px solid transparent;
+    transition: transform .12s;
+  }
+  :is(.task-group, .file-group, #merge-details)[open] > :is(.task-group-sum, .file-group-sum, .merge-summary)::before {
+    transform: rotate(90deg);
+  }
+  :is(.task-group-sum, .file-group-sum, .merge-summary):hover {
+    color: var(--ink);
+  }
+  :is(.task-group-sum, .file-group-sum, .merge-summary):focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+    border-radius: 4px;
+  }
+  .task-group-sum { display: flex; align-items: center; gap: 6px; padding: 4px 0; }
   .task-group-items { display: flex; flex-direction: column; padding-bottom: 6px; }
   .tree-task-row { display: grid; grid-template-columns: 10px auto minmax(0, 1fr) auto; align-items: center; gap: 8px; margin: 0 -6px; padding: 3px 6px; border-radius: 5px; font-size: 13px; line-height: 1.4; white-space: nowrap; user-select: none; }
   .tree-task-row.has-spec { cursor: pointer; }
@@ -361,11 +393,9 @@
   .frow span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .file-group { margin-top: 4px; }
   .file-group-sum {
-    font: 500 11.5px/1.4 var(--mono); text-transform: lowercase; color: var(--muted); cursor: pointer; user-select: none; padding: 3px 0; display: flex; align-items: center; justify-content: space-between;
+    font: 500 11.5px/1.4 var(--mono); text-transform: lowercase; color: var(--muted); padding: 3px 0; display: flex; align-items: center; gap: 6px;
   }
-  .file-group-sum::-webkit-details-marker { display: none; }
-  .file-group-sum:hover { color: var(--ink); }
-  .file-group-items { padding-left: 6px; }
+  .file-group-items { padding-left: 10px; }
   #timeline-btn { display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 10px; font-size: 13px; font-weight: 500; white-space: nowrap; flex: none; border-radius: 6px; }
   #timeline-btn svg { width: 15px; height: 15px; flex: none; }
   .none { font-size: 12.5px; color: var(--muted); padding: 2px 0; }
@@ -522,8 +552,8 @@
   .tl-legend .tl-bar { position: static; display: inline-block; width: 16px; height: 10px; border-radius: 3px; }
 
   /* merge queue */
-  .merge-summary { cursor: pointer; user-select: none; list-style: none; }
-  .merge-summary::-webkit-details-marker { display: none; }
+  .merge-summary { color: var(--muted); }
+  #merge-details:not([open]) .merge-summary { margin-bottom: 0; }
   .merge-queue { display: grid; gap: 8px; max-height: 40vh; overflow-y: auto; }
   .merge-card { overflow-wrap: anywhere; display: flex; flex-direction: column; gap: 6px; padding: 8px 10px; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; }
   .merge-card-hdr { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 4px 8px; font-size: 12.5px; }
@@ -609,12 +639,12 @@
 <div id="aside-grip" class="aside-grip" role="separator" aria-orientation="vertical" aria-label="Độ rộng panel bên phải" tabindex="0" title="Kéo để đổi độ rộng · bấm đúp để về mặc định"></div>
 <aside>
   <section class="box" id="needs-sec" hidden>
-    <div class="sec-head"><h3>Cần bạn</h3><span id="needs-count" class="needs-count"></span></div>
+    <div class="sec-head"><h3><i data-icon="user" class="lead"></i>Cần bạn</h3><span id="needs-count" class="needs-count"></span></div>
     <div id="needs" class="needs-list"></div>
   </section>
   <section class="box" id="tasks-sec">
     <div class="sec-head">
-      <h3>Bảng task</h3>
+      <h3><i data-icon="tasks" class="lead"></i>Bảng task</h3>
       <span id="tasks-count" class="sec-count"></span>
       <button id="reloadTasks" class="box press icon sm" title="Tải lại bảng task" type="button"><i data-icon="refresh"></i></button>
     </div>
@@ -626,14 +656,14 @@
   <section class="box" id="merge-sec" hidden>
     <details id="merge-details" open>
       <summary class="sec-head merge-summary">
-        <h3>Hàng chờ merge</h3>
+        <h3><i data-icon="branch" class="lead"></i>Hàng chờ merge</h3>
         <span id="merge-count" class="stats-badge">0</span>
       </summary>
       <div id="merge-queue" class="merge-queue"></div>
       <div id="merge-empty" class="none" hidden>Không có nhánh đang chờ gộp.</div>
     </details>
   </section>
-  <section class="box"><h3>File chung</h3><div id="files"><div class="none">—</div></div></section>
+  <section class="box"><div class="sec-head"><h3><i data-icon="files" class="lead"></i>File chung</h3></div><div id="files"><div class="none">—</div></div></section>
 </aside>
 
 <dialog id="settings" class="box">

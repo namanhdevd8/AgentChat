@@ -1086,7 +1086,16 @@ async function rendererS9Checks() {
   const before = $('#files').children[0], pending = ctx.refreshFiles(); ctx.box = '.chat'; ctx.openSeq++
   release(['reports/sprint-1.md']); await pending
   assert.strictEqual($('#files').children[0], before, 'R3: danh sách file của box cũ ghi đè box mới')
-  console.log('ok (sprint 9 FE R2/R3)')
+  // T39: 4 right column headers have lead SVG icons and bold --ink styling; dropdown summaries have arrows
+  const html = fs.readFileSync(path.join(__dirname, 'index.html'), 'utf8')
+  assert.ok(html.includes('<i data-icon="user" class="lead"></i>Cần bạn'), 'T39: thiếu icon Cần bạn')
+  assert.ok(html.includes('<i data-icon="tasks" class="lead"></i>Bảng task'), 'T39: thiếu icon Bảng task')
+  assert.ok(html.includes('<i data-icon="branch" class="lead"></i>Hàng chờ merge'), 'T39: thiếu icon Hàng chờ merge')
+  assert.ok(html.includes('<i data-icon="files" class="lead"></i>File chung'), 'T39: thiếu icon File chung')
+  assert.ok(ui.includes("user: '<path") && ui.includes("tasks: '<rect") && ui.includes("files: '<path"), 'T39: thiếu icons trong ICONS map')
+  assert.ok(html.includes(':is(.task-group-sum, .file-group-sum, .merge-summary)::before'), 'T39: thiếu CSS mũi tên ::before')
+  assert.ok(html.includes(':is(.task-group, .file-group, #merge-details)[open]'), 'T39: thiếu CSS xoay mũi tên khi mở')
+  console.log('ok (sprint 9 FE R2/R3/T39)')
 }
 
 // ---- Sprint 6 H + J through the real main.js: Electron stubbed, a sample git repo, a fake codex. Own process: main.js registers IPC globally ----
