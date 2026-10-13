@@ -1,5 +1,26 @@
 # Các thay đổi
 
+## 0.7.0 · 2026-10-13
+
+### Mới
+- Khung xem file đổi được cỡ: kéo góc hoặc dùng phím mũi tên, có nút Phóng to / Thu nhỏ. App nhớ cỡ và chế độ lần trước.
+- Bấm link tới ảnh PNG, JPEG, GIF, WebP hoặc SVG thì xem ngay trong khung, có nút "Vừa khung" và "100%". Ảnh SVG cũng hiện được trong chat và trong file `.md`.
+- File HTML có hai tab Xem trước và Mã nguồn. Bản xem trước không chạy JavaScript, không tải mạng, không điều hướng ra ngoài; CSS và ảnh trong dự án vẫn hiện. Nút "Mở bằng trình duyệt" hỏi lại trước khi mở bản đầy đủ.
+- Link tới file trong tin của agent mở được trong app, kể cả link `file://`, đường dẫn tuyệt đối trong nhánh riêng của agent, và tên file như `renderer.js` trong chữ hoặc trong code.
+- Các tin hệ thống thành công liên tiếp ("chuyển T… sang…", "Đã gộp nhánh…") được gom thành một dòng "N cập nhật · Xem". Lỗi và chuỗi bị dừng vẫn hiện đủ.
+- File chung ghim `memory.md` và `roadmap.md` lên đầu, các file khác nhóm theo sprint. Hàng chờ merge ẩn khi trống. Header các mục ở cột phải rõ hơn, có icon và mũi tên mở/đóng.
+- Thanh đang chạy hiện nhãn ngắn ("Đang chạy lệnh"), bấm vào mới xem đủ lệnh. Nút "Timeline · Chi phí" dễ thấy hơn.
+
+### Sửa lỗi
+- Agent mở phiên mới theo cỡ ngữ cảnh của bước cuối trong lượt, không theo tổng token của cả lượt. Lượt dùng nhiều công cụ không còn bị xoay phiên sớm. Popup trên avatar hiện cỡ ngữ cảnh.
+- Hàng chờ merge không còn kẹt ở "Thiếu dependency" khi nhánh chính chỉ đổi số phiên bản. Dependency được kiểm sau khi gộp thử, nên nhánh đổi dependency thật vẫn bị chặn.
+- Agent tự gộp nhánh chính vào nhánh của mình thì các file mang về từ nhánh chính không còn bị tính là sửa ngoài phạm vi, và lượt đó vẫn được xếp hàng gộp.
+- Mỗi lần gộp không thành công đều có một tin hệ thống trong chat.
+- agy: lượt đã trả lời xong không còn bị báo lỗi chỉ vì agy kèm lỗi của lượt trước (hết quota, lỗi 500 đã tự thử lại). Thông báo lỗi không còn lặp lại cùng một câu kèm JSON thô.
+
+### Bảo mật
+- Cửa sổ app chạy ở chế độ sandbox. Chỉ trang chính mới gọi được IPC, khung xem trước HTML thì không.
+
 ## 0.6.0 · 2026-10-12
 
 ### Mới
