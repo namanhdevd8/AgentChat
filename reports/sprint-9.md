@@ -76,3 +76,10 @@ QA chạy trên main `5ddbaeb`, check của QA đã vào main ở `6e7eb53`. `no
 - Hiện tượng (ảnh `.chat/attachments/img-aa6da05f002c.png`, `img-d5a840f792b9.png`): File chung chỉ có một nhóm "khác · 24". memory.md và roadmap.md không được ghim, sprint không được nhóm.
 - Nguyên nhân: `core.files` (core.js:1670) trả về **đường dẫn tuyệt đối**, ví dụ `/Users/namanh/Dev/ai-chat/reports/sprint-1.md`. Nhưng `renderer.js` (khoảng dòng 3420–3445) so khớp đường dẫn tương đối: `.chat/memory.md`, `reports/roadmap.md`, `startsWith('reports/')`. Vì vậy không file nào khớp. Check của QA dùng fixture tương đối nên không bắt được lỗi này.
 - Sửa (dev-fe, T35): chuyển đường dẫn về dạng tương đối so với `dir` trước khi so khớp; khi mở file vẫn giữ đường dẫn gốc. Thêm một ca vào `check.js` dùng đúng output thật của `core.files` (đường dẫn tuyệt đối). agents.json vẫn nằm trong nhóm "Khác".
+
+## T39 (dev-fe): header rõ ràng và mũi tên cho mục xổ xuống (End-User yêu cầu 2026-10-13)
+Ảnh `.chat/attachments/img-bfa0e76e78d6.png`: R3 đã đúng (memory/roadmap được ghim, nhóm Sprint 9…1, Khác · 4). Nhưng các header ở cột phải nhìn không rõ, khó phân biệt đâu là nhãn, đâu là chỗ bấm được.
+1. **Header mục** ("Cần bạn", "Bảng task", "Hàng chờ merge", "File chung"): chữ đậm, màu chữ chính (`--ink`), mỗi mục có một icon SVG riêng. Dùng bộ `ICONS` có sẵn trong renderer.js (bản 0.6.0); icon nào chưa có thì thêm vào đúng bộ này, cùng nét vẽ. Bốn mục cùng một kiểu.
+2. **Mục xổ xuống** (nhóm "Sprint N · x" và "Khác" trong File chung, nhóm trạng thái task, Hàng chờ merge): luôn có mũi tên ▸ khi đóng, ▾ khi mở, giống "chờ duyệt" hiện nay. Hiện `.file-group-sum` đang ẩn marker (index.html:366) nên không có mũi tên. Mọi mục dùng chung một kiểu.
+3. Header chỉ là nhãn thì không có hover và con trỏ tay; mục bấm được thì có hover và focus-visible.
+- Nghiệm thu: giao diện sáng và tối, dùng được bằng bàn phím, không đổi hành vi hay trạng thái mở đã lưu theo box, `npm run check` xanh.
