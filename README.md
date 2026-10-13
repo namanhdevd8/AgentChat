@@ -76,6 +76,10 @@ own Git worktrees and report back in the chat. Anything that needs your decision
 - Opens Markdown, text and source files, images and SVG from links in the chat.
 - Previews HTML in a sandbox that runs no JavaScript and makes no network requests.
 
+**Settings**
+- A searchable settings window: interface font and message size, where each CLI is installed, and whether each
+  account is signed in.
+
 ## How it works
 
 ```mermaid
@@ -110,9 +114,12 @@ npm install
 npm start
 ```
 
-1. Click **+** in the sidebar and pick a project folder. The app creates a `.chat/` folder inside it.
-2. Open **Team settings** (⌘,) to add agents. Give each one a name, a CLI, a role and a file scope.
-3. Send a message, for example `@pm plan a login page`.
+1. Open **Settings** at the bottom of the sidebar. In its **Agent** section the app shows where it found `claude`, `codex`
+   and `agy`, their versions and whether each account is signed in. Click **Scan** to look again, or **Add manually…**
+   to pick an executable it missed.
+2. Click **+** in the sidebar and pick a project folder. The app creates a `.chat/` folder inside it.
+3. Open **Team settings** (⌘,) to add agents. Give each one a name, a CLI, a role and a file scope.
+4. Send a message, for example `@pm plan a login page`.
 
 ## Configuring the team
 
@@ -155,8 +162,8 @@ the app asks you to confirm the new configuration before the next turn runs.
 - **In the project folder:** `.chat/` holds the log, the task board, `memory.md`, `agents.json`, the handoff notes
   and `attachments/` (images sent in the chat). A second box on the same folder uses `.chat2/`, and so on. Add
   `.chat*` to your `.gitignore`; the app does this for you when it sets up Git.
-- **In the app's data folder:** the list of spaces, trusted configurations, dismissed items, window size, agent
-  worktrees and the merge registry. On macOS this is `~/Library/Application Support/Agent Chat`.
+- **In the app's data folder:** the list of spaces, trusted configurations, CLI paths, dismissed items, window size,
+  agent worktrees and the merge registry. On macOS this is `~/Library/Application Support/Agent Chat`.
 
 ## Security model
 
@@ -215,7 +222,7 @@ Builds are not code-signed. On macOS, right-click › Open the first time. On Wi
 To release:
 1. Bump the version: `npm version minor --no-git-tag-version` for features, or `patch` for fixes.
 2. Add a section for that version to [`CHANGELOG.md`](CHANGELOG.md). `npm run check` fails if it is missing.
-3. Build. The app shows the changelog in its About dialog.
+3. Build. The app shows the changelog under Settings › About.
 
 The app icon is `build/icon.svg`. After editing it, render `build/icon.png` at 1024px and electron-builder will make
 the `.icns` and `.ico` from it:

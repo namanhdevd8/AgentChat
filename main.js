@@ -1694,18 +1694,6 @@ ipcMain.handle('saveProjectSettings', (event, dir, request) => {
     return saved
   })
 })
-// Tests the team as it stands in the ⚙ form (saved or not), all agents in parallel.
-ipcMain.handle('probeAgents', (event, dir, members) => {
-  validSender(event)
-  return apiCall(async () => {
-    const root = knownProject(dir)
-    await ensureTrustedConfig(root) // a probe runs every CLI with the agents' permission flags
-    const team = Array.isArray(members) ? core.normalizeTeam(root, members) : core.team(root)
-    const results = await Promise.all(team.map(async agent =>
-      ({ name: agent.name, cli: agent.cli, model: agent.model || '', ...await core.probe(root, agent) })))
-    return { results }
-  })
-})
 ipcMain.handle('worktreeState', (event, dir) => { validSender(event); return apiCall(async () => ({ state: await worktreeState(knownProject(dir)) })) })
 ipcMain.handle('prepareGitInit', (event, dir) => { validSender(event); return apiCall(() => gitInitPreview(knownProject(dir))) })
 ipcMain.handle('initGit', (event, dir, request) => {
@@ -2031,7 +2019,41 @@ ipcMain.handle('about', event => {
   validSender(event)
   let changelog = ''
   try { changelog = fs.readFileSync(path.join(__dirname, 'CHANGELOG.md'), 'utf8') } catch {}
-  return { version: app.getVersion(), author: require('./package.json').author, changelog }
+  const { author, license, homepage } = require('./package.json')
+  return { version: app.getVersion(), author, license, homepage, changelog }
+})
+// Cài đặt › CLI Agent. Kept in userData, not .chat/: it names what the app executes, and agents can write .chat
+const cliPathsFile = () => path.join(app.getPath('userData'), 'cli-paths.json')
+function savedCliPaths() {
+  try { const saved = JSON.parse(fs.readFileSync(cliPathsFile(), 'utf8')); return saved && typeof saved === 'object' ? saved : {} } catch { return {} }
+}
+// the user's pick, else the first a scan finds: an app opened from Finder may not have the folder on its PATH
+function applyCliPaths() {
+  const saved = savedCliPaths(), found = core.findClis()
+  core.setCliPaths(Object.fromEntries(core.CLI_BINS.map(bin => [bin, saved[bin] || found[bin][0]])))
+  return { bins: core.CLI_BINS.map(bin => ({ bin, path: typeof saved[bin] === 'string' ? saved[bin] : null, found: found[bin] })), accounts: core.accounts() }
+}
+const cliBin = bin => { if (!core.CLI_BINS.includes(bin)) throw new Error('CLI không hợp lệ'); return bin }
+ipcMain.handle('cliSettings', event => { validSender(event); return applyCliPaths() })
+ipcMain.handle('setCliPath', (event, bin, file) => {
+  validSender(event)
+  return apiCall(() => {
+    const saved = savedCliPaths()
+    if (file == null) delete saved[cliBin(bin)]
+    else if (typeof file === 'string' && path.isAbsolute(file) && fs.statSync(file, { throwIfNoEntry: false })?.isFile()) saved[cliBin(bin)] = file
+    else throw new Error('Không phải file chạy được')
+    core.atomicWrite(cliPathsFile(), JSON.stringify(saved, null, 2))
+    return applyCliPaths()
+  })
+})
+ipcMain.handle('pickCliPath', async (event, bin) => {
+  validSender(event)
+  const picked = await dialog.showOpenDialog(win, { title: `Chọn file chạy của ${cliBin(bin)}`, properties: ['openFile', 'showHiddenFiles'] })
+  return picked.canceled ? null : picked.filePaths[0]
+})
+ipcMain.handle('checkClis', (event, bin) => {
+  validSender(event)
+  return core.checkClis(core.accounts().filter(name => !bin || core.account(name)?.bin === bin))
 })
 ipcMain.handle('sessions', (event, dir) => {
   validSender(event)
@@ -2129,11 +2151,12 @@ function setMenu() {
   const send = action => () => win?.webContents.send('menu', action)
   const settings = { label: 'Cài đặt nhóm…', accelerator: 'CmdOrCtrl+,', click: send('settings') }
   const about = { label: 'Giới thiệu Agent Chat', click: send('about') } // own dialog: version, author, changelog on both OSes
+  const appSettings = { label: 'Cài đặt chung…', click: send('app-settings') }
   const mac = process.platform === 'darwin'
   Menu.setApplicationMenu(Menu.buildFromTemplate([
-    mac ? { label: app.name, submenu: [about, { type: 'separator' }, settings, { type: 'separator' }, { role: 'services' },
+    mac ? { label: app.name, submenu: [about, { type: 'separator' }, appSettings, settings, { type: 'separator' }, { role: 'services' },
       { type: 'separator' }, { role: 'hide' }, { role: 'hideOthers' }, { role: 'unhide' }, { type: 'separator' }, { role: 'quit' }] }
-      : { label: 'Tệp', submenu: [about, settings, { type: 'separator' }, { role: 'quit' }] },
+      : { label: 'Tệp', submenu: [about, appSettings, settings, { type: 'separator' }, { role: 'quit' }] },
     { role: 'editMenu' },
     { label: 'Đi tới', submenu: [
       { label: 'Chuyển không gian…', accelerator: 'CmdOrCtrl+K', click: send('switch') },
@@ -2150,6 +2173,7 @@ const singleInstance = app.requestSingleInstanceLock()
 if (!singleInstance) app.quit()
 else app.whenReady().then(() => {
   core.setTrustFile(path.join(app.getPath('userData'), 'trust.json'))
+  applyCliPaths()
   for (const dir of projects()) loadOrphans(dir)
   setMenu()
   if (!app.isPackaged) app.dock?.setIcon(path.join(__dirname, 'build/icon.png')) // packaged builds carry it in the bundle

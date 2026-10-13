@@ -215,6 +215,13 @@ const ICONS = {
   task: '<rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><path d="m9 14 2 2 4-4"/>',
   files: '<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/>',
   file: '<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/>',
+  type: '<path d="M5 7V5h14v2M9.5 19h5M12 5v14"/>',
+  terminal: '<path d="m5 7 5 5-5 5M12 18h7"/>',
+  plug: '<path d="M9 2v5M15 2v5M6 7h12v4a6 6 0 0 1-12 0Z"/><path d="M12 17v5"/>',
+  spark: '<path d="M12 3.5 14 10l6.5 2-6.5 2-2 6.5-2-6.5-6.5-2 6.5-2Z"/>',
+  globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/>',
+  info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/>',
+  gear: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>',
 }
 const icon = (name, cls = '') => {
   const s = el('span', ('ico ' + cls).trim())
@@ -480,7 +487,7 @@ function initSettingsNav() {
   $('#tab-general').onclick = () => { currentSettingTab = 'general'; updateSettingsViews() }
   $('#tab-worktree').onclick = () => { currentSettingTab = 'worktree'; updateSettingsViews() }
   $('#tab-limits').onclick = () => { currentSettingTab = 'limits'; updateSettingsViews() }
-  $('#sidebar-add-btn').onclick = () => $('#add').click()
+  $('#sidebar-add-btn').onclick = addAgent
 }
 
 function updateSettingsViews() {
@@ -864,29 +871,6 @@ function renderEditors() {
 
 initSettingsNav()
 
-// Connection test for every agent in the form (unsaved changes included)
-$('#probe').onclick = async () => {
-  const btn = $('#probe'), out = $('#probe-results'), probeDir = dir
-  btn.disabled = true; btn.textContent = 'Đang kiểm tra…'
-  out.hidden = false
-  out.replaceChildren(el('div', 'probe-row', `Đang gửi câu kiểm tra tới ${draft.length} agent… (có thể mất tới 2 phút)`))
-  try {
-    const res = await api.probeAgents(probeDir, draft)
-    if (dir !== probeDir) return
-    if (!res?.ok) { out.replaceChildren(el('div', 'probe-row bad', res?.error?.message || 'Không kiểm tra được')); return }
-    out.replaceChildren(...res.results.map(r => {
-      const row = el('div', 'probe-row ' + (r.ok ? 'good' : 'bad'))
-      const name = el('b')
-      name.append(icon(r.ok ? 'check' : 'close', 'lead'), `@${r.name}`)
-      row.append(name,
-        el('span', '', `${r.cli}${r.model ? ' · ' + r.model : ''} · ${(r.ms / 1000).toFixed(1)} giây${r.ok ? ' · trả lời "' + r.text + '"' : ''}`))
-      if (!r.ok) row.append(el('div', 'probe-err', r.error))
-      return row
-    }))
-  } catch (e) { out.replaceChildren(el('div', 'probe-row bad', e.message)) }
-  finally { btn.disabled = false; btn.textContent = 'Kiểm tra kết nối' }
-}
-
 $('#gear').onclick = async () => {
   if (openingDir) return // `team` still belongs to the project being left
   const reqDir = dir, reqSeq = openSeq
@@ -900,7 +884,6 @@ $('#gear').onclick = async () => {
   draftTeamRevision = currentTeamRevision
   draftSettingsRevision = currentSettingsRevision
   sessionsOf = {}
-  $('#probe-results').hidden = true
   $('#spath').textContent = dir
   $('#err').textContent = ''
 
@@ -1014,7 +997,7 @@ $('#git-init-confirm').onclick = async () => {
   }
 }
 
-$('#add').onclick = () => {
+function addAgent() {
   const nextAvatar = getDefaultAvatar(draft, draft.length)
   draft.push({
     name: '',
@@ -4277,26 +4260,146 @@ api.on('menu', action => {
   } else if (action === 'timeline' && !$('#timeline-btn').hidden) {
     openTimeline()
   } else if (action === 'about') {
-    $('#about-btn').click()
+    openAppSettings('about')
+  } else if (action === 'app-settings') {
+    openAppSettings()
   }
 })
 
-// Giới thiệu: version and author in the sidebar foot; the dialog adds the changelog
-let about = null
+// Cài đặt chung › CLI Agent: which executable each CLI runs from (auto = the first a scan finds), and a version +
+// login check per account. Changes apply to the next turn of every box.
+let cliState = null, cliResult = { bins: {}, accounts: {} }, cliStamp = 0
+const cliPending = {} // bin → the newest check covering it; an older one finishing late (path changed meanwhile) is dropped
+const cliOf = name => name.replace(/\d+$/, '')
+function renderClis() {
+  if (!cliState) return
+  $('#cli-check').disabled = Object.keys(cliPending).length > 0
+  $('#cli-list').replaceChildren(...cliState.bins.map(({ bin, path, found }) => {
+    const row = el('div', 'cli-row'), head = el('div', 'cli-row-head'), checking = bin in cliPending, v = cliResult.bins[bin]
+    head.append(el('b', '', bin), checking ? el('span', 'cli-status', 'Đang kiểm tra…')
+      : v ? el('span', 'cli-status ' + (v.error ? 'bad' : 'good'), v.error || v.version) : '')
+    const select = el('select', 'f'), pick = el('button', 'box press btn sm', 'Thêm thủ công…')
+    select.setAttribute('aria-label', `File chạy của ${bin}`)
+    select.append(new Option(found[0] ? `Tự động · ${found[0]}` : 'Tự động · chưa tìm thấy', ''))
+    for (const file of new Set([...found, ...(path ? [path] : [])])) select.append(new Option(file, file))
+    select.value = path || ''
+    select.onchange = () => setCliPath(bin, select.value || null)
+    pick.type = 'button'
+    pick.onclick = async () => { const file = await api.pickCliPath(bin); if (file) setCliPath(bin, file) }
+    const where = el('div', 'cli-path'); where.append(select, pick)
+    row.append(head, where, ...cliState.accounts.filter(name => cliOf(name) === bin).map(name => {
+      const r = !checking && cliResult.accounts[name], line = el('div', 'cli-account' + (r ? r.ok ? ' good' : ' bad' : ''))
+      line.append(icon(r ? r.ok ? 'check' : 'close' : 'refresh', 'lead'), el('b', '', name), r ? r.ok ? r.detail : r.error : 'chưa kiểm tra')
+      return line
+    }))
+    return row
+  }))
+}
+async function checkClis(bin = null) {
+  const stamp = ++cliStamp, bins = bin ? [bin] : cliState.bins.map(b => b.bin)
+  for (const b of bins) cliPending[b] = stamp
+  renderClis()
+  let r = null
+  try { r = await api.checkClis(bin) } catch (e) { showToast(e.message.replace(/^.*?Error: /, '')) }
+  for (const b of bins.filter(b => cliPending[b] === stamp)) {
+    delete cliPending[b]
+    if (r?.bins[b]) cliResult.bins[b] = r.bins[b]
+    for (const name of cliState.accounts.filter(name => cliOf(name) === b)) if (r?.accounts[name]) cliResult.accounts[name] = r.accounts[name]
+  }
+  renderClis()
+}
+async function setCliPath(bin, file) {
+  const r = await api.setCliPath(bin, file)
+  if (!r.ok) { showToast(r.error?.message || 'Không lưu được đường dẫn'); renderClis(); return }
+  cliState = r; checkClis(bin)
+}
+let cliScan = null
+const scanClis = () => cliScan ??= api.cliSettings().then(state => { cliState = state; checkClis() }).finally(() => { cliScan = null })
+$('#cli-scan').onclick = async () => {
+  await scanClis()
+  showToast(`Tìm thấy ${cliState.bins.reduce((n, b) => n + b.found.length, 0)} file chạy`)
+}
+$('#cli-check').onclick = () => checkClis()
+
+// Font chữ: this machine only (localStorage). The interface font swaps --sans; the size is the messages' and the composer's.
+const CHAT_SIZE = 14
+const pref = key => { try { return localStorage.getItem(key) || '' } catch { return '' } }
+const setPref = (key, value) => { try { if (value) localStorage.setItem(key, value); else localStorage.removeItem(key) } catch {} }
+const fontStack = family => family === 'system' ? 'system-ui, sans-serif' : `"${family.replace(/["\\]/g, '\\$&')}", -apple-system, system-ui, sans-serif`
+function applyFont() {
+  const root = document.documentElement.style, family = pref('uiFont'), size = Number(pref('chatSize'))
+  if (family) root.setProperty('--sans', fontStack(family)); else root.removeProperty('--sans')
+  if (size >= 12 && size <= 20) root.setProperty('--chat-size', `${size}px`); else root.removeProperty('--chat-size')
+}
+applyFont()
+let fontFamilies = null // installed families, read once when the Font pane first shows
+async function renderFont() {
+  fontFamilies ??= await (window.queryLocalFonts?.() || Promise.resolve([]))
+    .then(list => [...new Set(list.map(f => f.family))].sort((a, b) => a.localeCompare(b)), () => [])
+  const family = pref('uiFont'), select = $('#font-family')
+  select.replaceChildren(new Option('Mặc định (Inter)', ''), new Option('Theo hệ thống', 'system'), ...fontFamilies.map(f => new Option(f, f)))
+  if (family && family !== 'system' && !fontFamilies.includes(family)) select.append(new Option(`${family} (không còn trên máy)`, family))
+  select.value = family
+  const size = Number(pref('chatSize')) || CHAT_SIZE
+  $('#font-size').value = size
+  $('#font-size-value').textContent = `${size}px`
+}
+$('#font-family').onchange = e => { setPref('uiFont', e.target.value); applyFont() }
+$('#font-size').oninput = e => {
+  setPref('chatSize', Number(e.target.value) === CHAT_SIZE ? '' : e.target.value); applyFont()
+  $('#font-size-value').textContent = `${e.target.value}px`
+}
+$('#font-reset').onclick = () => { setPref('uiFont', ''); setPref('chatSize', ''); applyFont(); renderFont() }
+
+// Giới thiệu: version, author, the changelog shipped with the app
+let about = null, aboutShown = false
 api.about().then(info => {
   about = info
-  $('#foot-version').textContent = `v${info.version}`
-  $('#foot-author').textContent = `Developed by ${info.author.replaceAll(' ', '\u00a0')}` // a narrow sidebar breaks after "by", never inside the name
-  $('#about-btn').hidden = false
+  $('#app-version').textContent = `Agent Chat ${info.version}`
+  $('#app-author').textContent = `Developed by ${info.author} · Giấy phép ${info.license}`
 }).catch(() => {})
-$('#about-btn').onclick = () => {
-  if (!about) return
-  $('#about-title').textContent = `Agent Chat ${about.version}`
-  $('#about-sub').textContent = `Developed by ${about.author}`
-  $('#about-body').replaceChildren(renderMarkdown(about.changelog || 'Chưa có danh sách thay đổi.'))
-  $('#about').showModal()
+$('#about-repo').onclick = () => about?.homepage && api.openLink(null, about.homepage).catch(e => showToast(e.message.replace(/^.*?Error: /, '')))
+
+// Cài đặt chung: sections in a sidebar; the search narrows the sections and the rows inside them (accents optional)
+let appPane = 'font'
+const appPanes = () => [...document.querySelectorAll('#app-settings .settings-pane')]
+const appNav = name => document.querySelector(`#app-settings-nav [data-pane="${name}"]`)
+function showAppPane(name) {
+  if (name) appPane = name
+  for (const pane of appPanes()) { pane.hidden = pane.dataset.pane !== name; appNav(pane.dataset.pane).classList.toggle('active', pane.dataset.pane === name) }
+  if (name === 'agent' && !cliState) scanClis()
+  if (name === 'font') renderFont()
+  if (name === 'about' && about && !aboutShown) {
+    aboutShown = true
+    $('#about-body').replaceChildren(renderMarkdown(about.changelog || 'Chưa có danh sách thay đổi.'))
+  }
 }
-$('#about-close').onclick = () => $('#about').close()
+function filterAppSettings() {
+  const q = fold($('#app-settings-search').value.trim()), shown = []
+  for (const pane of appPanes()) {
+    const nav = appNav(pane.dataset.pane), whole = !q || fold(`${nav.textContent} ${pane.dataset.keys}`).includes(q)
+    let hit = whole
+    for (const row of pane.querySelectorAll('.set-row')) {
+      row.hidden = !whole && !fold(`${row.textContent} ${row.dataset.keys || ''}`).includes(q)
+      hit ||= !row.hidden
+    }
+    nav.hidden = !hit
+    if (hit) shown.push(pane.dataset.pane)
+  }
+  $('#app-settings-empty').hidden = shown.length > 0
+  showAppPane(shown.includes(appPane) ? appPane : shown[0] || null)
+}
+function openAppSettings(pane = appPane) {
+  appPane = pane
+  cliState = null // scan again when Agent shows: a CLI may have been installed since
+  $('#app-settings-search').value = ''
+  filterAppSettings()
+  if (!$('#app-settings').open) $('#app-settings').showModal()
+}
+for (const item of document.querySelectorAll('#app-settings-nav .settings-nav-item')) item.onclick = () => showAppPane(item.dataset.pane)
+$('#app-settings-search').oninput = filterAppSettings
+$('#app-settings-btn').onclick = () => openAppSettings()
+$('#app-settings-close').onclick = () => $('#app-settings').close()
 
 // theme: one fixed button cycles Theo hệ thống → Sáng → Tối; main applies it natively and remembers it
 const THEME_ICON = {

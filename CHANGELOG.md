@@ -1,5 +1,18 @@
 # Các thay đổi
 
+## 0.8.0 · 2026-10-13
+
+### Mới
+- Nút **Cài đặt** ở cuối sidebar thay cho dòng phiên bản. Cửa sổ cài đặt có sidebar các mục và ô tìm kiếm (gõ không dấu cũng được).
+- **Agent:** app tự tìm `claude`, `codex`, `agy` trong PATH và các thư mục cài đặt thường gặp (Homebrew, npm, nvm, bun…), hiện phiên bản và từng tài khoản đã đăng nhập chưa. Có nút Quét, Kiểm tra kết nối và Thêm thủ công để chọn file chạy khác. App mở từ Finder vẫn tìm được CLI dù không lấy được PATH của shell.
+- **Font chữ:** chọn font giao diện trong các font đã cài trên máy, và cỡ chữ tin nhắn từ 12 đến 20px.
+- **Giới thiệu:** phiên bản, tác giả, giấy phép, link mã nguồn và danh sách thay đổi, thay cho hộp thoại Giới thiệu cũ.
+- Các mục MCP, Skill, Ngôn ngữ và các CLI Gemini, Qwen, Kimi, Copilot, Cursor được ghi "sắp có".
+
+### Thay đổi
+- Cài đặt nhóm bỏ nút "+ Thêm agent" (đã có nút + cạnh "Thành viên") và nút "Kiểm tra kết nối" (chuyển sang Cài đặt › Agent).
+- Khi không tìm thấy CLI, lỗi trong chat chỉ tới Cài đặt › Agent thay cho `spawn ENOENT`.
+
 ## 0.7.0 · 2026-10-13
 
 ### Mới

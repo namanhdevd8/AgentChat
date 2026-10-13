@@ -97,21 +97,55 @@
   .space span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .space .space-badge { margin-left: auto; flex: none; overflow: visible; }
   .nav-foot { display: flex; align-items: flex-end; gap: 6px; margin-top: auto; padding-top: 14px; }
-  #about-btn { flex: 1; min-width: 0; padding: 0 6px; background: none; border: 0; text-align: left; font: 11.5px/1.6 var(--sans); color: var(--faint); }
-  #about-btn:hover { color: var(--muted); }
-  #about-btn span { display: block; }
+  #app-settings-btn { display: flex; align-items: center; height: 30px; padding: 0 8px; background: none; border-color: transparent; color: var(--muted); font-size: 13px; }
+  #app-settings-btn:hover { background: var(--hover); color: var(--ink); }
   #theme-btn { margin-left: auto; }
 
-  /* Giới thiệu: who made it, what changed */
-  .about-dialog { width: min(640px, 92vw); }
-  .about-head { display: flex; align-items: center; gap: 14px; }
-  .about-head img { width: 52px; height: 52px; margin: -4px; }
-  .about-head > div { flex: 1; min-width: 0; }
-  .about-head small { display: block; }
-  .about-body { overflow-y: auto; padding: 4px 20px 20px; }
-  .about-body h1 { display: none; } /* the file's own title; the dialog has one */
+  /* Cài đặt chung: a searchable sidebar of sections (the team's own settings stay in ⌘,) */
+  .app-settings { width: min(900px, 94vw); height: min(640px, 90vh); }
+  .app-settings-head { display: flex; align-items: center; gap: 12px; }
+  .app-settings-head > div { flex: 1; min-width: 0; }
+  .app-settings-head small { display: block; }
+  .app-settings .settings-body { grid-template-columns: 210px 1fr; }
+  .app-settings .settings-content { background: var(--bg); }
+  #app-settings-search { width: 100%; margin-bottom: 2px; }
+  .settings-nav-soon { flex: none; margin-left: auto; font: 10.5px var(--mono); color: var(--faint); }
+  .set-row { display: grid; gap: 8px; }
+  .set-row + .set-row { padding-top: 14px; border-top: 1px solid var(--line); }
+  .set-row > label, .set-label { font-size: 13px; font-weight: 500; }
+  .set-row small { color: var(--muted); font-size: 12px; }
+  .set-inline { display: flex; align-items: center; gap: 10px; }
+  .set-inline select { flex: 1; min-width: 0; }
+  .set-inline input[type=range] { flex: 1; accent-color: var(--ink); }
+  .set-value { min-width: 44px; text-align: right; font: 12.5px var(--mono); color: var(--muted); }
+  .font-preview { font-size: var(--chat-size, 14px); padding: 10px 12px; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; overflow-wrap: anywhere; }
+  .soon { display: grid; justify-items: center; gap: 6px; padding: 36px 16px; text-align: center; color: var(--muted); font-size: 13px; }
+  .soon b { color: var(--ink); font-size: 14px; }
+  .settings-empty { padding: 36px 16px; text-align: center; color: var(--muted); font-size: 13px; }
+  .cli-hdr { display: flex; align-items: center; gap: 8px; }
+  .cli-hdr > div { flex: 1; min-width: 0; }
+  .cli-list { display: flex; flex-direction: column; gap: 14px; }
+  .cli-row { display: grid; gap: 6px; }
+  .cli-row + .cli-row { padding-top: 14px; border-top: 1px solid var(--line); }
+  .cli-row-head { display: flex; align-items: baseline; gap: 10px; }
+  .cli-row-head b { font: 600 13.5px var(--mono); }
+  .cli-soon { gap: 8px; padding-top: 14px; border-top: 1px solid var(--line); }
+  .cli-soon b { color: var(--muted); }
+  .cli-path { display: flex; gap: 8px; }
+  .cli-path select { flex: 1; min-width: 0; font-family: var(--mono); font-size: 12px; }
+  .cli-status, .cli-account { min-width: 0; font-size: 12.5px; color: var(--muted); overflow-wrap: anywhere; }
+  .cli-status.good, .cli-account.good .ico { color: var(--ok); }
+  .cli-status.bad, .cli-account.bad .ico { color: var(--danger); }
+  .cli-account b { font: 500 12px var(--mono); color: var(--ink); margin-right: 6px; }
+  .about-row { display: flex; align-items: center; gap: 14px; }
+  .about-row img { width: 52px; height: 52px; margin: -4px; }
+  .about-row > div { flex: 1; min-width: 0; }
+  .about-row b { font-size: 15px; }
+  .about-row small { display: block; color: var(--muted); font-size: 12.5px; }
+  .soon .ico { width: 28px; height: 28px; color: var(--faint); }
+  .about-body h1 { display: none; } /* the file's own title; the card has one */
   .about-body h2 { margin: 18px 0 2px; padding-top: 14px; border-top: 1px solid var(--line); font: 600 14px var(--mono); }
-  .about-body h2:first-of-type { margin-top: 14px; padding-top: 0; border-top: 0; } /* the dialog head already rules it off */
+  .about-body h2:first-of-type { margin-top: 0; padding-top: 0; border-top: 0; }
   .about-body h3 { margin: 12px 0 4px; font: 500 11.5px/1.4 var(--mono); text-transform: lowercase; color: var(--muted); }
 
   /* chat */
@@ -155,7 +189,7 @@
   .meta b { font-size: 14px; font-weight: 600; }
   .meta .cli { font: 11px/1.5 var(--mono); padding: 0 6px; border: 1px solid var(--line); border-radius: 4px; color: var(--muted); }
   .meta time { font-size: 12px; color: var(--faint); font-variant-numeric: tabular-nums; }
-  .text { grid-column: 2; min-width: 0; overflow-wrap: anywhere; }
+  .text { grid-column: 2; min-width: 0; overflow-wrap: anywhere; font-size: var(--chat-size, 14px); }
   .row.me { grid-template-columns: minmax(0, 1fr); }
   .row.me > :not(.text) { display: none; }
   .row.me .text { grid-column: 1; justify-self: end; max-width: min(80%, 640px); margin-top: 4px; padding: 9px 14px; background: var(--hover); border-radius: 12px; }
@@ -226,9 +260,9 @@
   .md-content ul, .md-content ol { margin: 4px 0 8px 20px; padding: 0; }
   .md-content li { margin-bottom: 3px; }
   .md-content blockquote { margin: 6px 0; padding: 2px 12px; border-left: 2px solid var(--line); color: var(--muted); }
-  .md-content pre { margin: 8px 0; padding: 10px 12px; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; overflow-x: auto; font: 12.5px/1.5 var(--mono); white-space: pre; }
-  .md-content code { font: 12.5px var(--mono); background: var(--hover); padding: 1px 5px; border: 1px solid var(--line); border-radius: 4px; }
-  .md-content pre code { background: none; padding: 0; border: 0; }
+  .md-content pre { margin: 8px 0; padding: 10px 12px; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; overflow-x: auto; font: .9em/1.5 var(--mono); white-space: pre; }
+  .md-content code { font: .9em var(--mono); background: var(--hover); padding: 1px 5px; border: 1px solid var(--line); border-radius: 4px; }
+  .md-content pre code { background: none; padding: 0; border: 0; font-size: 1em; }
   .md-content img { display: block; max-width: min(100%, 480px); max-height: 360px; margin: 6px 0; border: 1px solid var(--line); border-radius: 8px; }
   .md-content img.zoomable { cursor: zoom-in; }
   .img-missing { color: var(--muted); font-size: 12px; }
@@ -276,7 +310,7 @@
   #attachments img.zoomable { cursor: zoom-in; }
   #attachments .attach-x { position: absolute; top: -6px; right: -6px; width: 20px; height: 20px; display: grid; place-items: center; padding: 0; border: 1px solid var(--line); border-radius: 50%; background: var(--surface); color: var(--ink); font-size: 11px; cursor: pointer; }
   #attachments .attach-x:hover { background: var(--hover); }
-  form textarea { flex: 1; resize: none; min-height: 44px; height: 44px; padding: 11px 0; border: 0; outline: 0; background: none; color: inherit; font: inherit; }
+  form textarea { flex: 1; resize: none; min-height: 44px; height: 44px; padding: 11px 0; border: 0; outline: 0; background: none; color: inherit; font: inherit; font-size: var(--chat-size, 14px); }
   form textarea:focus-visible { outline: none; }
   form textarea::placeholder { color: var(--faint); }
   #send { width: 36px; height: 36px; margin: 4px 0; display: grid; place-items: center; padding: 0; background: var(--ink); border-color: var(--ink); color: var(--surface); }
@@ -510,11 +544,6 @@
   .avatar-palette { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
   .avatar-swatch { width: 18px; height: 18px; padding: 0; border: 1px solid rgb(0 0 0 / .08); border-radius: 5px; }
   .avatar-swatch.selected { box-shadow: 0 0 0 2px var(--surface), 0 0 0 3.5px var(--ink); }
-  .probe-results { padding: 10px 20px; border-top: 1px solid var(--line); background: var(--bg); max-height: 30vh; overflow-y: auto; display: grid; gap: 6px; font-size: 13px; flex: none; }
-  .probe-row b { margin-right: 6px; }
-  .probe-row.good b { color: var(--ok); }
-  .probe-row.bad b { color: var(--danger); }
-  .probe-err { margin-top: 2px; font: 12px var(--mono); color: var(--muted); white-space: pre-wrap; word-break: break-word; }
   .dfoot { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 12px 20px; border-top: 1px solid var(--line); flex: none; }
   #err { flex: 1; color: var(--danger); font-weight: 500; font-size: 13px; }
   .proj-settings-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 13px; }
@@ -621,7 +650,7 @@
   <h3>Không gian</h3>
   <div id="projects"></div>
   <div class="nav-foot">
-    <button id="about-btn" type="button" title="Giới thiệu và các thay đổi" hidden><span id="foot-version"></span><span id="foot-author"></span></button>
+    <button id="app-settings-btn" class="box press btn" type="button" title="Cài đặt chung: CLI agent, giới thiệu"><i data-icon="gear" class="lead"></i>Cài đặt</button>
     <button id="theme-btn" class="box press icon" type="button"></button>
   </div>
 </nav>
@@ -789,10 +818,7 @@
       <div id="editors" class="settings-editors"></div>
     </div>
   </div>
-  <div id="probe-results" class="probe-results" aria-live="polite" hidden></div>
   <div class="dfoot">
-    <button id="add" class="box press btn">+ Thêm agent</button>
-    <button id="probe" class="box press btn" title="Gửi một câu ngắn tới từng agent để kiểm tra CLI, tài khoản, model và dịch vụ (tốn rất ít token)">Kiểm tra kết nối</button>
     <button id="resetAll" class="box press btn danger" title="Mọi agent bắt đầu phiên mới ở lượt tới">Làm mới mọi phiên</button>
     <span id="err"></span>
     <button id="cancel" class="box press btn">Đóng</button>
@@ -850,13 +876,89 @@
   <input id="switcher-input" placeholder="Chuyển tới không gian…" autocomplete="off" spellcheck="false" aria-controls="switcher-list">
   <div id="switcher-list" class="switcher-list" role="listbox"></div>
 </dialog>
-<dialog id="about" class="box about-dialog" aria-labelledby="about-title">
-  <div class="dhead about-head">
-    <img src="build/icon.svg" alt="">
-    <div><h2 id="about-title">Agent Chat</h2><small id="about-sub"></small></div>
-    <button id="about-close" class="box press btn sm" type="button">Đóng</button>
+<dialog id="app-settings" class="box app-settings" aria-labelledby="app-settings-title">
+  <div class="dhead app-settings-head">
+    <div><h2 id="app-settings-title">Cài đặt</h2><small>Dùng chung cho mọi không gian</small></div>
+    <button id="app-settings-close" class="box press btn sm" type="button">Đóng</button>
   </div>
-  <div id="about-body" class="about-body"></div>
+  <div class="settings-body">
+    <aside class="settings-sidebar">
+      <input id="app-settings-search" class="f" type="search" placeholder="Tìm cài đặt…" autocomplete="off" spellcheck="false" aria-label="Tìm cài đặt">
+      <div id="app-settings-nav" class="settings-nav-section" role="navigation" aria-label="Mục cài đặt">
+        <button type="button" class="settings-nav-item" data-pane="font"><span class="settings-nav-icon"><i data-icon="type"></i></span><span class="settings-nav-label">Font chữ</span></button>
+        <button type="button" class="settings-nav-item" data-pane="agent"><span class="settings-nav-icon"><i data-icon="terminal"></i></span><span class="settings-nav-label">Agent</span></button>
+        <button type="button" class="settings-nav-item" data-pane="mcp"><span class="settings-nav-icon"><i data-icon="plug"></i></span><span class="settings-nav-label">MCP</span><span class="settings-nav-soon">sắp có</span></button>
+        <button type="button" class="settings-nav-item" data-pane="skill"><span class="settings-nav-icon"><i data-icon="spark"></i></span><span class="settings-nav-label">Skill</span><span class="settings-nav-soon">sắp có</span></button>
+        <button type="button" class="settings-nav-item" data-pane="language"><span class="settings-nav-icon"><i data-icon="globe"></i></span><span class="settings-nav-label">Ngôn ngữ</span></button>
+        <button type="button" class="settings-nav-item" data-pane="about"><span class="settings-nav-icon"><i data-icon="info"></i></span><span class="settings-nav-label">Giới thiệu</span></button>
+      </div>
+    </aside>
+    <div class="settings-content">
+      <section class="settings-pane" data-pane="font" data-keys="font phông kiểu chữ typeface">
+        <div class="settings-card box">
+          <div class="settings-card-hdr"><h3>Font chữ</h3></div>
+          <div class="set-row" data-keys="font family phông kiểu chữ typeface">
+            <label for="font-family">Font giao diện</label>
+            <div class="set-inline"><select id="font-family" class="f"></select></div>
+            <div class="font-preview">Agent Chat · Nhóm agent trong một khung chat — ắ ổ ữ đ 0123456789</div>
+          </div>
+          <div class="set-row" data-keys="font size cỡ chữ kích thước to nhỏ">
+            <label for="font-size">Cỡ chữ tin nhắn</label>
+            <div class="set-inline"><input id="font-size" type="range" min="12" max="20" step="1"><span id="font-size-value" class="set-value"></span></div>
+            <small>Tin nhắn và ô soạn tin. Thu phóng cả giao diện: ⌘+ / ⌘−</small>
+          </div>
+          <div class="set-row" data-keys="mặc định reset khôi phục"><div><button id="font-reset" class="box press btn sm" type="button">Khôi phục mặc định</button></div></div>
+        </div>
+      </section>
+      <section class="settings-pane" data-pane="agent" data-keys="agent cli">
+        <div class="settings-card box">
+          <div class="settings-card-hdr cli-hdr">
+            <div><h3>CLI Agent</h3><small>File chạy của từng CLI và tài khoản đang đăng nhập</small></div>
+            <button id="cli-scan" class="box press btn sm" type="button" title="Tìm lại claude, codex, agy trong PATH và các thư mục cài đặt thường gặp">Quét</button>
+            <button id="cli-check" class="box press btn sm" type="button">Kiểm tra kết nối</button>
+          </div>
+          <div class="set-row" data-keys="cli claude codex agy đường dẫn path file chạy quét scan thêm thủ công kiểm tra kết nối đăng nhập login tài khoản phiên bản version">
+            <div id="cli-list" class="cli-list"></div>
+            <div class="cli-list cli-soon">
+              <div class="cli-row-head"><b>gemini</b><span class="cli-status">Gemini CLI · Google</span><span class="settings-nav-soon">sắp có</span></div>
+              <div class="cli-row-head"><b>qwen</b><span class="cli-status">Qwen Code · Alibaba</span><span class="settings-nav-soon">sắp có</span></div>
+              <div class="cli-row-head"><b>kimi</b><span class="cli-status">Kimi CLI · Moonshot AI</span><span class="settings-nav-soon">sắp có</span></div>
+              <div class="cli-row-head"><b>copilot</b><span class="cli-status">GitHub Copilot CLI</span><span class="settings-nav-soon">sắp có</span></div>
+              <div class="cli-row-head"><b>cursor-agent</b><span class="cli-status">Cursor CLI</span><span class="settings-nav-soon">sắp có</span></div>
+            </div>
+          </div>
+        </div>
+      </section>
+      <section class="settings-pane" data-pane="mcp" data-keys="mcp server công cụ tool">
+        <div class="settings-card box"><div class="soon"><i data-icon="plug"></i><b>MCP</b>Quản lý MCP server dùng chung cho các agent. Đang phát triển.</div></div>
+      </section>
+      <section class="settings-pane" data-pane="skill" data-keys="skill kỹ năng">
+        <div class="settings-card box"><div class="soon"><i data-icon="spark"></i><b>Skill</b>Quản lý skill dùng chung cho các agent. Đang phát triển.</div></div>
+      </section>
+      <section class="settings-pane" data-pane="language" data-keys="language ngôn ngữ">
+        <div class="settings-card box">
+          <div class="settings-card-hdr"><h3>Ngôn ngữ</h3></div>
+          <div class="set-row" data-keys="language ngôn ngữ giao diện tiếng việt english tiếng anh">
+            <label for="ui-language">Ngôn ngữ giao diện</label>
+            <div class="set-inline"><select id="ui-language" class="f"><option value="vi">Tiếng Việt</option><option value="en" disabled>English · sắp có</option></select></div>
+          </div>
+        </div>
+      </section>
+      <section class="settings-pane" data-pane="about" data-keys="giới thiệu about">
+        <div class="settings-card box">
+          <div class="set-row" data-keys="phiên bản version tác giả author giấy phép license mit github mã nguồn">
+            <div class="about-row">
+              <img src="build/icon.svg" alt="">
+              <div><b id="app-version">Agent Chat</b><small id="app-author"></small></div>
+            </div>
+            <div><button id="about-repo" class="box press btn sm" type="button">Mã nguồn trên GitHub</button></div>
+          </div>
+          <div class="set-row" data-keys="các thay đổi changelog lịch sử phiên bản"><div class="set-label">Các thay đổi</div><div id="about-body" class="about-body"></div></div>
+        </div>
+      </section>
+      <div id="app-settings-empty" class="settings-empty" hidden>Không có cài đặt nào khớp</div>
+    </div>
+  </div>
 </dialog>
 <dialog id="timeline" class="box timeline-dialog" aria-labelledby="timeline-title">
   <div class="dhead timeline-head">

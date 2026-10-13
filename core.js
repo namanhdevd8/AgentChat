@@ -358,6 +358,10 @@ function parse(cli, out, context = {}) {
 }
 for (const cli of Object.values(CLI)) cli.parse = function (out, context) { return parse(this, out, context) }
 
+// Each CLI's executable: what main sets (the user's pick in Cài đặt, else the first a scan finds); unset → by name on PATH
+const CLI_BINS = ['claude', 'codex', 'agy']
+let cliFiles = {}
+
 // Mirrors the shell aliases: "codex2" = codex with CODEX_HOME=~/.codex2, "claude2" = claude with CLAUDE_CONFIG_DIR=~/.claude2,
 // plain "claude" runs with CLAUDE_CONFIG_DIR unset.
 function account(name) {
@@ -366,7 +370,7 @@ function account(name) {
   const env = { ...process.env }, home = path.join(os.homedir(), '.' + bin + n)
   if (bin === 'codex') env.CODEX_HOME = home
   if (bin === 'claude') { if (n) env.CLAUDE_CONFIG_DIR = home; else delete env.CLAUDE_CONFIG_DIR }
-  return { bin, env, home }
+  return { bin, env, home, file: cliFiles[bin] || bin }
 }
 
 // ---- existing CLI sessions of a project folder, so an agent can adopt one ----
@@ -447,12 +451,77 @@ async function models(name) {
     } catch { return { models: [], efforts: ['low', 'medium', 'high', 'xhigh'] } }
   }
   if (acc?.bin === 'agy') {
-    agyModels.list ??= promisify(execFile)('agy', ['models'], { env: acc.env, timeout: 30000 })
+    agyModels.list ??= promisify(execFile)(acc.file, ['models'], { env: acc.env, timeout: 30000 })
       .then(({ stdout }) => stdout.split('\n').map(l => l.split('\t')).filter(p => p.length === 2).map(([id, label]) => ({ id, label })))
       .catch(() => (delete agyModels.list, []))
     return { models: await agyModels.list, efforts: ['low', 'medium', 'high'] }
   }
   return { models: [] }
+}
+
+function setCliPaths(map) {
+  cliFiles = Object.fromEntries(CLI_BINS.filter(bin => typeof map?.[bin] === 'string' && path.isAbsolute(map[bin])).map(bin => [bin, map[bin]]))
+  delete agyModels.list // another agy may list other models
+}
+
+// Where installers put the CLIs besides PATH, which an app opened from Finder may lack: npm prefixes, Homebrew, nvm, bun…
+function cliDirs(env) {
+  const home = os.homedir(), nvm = path.join(home, '.nvm', 'versions', 'node')
+  let versions = []
+  try { versions = fs.readdirSync(nvm).sort().reverse().map(v => path.join(nvm, v, 'bin')) } catch {}
+  return [...(env.PATH || env.Path || '').split(path.delimiter).filter(Boolean),
+    ...['.local/bin', '.claude/local', '.npm-global/bin', '.bun/bin', '.volta/bin', '.yarn/bin', 'Library/pnpm'].map(d => path.join(home, d)),
+    ...(isWin ? [env.APPDATA && path.join(env.APPDATA, 'npm')].filter(Boolean) : ['/opt/homebrew/bin', '/usr/local/bin']), ...versions]
+}
+// Every executable of each CLI, PATH order first (the one a spawn by name would pick); one entry per real file
+function findClis(env = process.env) {
+  const exts = isWin ? (env.PATHEXT || '.COM;.EXE;.BAT;.CMD').split(';').filter(Boolean) : ['']
+  const found = Object.fromEntries(CLI_BINS.map(bin => [bin, []])), seen = new Set()
+  for (const dir of cliDirs(env)) for (const bin of CLI_BINS) for (const ext of exts) {
+    const file = path.join(dir, bin + ext)
+    try {
+      if (!fs.statSync(file).isFile()) continue
+      if (!isWin) fs.accessSync(file, fs.constants.X_OK)
+      const real = fs.realpathSync(file)
+      if (!seen.has(real)) { seen.add(real); found[bin].push(file) }
+    } catch {}
+  }
+  return found
+}
+
+// A short call (--version, login status) through the same spawn as a turn, so a Windows shim works here too
+function cliOutput(file, args, env, timeoutMs = 15000) {
+  return new Promise(resolve => {
+    let out = '', child
+    try { child = spawnCli(file, args, { env, stdio: ['ignore', 'pipe', 'pipe'] }) } catch (e) { return resolve({ code: null, out, error: e.message }) }
+    const timer = setTimeout(() => { child.kill(); resolve({ code: null, out, error: `Quá ${timeoutMs / 1000} giây không trả lời` }) }, timeoutMs)
+    for (const stream of [child.stdout, child.stderr]) stream.on('data', d => { out = (out + d).slice(-8192) })
+    child.on('error', e => { clearTimeout(timer); resolve({ code: null, out, error: e.code === 'ENOENT' ? 'Không tìm thấy file chạy' : e.message }) })
+    child.on('close', code => { clearTimeout(timer); resolve({ code, out: out.trim(), error: null }) })
+  })
+}
+// Cài đặt › CLI Agent: each CLI's version, and whether each account is signed in. agy has no status command: listing
+// its models needs both the service and a login.
+const LOGIN = {
+  claude: { args: ['auth', 'status'], ok: out => { const j = JSON.parse(out); return j.loggedIn ? j.email || j.authMethod || 'đã đăng nhập' : null } },
+  codex: { args: ['login', 'status'], ok: out => out.split('\n').find(l => /^logged in/i.test(l)) },
+  agy: { args: ['models'], ok: out => { const n = out.split('\n').filter(l => l.includes('\t')).length; return n ? `${n} model` : null } },
+}
+async function checkClis(names = accounts()) {
+  const accs = names.map(name => [name, account(name)]).filter(([, acc]) => acc)
+  const version = async bin => {
+    const acc = account(bin), r = await cliOutput(acc.file, ['--version'], acc.env)
+    return [bin, r.error || r.code ? { file: acc.file, error: r.error || r.out.slice(-200) || `exit ${r.code}` } : { file: acc.file, version: r.out.split('\n')[0].slice(0, 80) }]
+  }
+  const login = async ([name, acc]) => {
+    const r = await cliOutput(acc.file, LOGIN[acc.bin].args, acc.env, 30000)
+    let detail = null
+    try { detail = r.error ? null : LOGIN[acc.bin].ok(r.out) } catch {}
+    return [name, detail ? { ok: true, detail: String(detail).slice(0, 120) }
+      : { ok: false, error: r.error || (r.code === 0 || /loggedIn|not logged in/i.test(r.out) ? 'Chưa đăng nhập' : r.out.slice(-200) || `exit ${r.code}`) }]
+  }
+  const [bins, logins] = await Promise.all([Promise.all([...new Set(accs.map(([, acc]) => acc.bin))].map(version)), Promise.all(accs.map(login))])
+  return { bins: Object.fromEntries(bins), accounts: Object.fromEntries(logins) }
 }
 
 // The model a turn ran on, as the chat header shows it: claude reports it ("claude-opus-5-5" → "opus-5-5"); codex only
@@ -2081,7 +2150,7 @@ function exec(dir, agent, session, { signal, onProgress, onSession, onSpawn, cos
     const viaStdin = !!cli.stdinArgs
     let c
     try {
-      c = spawnCli(acc.bin, viaStdin ? cli.stdinArgs(session?.id, agent) : cli.args(p, session?.id, agent),
+      c = spawnCli(acc.file, viaStdin ? cli.stdinArgs(session?.id, agent) : cli.args(p, session?.id, agent),
         { cwd, env: acc.env, detached: true, stdio: [viaStdin ? 'pipe' : 'ignore', 'pipe', 'pipe'] })
       if (viaStdin) { c.stdin.on('error', () => {}); c.stdin.end(p) }
     }
@@ -2110,7 +2179,7 @@ function exec(dir, agent, session, { signal, onProgress, onSession, onSpawn, cos
       } catch (e) { childError ||= e }
     })
     c.stderr.on('data', d => { se = (se + d).slice(-8192) })
-    c.on('error', e => { childError = e })
+    c.on('error', e => { childError = e.code === 'ENOENT' ? new Error(`Không tìm thấy ${acc.file === acc.bin ? acc.bin : acc.file}: chọn đường dẫn trong Cài đặt › Agent`) : e })
     let aborting = false
     const abort = () => {
       if (aborting) return
@@ -2173,7 +2242,7 @@ function runCommand(dir, command, { signal, onProgress, onSpawn, agent } = {}) {
     const options = { cwd: dir, shell: false, detached: true, stdio: ['ignore', 'pipe', 'pipe'] }
     // ponytail: :workspace has no network even for codex agents granted network access; use a network-enabled
     // permission profile here if checks ever need to download
-    try { child = sandbox ? spawnCli(sandbox.bin, ['sandbox', '--permission-profile', ':workspace', '-C', dir, '--', ...sandboxArgv(executable, args, sandbox.env)],
+    try { child = sandbox ? spawnCli(sandbox.file, ['sandbox', '--permission-profile', ':workspace', '-C', dir, '--', ...sandboxArgv(executable, args, sandbox.env)],
       { ...options, env: sandbox.env }) : spawnCli(executable, args, options) }
     catch (e) { return resolve(failed(sandbox && e.code === 'ENOENT' ? missingCodex : e.message)) }
     let remaining = 32768, truncated = false, childError, killError, termination = Promise.resolve()
@@ -2228,21 +2297,6 @@ const emptyReply = agent => `Bạn chưa gửi tin trả lời. Hãy gửi tin t
 // What each CLI says when a --resume id it cannot open: claude "No conversation found with session ID",
 // codex "no rollout found for thread id". agy silently starts a new conversation instead.
 const MISSING_SESSION = /no conversation found|no rollout found|conversation not found|session not found/i
-
-// Connection test: one tiny turn through exactly the path a real turn takes (account env, model/effort/permission
-// flags, prompt over stdin, stream parser) in a throwaway session. Catches a missing CLI, a logged-out account, a bad
-// model or a down service before a real task hits it.
-async function probe(dir, agent, { timeoutMs = 120000 } = {}) {
-  const started = performance.now(), signal = AbortSignal.timeout(timeoutMs)
-  let r
-  try { r = await exec(dir, { ...agent, resume: false }, null, { signal, seen: 0, cwd: dir,
-    promptText: 'Kiểm tra kết nối từ Agent Chat. Không làm gì khác, chỉ trả lời đúng một chữ: OK' }) }
-  catch (e) { r = { error: e.message } }
-  const ms = Math.round(performance.now() - started), text = String(r.text || '').trim()
-  if (signal.aborted) return { ok: false, ms, error: `Quá ${timeoutMs / 1000} giây không có trả lời` }
-  if (r.error) return { ok: false, ms, error: r.error }
-  return text ? { ok: true, ms, text: text.slice(0, 80) } : { ok: false, ms, error: 'CLI chạy xong nhưng không trả lời gì' }
-}
 
 async function run(dir, agent, options = {}) {
   const started = performance.now(), { signal, onProgress, onSpawn } = options
@@ -2395,10 +2449,10 @@ async function run(dir, agent, options = {}) {
     orphanState: r.orphanState || orphanState, pgid: r.pgid || pgid }
 }
 
-module.exports = { CHAT_DIR, chat, chatName, useBox, boxes, createBox, CLI, account, accounts, cliSessions, models, init, atomicWrite, setTrustFile, configTrust, trustConfig, revertConfig, appendLogIndexed, getLogIndex, invalidateLogIndex, logPage, searchLog, needsYou, timeline, logTotals,
+module.exports = { CHAT_DIR, chat, chatName, useBox, boxes, createBox, CLI, CLI_BINS, account, accounts, setCliPaths, findClis, checkClis, cliSessions, models, init, atomicWrite, setTrustFile, configTrust, trustConfig, revertConfig, appendLogIndexed, getLogIndex, invalidateLogIndex, logPage, searchLog, needsYou, timeline, logTotals,
   normalizeProjectSettings, projectSettings, writeProjectSettings, summaryBatch, acceptSummary, materializeSummary, recoverSummary,
   team, normalizeTeam, saveTeam, teamRevision, normalizePermissions, permissionRules, normalizePermissionDenials,
   timeoutMinutes, sessionTokenLimit, sessions, setSession, sessionRotationPending, readHandoff, writeHandoff,
-  mentions, files, normalizeScope, ownsList, probe, winArg, spawnCli, shimTarget, normalizeAllowedCommands, scopeAllows, scopeLocks, lockConflict, snapshot, changedPaths, promptIndexed, run, runCommand, groupAlive,
+  mentions, files, normalizeScope, ownsList, winArg, spawnCli, shimTarget, normalizeAllowedCommands, scopeAllows, scopeLocks, lockConflict, snapshot, changedPaths, promptIndexed, run, runCommand, groupAlive,
   migrateTaskScope, parseTaskDefinitions, taskBoardIndexed, parseTaskStatusBlock, parseRunCommandBlock, parseHandoffBlock, validateTaskChanges,
   decodedPath, resolveProjectFile, readProjectFile, readBoundedFile, isSvgBytes, imageType, IMAGE_MIME, IMAGE_EXTENSIONS, saveImage, readImage, modelLabel }

@@ -74,6 +74,9 @@ cần bạn quyết sẽ hiện ở một chỗ duy nhất là mục **Cần b�
 - Mở Markdown, file văn bản, mã nguồn, ảnh và SVG từ link trong chat.
 - Xem trước HTML trong sandbox: không chạy JavaScript, không gửi request mạng.
 
+**Cài đặt**
+- Cửa sổ cài đặt có ô tìm kiếm: font giao diện và cỡ chữ tin nhắn, vị trí cài từng CLI, tài khoản nào đã đăng nhập.
+
 ## Cách hoạt động
 
 ```mermaid
@@ -108,9 +111,11 @@ npm install
 npm start
 ```
 
-1. Bấm **+** ở sidebar và chọn folder dự án. App tạo thư mục `.chat/` trong folder đó.
-2. Mở **Cài đặt nhóm** (⌘,) để thêm agent. Đặt tên, chọn CLI, ghi vai trò và phạm vi file cho từng agent.
-3. Gửi tin nhắn, ví dụ `@pm lên kế hoạch trang đăng nhập`.
+1. Mở **Cài đặt** ở cuối sidebar. Mục **Agent** cho biết app tìm thấy `claude`, `codex`, `agy` ở đâu, phiên bản nào
+   và từng tài khoản đã đăng nhập chưa. Bấm **Quét** để tìm lại, hoặc **Thêm thủ công…** để chọn file chạy app chưa thấy.
+2. Bấm **+** ở sidebar và chọn folder dự án. App tạo thư mục `.chat/` trong folder đó.
+3. Mở **Cài đặt nhóm** (⌘,) để thêm agent. Đặt tên, chọn CLI, ghi vai trò và phạm vi file cho từng agent.
+4. Gửi tin nhắn, ví dụ `@pm lên kế hoạch trang đăng nhập`.
 
 ## Cấu hình nhóm
 
@@ -153,8 +158,8 @@ nhận cấu hình mới trước khi chạy lượt tiếp theo.
 - **Trong folder dự án:** `.chat/` chứa log, bảng task, `memory.md`, `agents.json`, ghi chú bàn giao và `attachments/`
   (ảnh gửi trong chat). Box thứ hai của cùng folder dùng `.chat2/`, cứ thế tiếp tục. Hãy thêm `.chat*` vào `.gitignore`;
   app tự làm việc này khi khởi tạo Git.
-- **Trong thư mục dữ liệu của app:** danh sách không gian, cấu hình đã tin, các mục đã ẩn, kích thước cửa sổ, worktree của
-  agent và sổ đăng ký merge. Trên macOS là `~/Library/Application Support/Agent Chat`.
+- **Trong thư mục dữ liệu của app:** danh sách không gian, cấu hình đã tin, đường dẫn CLI, các mục đã ẩn, kích thước cửa
+  sổ, worktree của agent và sổ đăng ký merge. Trên macOS là `~/Library/Application Support/Agent Chat`.
 
 ## Mô hình bảo mật
 
@@ -211,7 +216,7 @@ Bản build chưa ký số. Trên macOS, lần đầu mở bằng chuột phải
 Mỗi lần phát hành:
 1. Nâng phiên bản: `npm version minor --no-git-tag-version` cho tính năng mới, `patch` cho bản sửa lỗi.
 2. Thêm mục cho phiên bản đó vào [`CHANGELOG.md`](CHANGELOG.md). `npm run check` báo lỗi nếu thiếu.
-3. Build. Trong app, danh sách thay đổi nằm ở mục Giới thiệu.
+3. Build. Trong app, danh sách thay đổi nằm ở Cài đặt › Giới thiệu.
 
 Icon của app là `build/icon.svg`. Sửa xong thì render lại `build/icon.png` cỡ 1024px; electron-builder tự tạo `.icns` và
 `.ico` từ file đó:

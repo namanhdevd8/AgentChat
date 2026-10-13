@@ -1,7 +1,7 @@
 {
   "name": "agent-chat",
   "productName": "Agent Chat",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
@@ -50,5 +50,6 @@
   },
   "description": "Nhóm agent AI (Claude, Codex, agy) làm việc chung trong một box chat theo dự án",
   "author": "Dam Huy Nam Anh",
-  "license": "MIT"
+  "license": "MIT",
+  "homepage": "https://github.com/namanhdevd8/AgentChat"
 }

@@ -2221,7 +2221,71 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
     console.log('ok (boxes)')
   }
 }
-logChecks().then(needsChecks).then(timelineChecks).then(taskChecks).then(auditChecks).then(viewerChecks).then(runChecks).then(sprint7Checks).then(sprint8Checks).then(sprint9Checks).then(sprint6Checks).then(rendererChecks).then(rendererFileChecks).then(rendererS9Checks).then(rendererS10Checks).then(mainChecks).then(() => console.log('ok'), e => { console.error(e); process.exit(1) })
+// Cài đặt › CLI Agent: a scan lists each real file once, PATH first and executables only; a check reads the version and
+// each account's login through the picked file; a turn whose file is gone points to the setting
+async function cliPathChecks() {
+  const a = fs.mkdtempSync(path.join(os.tmpdir(), 'cli-a-')), b = fs.mkdtempSync(path.join(os.tmpdir(), 'cli-b-'))
+  const fake = (d, name, body) => fs.writeFileSync(path.join(d, name), `#!${process.execPath}\nconst a = process.argv.slice(2).join(' ')\n${body}`, { mode: 0o755 })
+  fake(a, 'claude', `if (a === '--version') console.log('9.9.9 (Claude Code)')
+if (a === 'auth status') { console.log(JSON.stringify({ loggedIn: !process.env.CLAUDE_CONFIG_DIR, email: 'me@x' })); process.exit(process.env.CLAUDE_CONFIG_DIR ? 1 : 0) }`)
+  fs.symlinkSync(path.join(a, 'claude'), path.join(b, 'claude'))
+  fake(b, 'codex', `if (a === '--version') console.log('codex-cli 1.0')
+if (a === 'login status') { const ok = require('path').basename(process.env.CODEX_HOME) === '.codex'; console.log(ok ? 'Logged in using ChatGPT' : 'Not logged in'); process.exit(ok ? 0 : 1) }`)
+  fs.writeFileSync(path.join(b, 'agy'), 'not executable')
+  const found = core.findClis({ PATH: [a, b].join(path.delimiter) })
+  assert.deepStrictEqual([found.claude[0], found.codex[0], found.claude.includes(path.join(b, 'claude')), found.agy.includes(path.join(b, 'agy'))],
+    [path.join(a, 'claude'), path.join(b, 'codex'), false, false])
+  core.setCliPaths({ claude: path.join(b, 'claude'), codex: path.join(b, 'codex'), agy: path.join(a, 'gone'), extra: '/x', bad: 'relative' })
+  assert.deepStrictEqual([core.account('claude2').file, core.account('agy').file], [path.join(b, 'claude'), path.join(a, 'gone')])
+  try {
+    const r = await core.checkClis(['claude', 'claude2', 'codex', 'codex2', 'agy'])
+    assert.deepStrictEqual(r.bins.claude, { file: path.join(b, 'claude'), version: '9.9.9 (Claude Code)' })
+    assert.deepStrictEqual([r.bins.codex.version, r.bins.agy.error], ['codex-cli 1.0', 'Không tìm thấy file chạy'])
+    assert.deepStrictEqual(r.accounts, { claude: { ok: true, detail: 'me@x' }, claude2: { ok: false, error: 'Chưa đăng nhập' },
+      codex: { ok: true, detail: 'Logged in using ChatGPT' }, codex2: { ok: false, error: 'Chưa đăng nhập' }, agy: { ok: false, error: 'Không tìm thấy file chạy' } })
+    const d = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-cli-path-')); core.init(d)
+    const p = await core.run(d, core.normalizeTeam(d, [{ name: 'qa', cli: 'agy', role: 'QA' }])[0])
+    assert.ok(p.outcome === 'error' && p.text.includes('Cài đặt › Agent'), p.text)
+  } finally { core.setCliPaths({}) }
+  assert.strictEqual(core.account('claude').file, 'claude') // unset → by name on PATH, as before
+  console.log('ok (cli paths)')
+}
+
+// Cài đặt chung: the search narrows sections and rows (accents optional), and moves off a section it hides
+function appSettingsChecks() {
+  const ui = fs.readFileSync(path.join(__dirname, 'renderer.js'), 'utf8'), vm = require('vm')
+  const code = ui.slice(ui.indexOf('let appPane = '), ui.indexOf('function openAppSettings('))
+  const row = (text, keys = '') => ({ textContent: text, dataset: { keys }, hidden: false })
+  const sections = {
+    font: { label: 'Font chữ', keys: 'font phông', rows: [row('Font giao diện', 'typeface'), row('Cỡ chữ tin nhắn', 'font size')] },
+    agent: { label: 'Agent', keys: 'agent cli', rows: [row('claude 2.1 codex agy', 'đường dẫn path')] },
+    mcp: { label: 'MCPsắp có', keys: 'mcp server', rows: [] },
+  }
+  const panes = Object.entries(sections).map(([name, s]) => ({ dataset: { pane: name, keys: s.keys }, hidden: false, querySelectorAll: () => s.rows }))
+  const navs = Object.fromEntries(Object.entries(sections).map(([name, s]) => [name, { textContent: s.label, hidden: false, active: false,
+    classList: { toggle(c, on) { navs[name].active = on } } }]))
+  const search = { value: '' }, empty = { hidden: true }, scans = []
+  const ctx = { fold: s => s.normalize('NFD').replace(/\p{M}/gu, '').replace(/đ/gi, 'd').toLowerCase(), cliState: null, scanClis: () => scans.push(1),
+    renderFont() {}, about: null, aboutShown: false, $: s => s === '#app-settings-search' ? search : empty,
+    document: { querySelectorAll: () => panes, querySelector: s => navs[/data-pane="(\w+)"/.exec(s)[1]] } }
+  vm.createContext(ctx); vm.runInContext(code + '\n;this.filter = filterAppSettings; this.pane = () => appPane', ctx)
+  const shown = () => panes.filter(p => !p.hidden).map(p => p.dataset.pane), navShown = () => Object.keys(navs).filter(n => !navs[n].hidden)
+  ctx.filter()
+  assert.deepStrictEqual([shown(), navShown(), empty.hidden], [['font'], ['font', 'agent', 'mcp'], true])
+  search.value = 'co chu'; ctx.filter() // no accents typed, only the size row
+  assert.deepStrictEqual([shown(), navShown(), sections.font.rows.map(r => r.hidden)], [['font'], ['font'], [true, false]])
+  search.value = 'CODEX'; ctx.filter() // the section shown no longer matches: move to the one that does, which scans
+  assert.deepStrictEqual([shown(), navShown(), ctx.pane(), navs.agent.active, scans.length], [['agent'], ['agent'], 'agent', true, 1])
+  search.value = 'font'; ctx.filter() // a section's own name shows all of it
+  assert.deepStrictEqual([shown(), navShown(), sections.font.rows.map(r => r.hidden)], [['font'], ['font'], [false, false]])
+  search.value = 'zzz'; ctx.filter()
+  assert.deepStrictEqual([shown(), navShown(), empty.hidden], [[], [], false])
+  search.value = ''; ctx.filter()
+  assert.deepStrictEqual([shown(), navShown()], [['font'], ['font', 'agent', 'mcp']])
+  console.log('ok (app settings search)')
+}
+
+logChecks().then(needsChecks).then(timelineChecks).then(taskChecks).then(auditChecks).then(viewerChecks).then(runChecks).then(cliPathChecks).then(appSettingsChecks).then(sprint7Checks).then(sprint8Checks).then(sprint9Checks).then(sprint6Checks).then(rendererChecks).then(rendererFileChecks).then(rendererS9Checks).then(rendererS10Checks).then(mainChecks).then(() => console.log('ok'), e => { console.error(e); process.exit(1) })
 
 // PM creates a task and moves it in the same turn (no revision yet): "" is accepted only for PM on a todo task
 {
@@ -2278,8 +2342,8 @@ console.log('ok (windows args)')
   fs.writeFileSync(path.join(d, '.chat/agents.json'), JSON.stringify([{ name: 'x', cli: 'claude', role: 'r', sharedChat: '/', model: '--dangerously-skip-permissions' }]))
   const [x] = core.team(d)
   assert.strictEqual(x.sharedChat, undefined)
-  core.probe(d, x, { timeoutMs: 5000 }).then(r => {
-    assert.ok(!r.ok && /không hợp lệ/.test(r.error), JSON.stringify(r)) // rejected before anything is spawned
+  core.run(d, x).then(r => {
+    assert.ok(r.outcome === 'error' && /không hợp lệ/.test(r.text), JSON.stringify(r)) // rejected before anything is spawned
     console.log('ok (argv values)')
   }).catch(e => { console.error(e); process.exit(1) })
 }
