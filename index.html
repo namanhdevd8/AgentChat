@@ -176,8 +176,18 @@
   .sys::before { grid-column: 1; }
   .sys::after { grid-column: 3; }
   .sys > * { grid-column: 2; max-width: 640px; }
-  .sys > button, .sys > div:has(> button) { justify-self: center; margin-top: 6px; }
+  .sys > button:not(.sys-summary-btn), .sys > div:has(> button) { justify-self: center; margin-top: 6px; }
   .sys .usage { margin-top: 2px; }
+  .sys-time { display: block; font: 11px var(--mono); color: var(--faint); margin-top: 1px; }
+  button.sys-summary-btn {
+    border: 0; background: none; padding: 0; cursor: pointer; color: inherit; font: inherit; width: 100%;
+  }
+  .sys-summary-btn span {
+    padding: 2px 12px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface); color: var(--muted); font-size: 12px; font-weight: 500; display: inline-block;
+  }
+  .sys-summary-btn:hover span, .sys-summary-btn:focus-visible span {
+    background: var(--hover); color: var(--ink); border-color: var(--ink);
+  }
 
   /* file warning: thin strip, details on demand */
   .scope-warning { margin-top: 14px; border: 1px solid var(--warn-line); background: var(--warn-bg); color: var(--warn-ink); border-radius: 8px; font-size: 13px; }
@@ -232,13 +242,29 @@
   /* running agents, above the composer */
   #typing { max-height: 25vh; overflow-y: auto; margin: 0 24px; display: flex; flex-direction: column; gap: 2px; font: 12.5px/1.4 var(--mono); color: var(--muted); }
   #typing:not(:empty) { border-top: 1px solid var(--line); padding: 6px 0; }
+  .typing-row-wrap { display: flex; flex-direction: column; }
   .typing-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 28px; }
   .typing-lead { display: flex; align-items: center; gap: 10px; min-width: 0; }
   .typing-lead i { flex: none; width: 10px; height: 10px; border: 1.5px solid var(--agent); border-radius: 3px; animation: fill 1.4s ease-in-out infinite; }
   @keyframes fill { 50% { background: var(--agent); } }
+  .typing-label-btn {
+    appearance: none; -webkit-appearance: none; border: 0; background: none; padding: 0; cursor: pointer; color: inherit; font: inherit; text-align: left; min-width: 0; display: flex; align-items: center; border-radius: 4px;
+  }
+  .typing-label-btn:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
   .typing-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .typing-time { margin-left: auto; flex: none; color: var(--faint); font-variant-numeric: tabular-nums; }
   .typing-time.quiet { color: var(--warn-ink); }
+  .typing-detail-box {
+    margin: 4px 0 6px 20px; padding: 8px 10px; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; font-size: 12px;
+  }
+  .typing-detail-hdr {
+    display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; font-size: 11.5px; color: var(--muted);
+  }
+  .typing-detail-title { font-weight: 500; }
+  .typing-detail-trunc { color: var(--warn-ink); font-weight: 500; font-size: 11px; }
+  .typing-detail-pre {
+    margin: 0; padding: 6px 8px; background: var(--surface); border: 1px solid var(--line); border-radius: 4px; font: 11.5px/1.45 var(--mono); white-space: pre-wrap; word-break: break-all; max-height: 140px; overflow-y: auto;
+  }
 
   /* composer and mention popup */
   #form { position: relative; display: flex; align-items: flex-end; gap: 8px; margin: 4px 24px 18px; padding: 4px 4px 4px 14px; background: var(--surface); border-radius: 10px; transition: border-color .12s, box-shadow .12s; }
@@ -333,6 +359,15 @@
   .frow svg { width: 14px; height: 14px; color: var(--faint); }
   .frow:hover { background: var(--hover); }
   .frow span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .file-group { margin-top: 4px; }
+  .file-group-sum {
+    font: 500 11.5px/1.4 var(--mono); text-transform: lowercase; color: var(--muted); cursor: pointer; user-select: none; padding: 3px 0; display: flex; align-items: center; justify-content: space-between;
+  }
+  .file-group-sum::-webkit-details-marker { display: none; }
+  .file-group-sum:hover { color: var(--ink); }
+  .file-group-items { padding-left: 6px; }
+  #timeline-btn { display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 10px; font-size: 13px; font-weight: 500; white-space: nowrap; flex: none; border-radius: 6px; }
+  #timeline-btn svg { width: 15px; height: 15px; flex: none; }
   .none { font-size: 12.5px; color: var(--muted); padding: 2px 0; }
 
   /* in-app viewer dialog */
@@ -545,8 +580,9 @@
     </div>
     <div class="stack" id="stack"></div>
     <div id="member-popover" class="member-popover box" role="region" aria-label="Chi tiết thành viên" hidden></div>
-    <button id="timeline-btn" class="box press icon" title="Timeline: agent nào chạy lúc nào, bao lâu; chi phí của box" aria-label="Mở timeline và chi phí" hidden>
+    <button id="timeline-btn" class="box press btn sm" title="Timeline: agent nào chạy lúc nào, bao lâu; chi phí của box" aria-label="Timeline · Chi phí" hidden>
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M4 6h8M9 12h11M6 18h7"/></svg>
+      <span>Timeline · Chi phí</span>
     </button>
     <button id="gear" class="box press icon" title="Cài đặt nhóm của box này" hidden>
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>

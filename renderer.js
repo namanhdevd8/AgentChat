@@ -293,7 +293,9 @@ function syncActive(list) {
       blockedBy: r.blockedBy || [],
       chain: r.chain || null,
       startedAt: r.startedAt || Date.now(),
-      activeAt: r.activeAt || Date.now()
+      activeAt: r.activeAt || Date.now(),
+      detail: r.detail !== undefined ? r.detail : null,
+      detailTruncated: !!r.detailTruncated
     })
   }
 }
@@ -367,6 +369,7 @@ async function openProject(d, c = d === dir ? box : null) {
 
   const history = res.history
   seenMsgs = new Set()
+  openLogGroupSeqs.clear()
   const messages = history.messages.filter(m => firstSeen(history.generation, m.seq))
   logGeneration = history.generation
   logHasBefore = history.hasBefore
@@ -386,7 +389,7 @@ async function openProject(d, c = d === dir ? box : null) {
     if (ev.type === 'status') {
       const key = runKey(d, ev.name)
       if (ev.on) {
-        activeRuns.set(key, { name: ev.name, runId: ev.runId, label: 'đang khởi động…', stopping: false, phase: 'running', blockedBy: [], startedAt: Date.now(), activeAt: Date.now() })
+        activeRuns.set(key, { name: ev.name, runId: ev.runId, label: 'đang khởi động…', stopping: false, phase: 'running', blockedBy: [], startedAt: Date.now(), activeAt: Date.now(), detail: null, detailTruncated: false })
       } else {
         const cur = activeRuns.get(key)
         if (cur && (!ev.runId || cur.runId === ev.runId)) activeRuns.delete(key)
@@ -399,8 +402,11 @@ async function openProject(d, c = d === dir ? box : null) {
         if (ev.data.phase) cur.phase = ev.data.phase
         if (ev.data.blockedBy) cur.blockedBy = ev.data.blockedBy
         if (ev.data.stopping !== undefined) cur.stopping = !!ev.data.stopping
+        if (ev.data.chain !== undefined) cur.chain = ev.data.chain
         if (ev.data.label === 'đang dừng…') cur.stopping = true
         if (ev.data.startedAt) Object.assign(cur, { startedAt: ev.data.startedAt, activeAt: ev.data.activeAt })
+        cur.detail = ev.data.detail !== undefined ? ev.data.detail : null
+        cur.detailTruncated = !!ev.data.detailTruncated
       }
     } else if (ev.type === 'message') {
       // the log was rewritten while opening (e.g. a repaired tail): this history's seqs no longer match, start over
@@ -423,8 +429,7 @@ async function openProject(d, c = d === dir ? box : null) {
 
   last = null
   $('#log').replaceChildren(msgFragment(messages))
-  markDays()
-  trimLogWindow('append')
+  updateLogLayout('append')
   $('#log').scrollTop = $('#log').scrollHeight
   updateHeaderStats()
   renderTeam()
@@ -794,13 +799,13 @@ function renderEditors() {
     const toInp = field('input', toVal, v => { a.timeoutMinutes = v }, { type: 'number', min: '1', max: '1440', step: '1', className: 'f', style: 'width: 100px;' })
     to.append(toInp)
 
-    const rotLab = el('label', '', 'Ngưỡng xoay phiên (token vào)')
+    const rotLab = el('label', '', 'Ngưỡng xoay phiên (token ngữ cảnh)')
     const rotVal = (a.sessionTokenLimit != null && a.sessionTokenLimit !== '') ? a.sessionTokenLimit : 150000
     const rotInp = field('input', rotVal, v => { a.sessionTokenLimit = v }, {
       type: 'number', min: '0', step: '1', placeholder: '150000', className: 'f', style: 'width: 140px;',
-      title: 'Tự mở phiên mới khi token vào vượt ngưỡng. 0 = tắt.'
+      title: 'Tự mở phiên mới khi token ngữ cảnh vượt ngưỡng. 0 = tắt.'
     })
-    const rotNote = el('small', '', '0 = tắt. Áp dụng cho lượt kế tiếp.')
+    const rotNote = el('small', '', '0 = tắt. Áp dụng cho lượt kế tiếp khi có số đo ngữ cảnh.')
     rotNote.style.color = 'var(--muted)'
     rotLab.append(rotInp, rotNote)
     limitsRow.append(to, rotLab)
@@ -1443,8 +1448,28 @@ function retractButton(m) {
   return b
 }
 function markRetracted(seq) {
-  const body = document.querySelector(`#log [data-seq="${seq}"] .text`)
-  if (body) { body.className = 'text retracted'; body.replaceChildren('Bạn đã thu hồi tin này') }
+  const node = document.querySelector(`#log [data-seq="${seq}"]`)
+  if (node) {
+    node.dataset.groupable = '0'
+    const body = node.querySelector('.text')
+    if (body) { body.className = 'text retracted'; body.replaceChildren('Bạn đã thu hồi tin này') }
+    reflowLogGroups()
+  }
+}
+
+function isGroupableSystemMsg(m) {
+  if (!m || m.from !== 'system') return false
+  if (m.usage != null || m.error != null) return false
+  if (m.seq == null || !m.at || m.retracted) return false
+  if (m.kind === 'task-status-note') {
+    return typeof m.relatedRunId === 'string' && m.relatedRunId.trim().length > 0
+  }
+  if (m.kind === 'merge') {
+    return typeof m.queueId === 'string' && m.queueId.trim().length > 0 &&
+           typeof m.headSha === 'string' && m.headSha.trim().length > 0 &&
+           !m.error
+  }
+  return false
 }
 
 function createMsgElement(m) {
@@ -1454,6 +1479,7 @@ function createMsgElement(m) {
   if (m.kind === 'task-status') {
     const sys = el('div', 'sys')
     sys.append(el('div', '', m.text))
+    if (m.at) sys.append(el('time', 'sys-time', hhmm(m.at)))
     node = sys
   } else if (m.kind === 'scope-warning') {
     // one thin strip, collapsed: the file list is one click away
@@ -1472,6 +1498,7 @@ function createMsgElement(m) {
     const card = el('div', 'sys')
     const hdr = el('div', '', m.text)
     card.append(hdr)
+    if (m.at) card.append(el('time', 'sys-time', hhmm(m.at)))
     if (m.queueId && m.owner && ['CONFLICT', 'CHECK_FAILED', 'CHECK_MUTATED_TREE'].includes(m.error?.code)) {
       const repBtn = el('button', 'box press btn sm primary', `Gọi @${m.owner} sửa`)
       repBtn.type = 'button'
@@ -1589,6 +1616,7 @@ function createMsgElement(m) {
     const sys = el('div', 'sys')
     sys.append(renderMarkdown(m.text, { dir, fromFile: null, workspace: m.workspace || null }))
     if (usage) sys.append(usage)
+    if (m.at) sys.append(el('time', 'sys-time', hhmm(m.at)))
     // only main's own chain-stop record: its text is agent-influenced, and main refuses a second continue of the same chain
     if (m.kind === 'chain-stop') {
       const btnWrap = el('div')
@@ -1638,6 +1666,7 @@ function createMsgElement(m) {
     node.dataset.seq = m.seq
   }
   if (m.at) node.dataset.at = m.at
+  node.dataset.groupable = isGroupableSystemMsg(m) ? '1' : '0'
   return node
 }
 
@@ -1654,6 +1683,7 @@ function msgFragment(list) {
 
 // bumped by every full replace of the log window: a paging reply started before one belongs to a window that's gone
 let logWindow = 0
+const openLogGroupSeqs = new Set()
 
 function dayLabel(iso, now = new Date()) {
   const d = new Date(iso), days = Math.round((new Date(now.toDateString()) - new Date(d.toDateString())) / 864e5)
@@ -1674,13 +1704,229 @@ function markDays() {
   }
 }
 
+function getLogScrollAnchor() {
+  const log = $('#log')
+  if (!log || typeof log.getBoundingClientRect !== 'function') {
+    return { nearBottom: true }
+  }
+  const nearBottom = (log.scrollHeight - log.clientHeight - log.scrollTop) <= 48
+  if (nearBottom && !logHasAfter) {
+    return { nearBottom: true }
+  }
+  const logTop = log.getBoundingClientRect().top
+  const visible = [...(log.children || [])].find(c => {
+    if (c.hidden || c.id === 'empty' || typeof c.getBoundingClientRect !== 'function') return false
+    const r = c.getBoundingClientRect()
+    return r.bottom > logTop
+  })
+  if (visible) {
+    return {
+      nearBottom: false,
+      seq: visible.dataset?.seq ? Number(visible.dataset.seq) : null,
+      isSummary: visible.classList?.contains?.('sys-summary-btn'),
+      nextSeq: visible.classList?.contains?.('sys-summary-btn')
+        ? (visible.nextElementSibling?.dataset?.seq ? Number(visible.nextElementSibling.dataset.seq) : null)
+        : null,
+      offset: visible.getBoundingClientRect().top - logTop
+    }
+  }
+  return { nearBottom: false, scrollTop: log.scrollTop }
+}
+
+function restoreLogScrollAnchor(anchor) {
+  const log = $('#log')
+  if (!log || typeof log.getBoundingClientRect !== 'function') {
+    return
+  }
+  if (anchor.nearBottom && !logHasAfter) {
+    log.scrollTop = log.scrollHeight
+    return
+  }
+  const logTop = log.getBoundingClientRect().top
+  if (anchor.seq != null) {
+    const el = log.querySelector?.(`:scope > [data-seq="${anchor.seq}"]`)
+    if (el && !el.hidden && typeof el.getBoundingClientRect === 'function') {
+      log.scrollTop += (el.getBoundingClientRect().top - logTop) - anchor.offset
+      return
+    }
+    if (el && el.hidden) {
+      let prev = el.previousElementSibling
+      while (prev && !prev.classList?.contains?.('sys-summary-btn')) {
+        prev = prev.previousElementSibling
+      }
+      if (prev && !prev.hidden && typeof prev.getBoundingClientRect === 'function') {
+        log.scrollTop += (prev.getBoundingClientRect().top - logTop) - anchor.offset
+        return
+      }
+    }
+  }
+  if (anchor.isSummary && anchor.nextSeq != null) {
+    const nextEl = log.querySelector?.(`:scope > [data-seq="${anchor.nextSeq}"]`)
+    if (nextEl) {
+      let btn = nextEl.previousElementSibling
+      while (btn && !btn.classList?.contains?.('sys-summary-btn')) {
+        btn = btn.previousElementSibling
+      }
+      const target = (btn && !btn.hidden) ? btn : nextEl
+      if (target && !target.hidden && typeof target.getBoundingClientRect === 'function') {
+        log.scrollTop += (target.getBoundingClientRect().top - logTop) - anchor.offset
+        return
+      }
+    }
+  }
+  if (anchor.seq != null && typeof log.querySelectorAll === 'function') {
+    const all = [...log.querySelectorAll(':scope > [data-seq]')].filter(r => !r.hidden && typeof r.getBoundingClientRect === 'function')
+    if (all.length > 0) {
+      let closest = all[0]
+      let minDiff = Math.abs(Number(closest.dataset.seq) - anchor.seq)
+      for (const r of all) {
+        const diff = Math.abs(Number(r.dataset.seq) - anchor.seq)
+        if (diff < minDiff) { minDiff = diff; closest = r }
+      }
+      log.scrollTop += (closest.getBoundingClientRect().top - logTop) - anchor.offset
+      return
+    }
+  }
+  if (anchor.scrollTop != null) {
+    log.scrollTop = anchor.scrollTop
+  }
+}
+
+function reflowLogGroups() {
+  const log = $('#log')
+  if (!log || typeof log.getBoundingClientRect !== 'function' || typeof log.querySelectorAll !== 'function') return
+
+  log.querySelectorAll(':scope > .sys-summary-btn').forEach(b => b.remove())
+  const rows = [...log.querySelectorAll(':scope > [data-seq]')]
+  rows.forEach(r => { r.hidden = false })
+
+  const presentSeqs = new Set(rows.map(r => Number(r.dataset.seq)))
+  for (const seq of openLogGroupSeqs) {
+    if (!presentSeqs.has(seq)) openLogGroupSeqs.delete(seq)
+  }
+
+  const groups = []
+  let currentGroup = []
+
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i]
+    const seq = Number(row.dataset.seq)
+    const isGroupable = row.dataset.groupable === '1'
+    const day = row.dataset.at ? new Date(row.dataset.at).toDateString() : null
+
+    if (isGroupable && Number.isInteger(seq)) {
+      if (currentGroup.length === 0) {
+        currentGroup.push(row)
+      } else {
+        const prevRow = currentGroup[currentGroup.length - 1]
+        const prevSeq = Number(prevRow.dataset.seq)
+        const prevDay = prevRow.dataset.at ? new Date(prevRow.dataset.at).toDateString() : null
+        if (seq === prevSeq + 1 && day === prevDay) {
+          currentGroup.push(row)
+        } else {
+          if (currentGroup.length >= 2) {
+            groups.push(currentGroup)
+          }
+          currentGroup = [row]
+        }
+      }
+    } else {
+      if (currentGroup.length >= 2) {
+        groups.push(currentGroup)
+      }
+      currentGroup = []
+    }
+  }
+  if (currentGroup.length >= 2) {
+    groups.push(currentGroup)
+  }
+
+  for (const group of groups) {
+    const isOpen = group.some(r => openLogGroupSeqs.has(Number(r.dataset.seq)))
+    if (isOpen) {
+      for (const r of group) openLogGroupSeqs.add(Number(r.dataset.seq))
+    }
+
+    const btn = el('button', 'sys sys-summary-btn')
+    btn.type = 'button'
+    btn.setAttribute('aria-expanded', String(isOpen))
+    const span = el('span', '', `${group.length} cập nhật · ${isOpen ? 'Thu gọn' : 'Xem'}`)
+    btn.append(span)
+
+    for (const r of group) {
+      r.hidden = !isOpen
+    }
+
+    btn.onclick = () => {
+      const willOpen = btn.getAttribute('aria-expanded') !== 'true'
+      btn.setAttribute('aria-expanded', String(willOpen))
+      span.textContent = `${group.length} cập nhật · ${willOpen ? 'Thu gọn' : 'Xem'}`
+      for (const r of group) {
+        r.hidden = !willOpen
+        const seq = Number(r.dataset.seq)
+        if (Number.isInteger(seq)) {
+          if (willOpen) openLogGroupSeqs.add(seq)
+          else openLogGroupSeqs.delete(seq)
+        }
+      }
+    }
+
+    group[0].before(btn)
+  }
+}
+
+function trimLogWindow(mode) {
+  const log = $('#log')
+  const items = [...(log.children || [])].filter(c => c.id !== 'empty' && !c.classList?.contains?.('day') && !c.classList?.contains?.('sys-summary-btn'))
+  if (items.length <= 300) return
+
+  if (mode === 'prepend') {
+    const excess = items.length - 300
+    for (let i = items.length - excess; i < items.length; i++) {
+      const seq = items[i].dataset?.seq ? Number(items[i].dataset.seq) : null
+      if (Number.isInteger(seq)) openLogGroupSeqs.delete(seq)
+      items[i].remove?.()
+    }
+    markDays()
+    logHasAfter = true
+    const jumpLatest = $('#jump-latest')
+    if (jumpLatest) jumpLatest.hidden = false
+  } else {
+    const excess = items.length - 300
+    const oldScrollHeight = log.scrollHeight || 0
+    const oldScrollTop = log.scrollTop || 0
+    for (let i = 0; i < excess; i++) {
+      const seq = items[i].dataset?.seq ? Number(items[i].dataset.seq) : null
+      if (Number.isInteger(seq)) openLogGroupSeqs.delete(seq)
+      items[i].remove?.()
+    }
+    markDays()
+    logHasBefore = true
+    log.scrollTop = Math.max(0, oldScrollTop - (oldScrollHeight - (log.scrollHeight || 0)))
+  }
+}
+
+function updateLogLayout(mode) {
+  const anchor = getLogScrollAnchor()
+  const log = $('#log')
+  if (typeof log.getBoundingClientRect === 'function' && typeof log.querySelectorAll === 'function') {
+    log.querySelectorAll(':scope > .sys-summary-btn').forEach(b => b.remove())
+    log.querySelectorAll(':scope > [data-seq]').forEach(r => { r.hidden = false })
+  }
+  trimLogWindow(mode)
+  markDays()
+  reflowLogGroups()
+  restoreLogScrollAnchor(anchor)
+}
+
 function renderLoadedPage(page, mode = 'replace') {
   const log = $('#log')
 
+  if (logGeneration !== page.generation) {
+    openLogGroupSeqs.clear()
+  }
   logGeneration = page.generation
-  for (const m of page.messages) firstSeen(page.generation, m.seq) // its live event may still be on the way
-  // a page only tells about the edge it extended (a `before` page always has hasAfter); a live message that
-  // arrived while the page was loading lies past page.end, so there is still more after it
+  for (const m of page.messages) firstSeen(page.generation, m.seq)
   if (mode !== 'append') logHasBefore = page.hasBefore
   if (mode !== 'prepend') logHasAfter = page.hasAfter || page.end <= newestLiveSeq
   if (page.error) {
@@ -1694,7 +1940,7 @@ function renderLoadedPage(page, mode = 'replace') {
     logWindow++
     last = null
     log.replaceChildren(msgFragment(page.messages))
-    markDays()
+    updateLogLayout('replace')
     if (!logHasAfter) {
       log.scrollTop = log.scrollHeight
       $('#jump-latest').hidden = true
@@ -1703,45 +1949,23 @@ function renderLoadedPage(page, mode = 'replace') {
       $('#jump-latest').hidden = false
     }
   } else if (mode === 'prepend') {
-    const oldScrollHeight = log.scrollHeight
-    const oldScrollTop = log.scrollTop
     const keep = last
     last = null
-    log.prepend(msgFragment(page.messages))
+    const frag = msgFragment(page.messages)
+    const anchor = getLogScrollAnchor()
+    if (typeof log.getBoundingClientRect === 'function' && typeof log.querySelectorAll === 'function') {
+      log.querySelectorAll(':scope > .sys-summary-btn').forEach(b => b.remove())
+      log.querySelectorAll(':scope > [data-seq]').forEach(r => { r.hidden = false })
+    }
+    log.prepend(frag)
+    trimLogWindow('prepend')
     markDays()
+    reflowLogGroups()
+    restoreLogScrollAnchor(anchor)
     last = keep
-    log.scrollTop = oldScrollTop + (log.scrollHeight - oldScrollHeight)
   } else if (mode === 'append') {
     log.append(msgFragment(page.messages))
-    markDays()
-  }
-
-  trimLogWindow(mode)
-}
-
-function trimLogWindow(mode) {
-  const log = $('#log')
-  const items = [...log.children].filter(c => c.id !== 'empty' && !c.classList.contains('day'))
-  if (items.length <= 300) return
-
-  if (mode === 'prepend') {
-    const excess = items.length - 300
-    for (let i = items.length - excess; i < items.length; i++) {
-      items[i].remove()
-    }
-    markDays()
-    logHasAfter = true
-    $('#jump-latest').hidden = false
-  } else {
-    const excess = items.length - 300
-    const oldScrollHeight = log.scrollHeight
-    const oldScrollTop = log.scrollTop
-    for (let i = 0; i < excess; i++) {
-      items[i].remove()
-    }
-    markDays()
-    logHasBefore = true
-    log.scrollTop = Math.max(0, oldScrollTop - (oldScrollHeight - log.scrollHeight))
+    updateLogLayout('append')
   }
 }
 
@@ -1910,18 +2134,32 @@ async function jumpToMessage(seq) {
   closeSearchResults()
   if (seq == null) return
 
-  let target = document.querySelector(`[data-seq="${seq}"]`)
+  const log = $('#log')
+  let target = log.querySelector(`:scope > [data-seq="${seq}"]`)
   if (!target) {
     const reqDir = dir, reqSeq = openSeq
     const res = await api.logPage(reqDir, { around: seq, limit: 100 }).catch(() => null)
     if (!sameOpen(reqDir, reqSeq)) return
     if (res?.ok) {
       renderLoadedPage(res.page, 'replace')
-      target = document.querySelector(`[data-seq="${seq}"]`)
+      target = log.querySelector(`:scope > [data-seq="${seq}"]`)
     }
   }
 
   if (target) {
+    if (target.hidden) {
+      let prev = target.previousElementSibling
+      while (prev && !prev.classList.contains('sys-summary-btn')) {
+        prev = prev.previousElementSibling
+      }
+      if (prev && prev.classList.contains('sys-summary-btn')) {
+        if (prev.getAttribute('aria-expanded') !== 'true') {
+          prev.click()
+        }
+      } else {
+        target.hidden = false
+      }
+    }
     target.scrollIntoView({ behavior: 'smooth', block: 'center' })
     target.classList.remove('highlight-flash')
     void target.offsetWidth
@@ -1987,26 +2225,44 @@ const MERGE_STATE_LABELS = {
   'error': 'Lỗi'
 }
 
+let worktreeLoadError = null
 async function loadWorktreeState(targetDir = dir) {
   if (!targetDir) return
   const thisSeq = openSeq
   try {
     const res = await api.worktreeState(targetDir)
-    if (res && res.ok && targetDir === dir && thisSeq === openSeq) {
-      worktreeState = res.state
+    if (targetDir === dir && thisSeq === openSeq) {
+      if (res && res.ok) {
+        worktreeState = res.state
+        worktreeLoadError = null
+      } else {
+        worktreeLoadError = res?.error || { message: 'Lỗi tải trạng thái worktree' }
+      }
       renderWorktreeUI()
     }
-  } catch (_) {}
+  } catch (err) {
+    if (targetDir === dir && thisSeq === openSeq) {
+      worktreeLoadError = { message: err.message.replace(/^.*?Error: /, '') }
+      renderWorktreeUI()
+    }
+  }
 }
 
 function renderWorktreeUI() {
   const sec = $('#merge-sec')
   if (!worktreeState || !worktreeState.enabled) {
+    sec.hidden = !worktreeState?.reason && !worktreeLoadError
+    return
+  }
+  const queue = (worktreeState.queue || []).filter(item => item.state !== 'merged' || item.error)
+  const hasItems = queue.length > 0
+  const hasError = !!(worktreeLoadError || worktreeState.reason)
+  if (!hasItems && !hasError) {
     sec.hidden = true
     return
   }
   sec.hidden = false
-  renderMergeQueue(worktreeState.queue || [])
+  renderMergeQueue(queue)
   if (currentPopoverAgent) {
     const agent = team.find(a => a.name === currentPopoverAgent)
     if (agent) updateMemberPopoverContent(agent)
@@ -2452,34 +2708,37 @@ function updateMemberPopoverContent(agent) {
   const sRecord = sess[agent.name]
   const s = (sRecord && sRecord.cli && sRecord.cli !== agent.cli) ? null : sRecord
   const lastTurn = s?.lastTurn
-  const rawTokens = lastTurn?.inputTokens
-  const hasTokens = typeof rawTokens === 'number'
+  const contextTokens = (lastTurn && Number.isSafeInteger(lastTurn.contextInputTokens) && lastTurn.contextInputTokens >= 0)
+    ? lastTurn.contextInputTokens
+    : null
+  const hasContext = contextTokens !== null
   const limit = s?.sessionTokenLimit != null ? s.sessionTokenLimit : (agent.sessionTokenLimit != null ? Number(agent.sessionTokenLimit) : 150000)
-  const isPending = (s?.rotationPending != null) ? !!s.rotationPending : (
+  const isPending = (
     agent.resume !== false &&
     !!s?.id &&
     limit > 0 &&
-    hasTokens &&
-    rawTokens > limit
+    hasContext &&
+    contextTokens > limit &&
+    (s?.rotationPending == null ? true : !!s.rotationPending)
   )
 
   let sessionText = ''
   if (agent.resume === false) {
-    sessionText = (hasTokens ? `${rawTokens.toLocaleString('vi-VN')} · ` : '') + 'Không nhớ phiên'
-  } else if (!hasTokens) {
-    sessionText = 'Chưa có số đo' + (limit === 0 ? ' · Tự xoay: tắt' : '')
+    sessionText = (hasContext ? `${contextTokens.toLocaleString('vi-VN')} token · ` : '') + 'Không nhớ phiên'
+  } else if (!hasContext) {
+    sessionText = 'Chưa có dữ liệu' + (limit === 0 ? ' · Tự xoay: tắt' : '')
   } else if (limit === 0) {
-    sessionText = `${rawTokens.toLocaleString('vi-VN')} · Tự xoay: tắt`
+    sessionText = `${contextTokens.toLocaleString('vi-VN')} token · Tự xoay: tắt`
   } else {
-    sessionText = `${rawTokens.toLocaleString('vi-VN')} / ${limit.toLocaleString('vi-VN')}`
+    sessionText = `${contextTokens.toLocaleString('vi-VN')} / ${limit.toLocaleString('vi-VN')} token`
     if (isPending) {
       sessionText += ' · Sẽ mở phiên mới ở lượt kế tiếp'
     }
   }
 
   const sessDiv = el('div', 'mp-status')
-  sessDiv.textContent = `Token vào lượt gần nhất: ${sessionText}`
-  sessDiv.title = 'Số token vào CLI báo cho lượt gần nhất, có thể gồm nhiều bước gọi model.' + (lastTurn?.partial ? ' (Chưa đủ dữ liệu)' : '')
+  sessDiv.textContent = `Ngữ cảnh bước cuối: ${sessionText}`
+  sessDiv.title = 'Số đo đầu vào của bước cuối, gồm cache, không gồm output.' + (!hasContext ? ' CLI chưa cung cấp số đo ngữ cảnh bước cuối.' : '')
   pop.append(sessDiv)
 
   pop.append(el('div', 'mp-status mp-run', memberStatusText(run)))
@@ -2507,29 +2766,52 @@ function memberStatusText(run) {
   if (!run) return 'Trạng thái: Rảnh (sẵn sàng)'
   if (run.stopping) return 'Trạng thái: Đang dừng…'
   if (run.phase === 'queued') {
-    return run.blockedBy && run.blockedBy.length > 0
-      ? `Trạng thái: Chờ @${run.blockedBy[0].name} (${run.blockedBy[0].path})`
-      : `Trạng thái: Đang xếp hàng… (${run.label})`
+    if (run.blockedBy && run.blockedBy.length > 0) {
+      const b0 = run.blockedBy[0]
+      const file = base(b0.path)
+      const more = run.blockedBy.length > 1 ? ` (+${run.blockedBy.length - 1})` : ''
+      return `Trạng thái: Chờ ${b0.name} nhả ${file}${more}`
+    }
+    return 'Trạng thái: Đang xếp hàng'
   }
   if (run.phase === 'checking') return 'Trạng thái: Đang kiểm tra file…'
   return `Trạng thái: ${run.label || 'Đang làm…'}`
 }
 
 function typingText(run) {
-  let statusText = run.label || 'đang làm…'
+  let statusText = run.label || 'Đang làm…'
   if (run.stopping) {
-    statusText = 'đang dừng…'
+    statusText = 'Đang dừng…'
   } else if (run.phase === 'queued') {
     if (run.blockedBy && run.blockedBy.length > 0) {
-      statusText = `chờ ${run.blockedBy[0].name} (${run.blockedBy[0].path})`
+      const b0 = run.blockedBy[0]
+      const file = base(b0.path)
+      const more = run.blockedBy.length > 1 ? ` (+${run.blockedBy.length - 1})` : ''
+      statusText = `Chờ ${b0.name} nhả ${file}${more}`
     } else {
-      statusText = run.label || 'đang xếp hàng…'
+      statusText = 'Đang xếp hàng'
     }
   } else if (run.phase === 'checking') {
-    statusText = 'đang kiểm tra file…'
+    statusText = 'Đang kiểm tra file…'
   }
-  const chainTxt = run.chain ? `lượt ${run.chain.turns} (tối đa ${run.chain.limit}) · ` : '' // agent turns since your last message
+  const chainTxt = run.chain ? `lượt ${run.chain.turns} (tối đa ${run.chain.limit}) · ` : ''
   return `@${run.name} · ${chainTxt}${statusText}`
+}
+
+function getRunDetailText(run) {
+  const parts = []
+  if (run.detail) {
+    parts.push(run.detail)
+  } else if (run.label) {
+    parts.push(run.label)
+  }
+  if (run.blockedBy && run.blockedBy.length > 0) {
+    parts.push('Đang chờ các khóa:\n' + run.blockedBy.map(b => `  @${b.name}: ${b.path}`).join('\n'))
+  }
+  if (run.chain) {
+    parts.push(`Chuỗi agent: lượt ${run.chain.turns} (tối đa ${run.chain.limit})`)
+  }
+  return parts.join('\n\n')
 }
 
 const QUIET_MS = 120e3
@@ -2542,10 +2824,19 @@ const clock = ms => {
 // time left judged by the median of this agent's recent turns (3+ of them)
 function setRunTime(row, run) {
   const now = Date.now(), quiet = now - run.activeAt, elapsed = now - run.startedAt, t = row.querySelector('.typing-time')
+  if (!t) return
+  if (run.phase === 'queued') {
+    t.textContent = clock(elapsed)
+    t.classList.toggle('quiet', false)
+    t.title = `Đang chờ từ ${hhmm(run.startedAt)} (${clock(elapsed)})`
+    return
+  }
   const times = turnTimes.get(run.name), typical = times?.length >= 3 ? [...times].sort((a, b) => a - b)[times.length >> 1] : null
   t.textContent = clock(elapsed) + (quiet >= QUIET_MS ? ` · im lặng ${Math.floor(quiet / 60e3)} phút`
     : typical == null ? '' : typical > elapsed ? ` · còn ~${Math.max(1, Math.round((typical - elapsed) / 60e3))} phút` : ' · lâu hơn thường lệ')
   t.classList.toggle('quiet', quiet >= QUIET_MS)
+  const limit = team.find(a => a.name === run.name)?.timeoutMinutes ?? 30
+  t.title = `Chạy từ ${hhmm(run.startedAt)} · tự dừng khi quá ${limit} phút\n"còn ~": ước lượng theo trung vị các lượt gần đây của @${run.name}\n"im lặng": chưa có bước mới, agent có thể vẫn đang suy nghĩ hoặc chạy lệnh dài`
 }
 
 function setStopButton(btn, run) {
@@ -2555,11 +2846,27 @@ function setStopButton(btn, run) {
 
 // progress only changes a run's texts: patch them in place, so a click on "Dừng" never lands on a node being replaced
 function patchRun(run) {
-  const row = [...$('#typing').children].find(r => r.dataset.runId === run.runId)
-  if (!row) return renderActiveUI()
-  row.querySelector('.typing-label').textContent = typingText(run)
-  setRunTime(row, run)
-  setStopButton(row.querySelector('.btn-stop'), run)
+  const wrap = [...$('#typing').children].find(r => r.dataset.runId === run.runId)
+  if (!wrap) return renderActiveUI()
+  const labelSpan = wrap.querySelector('.typing-label')
+  if (labelSpan) labelSpan.textContent = typingText(run)
+  const labelBtn = wrap.querySelector('.typing-label-btn')
+  if (labelBtn) labelBtn.setAttribute('aria-label', `${typingText(run)} · Bấm để xem chi tiết`)
+  setRunTime(wrap, run)
+  setStopButton(wrap.querySelector('.btn-stop'), run)
+
+  const pre = wrap.querySelector('.typing-detail-pre')
+  if (pre) pre.textContent = getRunDetailText(run)
+  const trunc = wrap.querySelector('.typing-detail-trunc')
+  if (trunc) trunc.hidden = !run.detailTruncated
+
+  const stackBtn = document.querySelector(`.stack-btn[data-agent="${CSS.escape(run.name)}"]`)
+  if (stackBtn) {
+    const stText = memberStatusText(run)
+    stackBtn.title = `@${run.name} · ${stText}`
+    stackBtn.setAttribute('aria-label', `@${run.name} · ${stText}`)
+  }
+
   if (currentPopoverAgent !== run.name) return
   const pop = $('#member-popover')
   pop.querySelector('.mp-run').textContent = memberStatusText(run)
@@ -2572,8 +2879,11 @@ function renderActiveUI() {
     document.querySelectorAll('.stack-btn').forEach(btn => {
       const name = btn.dataset.agent
       if (!name || !dir) return
-      const isBusy = !!activeRuns.get(runKey(dir, name))
-      btn.classList.toggle('busy', isBusy)
+      const r = activeRuns.get(runKey(dir, name))
+      btn.classList.toggle('busy', !!r)
+      const stText = memberStatusText(r)
+      btn.title = `@${name} · ${stText}`
+      btn.setAttribute('aria-label', `@${name} · ${stText}`)
     })
 
     updateGrantButtonsState()
@@ -2600,19 +2910,25 @@ function renderActiveUI() {
     }
 
     $('#typing').replaceChildren(...currentRuns.map(run => {
+      const wrap = el('div', 'typing-row-wrap')
+      wrap.dataset.runId = run.runId
+
       const row = el('div', 'typing-row')
-      row.dataset.runId = run.runId
       const lead = el('div', 'typing-lead')
       const pulse = el('i')
       pulse.style.setProperty('--agent', getAgentAvatar(run.name)?.color || '#a1a1aa')
-      const label = el('span', 'typing-label', typingText(run))
-      if (run.chain) label.title = 'Lượt: số lượt agent nối tiếp nhau kể từ tin gần nhất của bạn. Tới tối đa, chuỗi tạm dừng chờ bạn bấm Tiếp tục'
-      lead.append(pulse, label)
+
+      const labelBtn = el('button', 'typing-label-btn')
+      labelBtn.type = 'button'
+      labelBtn.setAttribute('aria-expanded', 'false')
+      const labelSpan = el('span', 'typing-label', typingText(run))
+      labelBtn.append(labelSpan)
+      labelBtn.title = 'Bấm để xem chi tiết lệnh và tiến trình'
+      labelBtn.setAttribute('aria-label', `${typingText(run)} · Bấm để xem chi tiết`)
+
+      lead.append(pulse, labelBtn)
 
       const time = el('span', 'typing-time')
-      const limit = team.find(a => a.name === run.name)?.timeoutMinutes ?? 30
-      time.title = `Chạy từ ${hhmm(run.startedAt)} · tự dừng khi quá ${limit} phút\n"còn ~": ước lượng theo trung vị các lượt gần đây của @${run.name}\n"im lặng": chưa có bước mới, agent có thể vẫn đang suy nghĩ hoặc chạy lệnh dài`
-
       const stopBtn = el('button', 'btn-stop box press')
       stopBtn.type = 'button'
       stopBtn.setAttribute('aria-label', `Dừng ${run.name}`)
@@ -2621,7 +2937,47 @@ function renderActiveUI() {
 
       row.append(lead, time, stopBtn)
       setRunTime(row, run)
-      return row
+
+      const detailBox = el('div', 'typing-detail-box')
+      detailBox.hidden = true
+
+      const detailHdr = el('div', 'typing-detail-hdr')
+      const detailTitle = el('span', 'typing-detail-title', 'Chi tiết lệnh & tiến trình')
+      const detailTrunc = el('span', 'typing-detail-trunc', 'Nội dung đã rút gọn')
+      detailTrunc.hidden = !run.detailTruncated
+      const copyBtn = el('button', 'typing-copy-btn btn sm box press', 'Sao chép')
+      copyBtn.type = 'button'
+
+      detailHdr.append(detailTitle, detailTrunc, copyBtn)
+
+      const pre = el('pre', 'typing-detail-pre', getRunDetailText(run))
+      detailBox.append(detailHdr, pre)
+
+      copyBtn.onclick = async () => {
+        try {
+          await navigator.clipboard.writeText(pre.textContent)
+          showToast('Đã sao chép chi tiết lệnh')
+        } catch (_) {}
+      }
+
+      labelBtn.onclick = () => {
+        const isExp = labelBtn.getAttribute('aria-expanded') === 'true'
+        const nextExp = !isExp
+        labelBtn.setAttribute('aria-expanded', String(nextExp))
+        detailBox.hidden = !nextExp
+      }
+
+      wrap.onkeydown = e => {
+        if (e.key === 'Escape' && !detailBox.hidden) {
+          e.stopPropagation()
+          detailBox.hidden = true
+          labelBtn.setAttribute('aria-expanded', 'false')
+          labelBtn.focus()
+        }
+      }
+
+      wrap.append(row, detailBox)
+      return wrap
     }))
   })
 }
@@ -2630,7 +2986,8 @@ function renderTeam() {
   closeMemberPopover()
   $('#stack').replaceChildren(...team.map(a => {
     const key = runKey(dir, a.name)
-    const isBusy = !!activeRuns.get(key)
+    const r = activeRuns.get(key)
+    const isBusy = !!r
     const btn = el('button', 'stack-btn press' + (isBusy ? ' busy' : ''))
     btn.type = 'button'
     btn.dataset.agent = a.name
@@ -2638,6 +2995,9 @@ function renderTeam() {
     btn.setAttribute('aria-controls', 'member-popover')
     btn.dataset.agentAvatar = a.name
     paintAvatar(btn, a.name, getAgentAvatar(a)?.color)
+    const stText = memberStatusText(r)
+    btn.title = `@${a.name} · ${stText}`
+    btn.setAttribute('aria-label', `@${a.name} · ${stText}`)
 
     btn.onmouseenter = () => openMemberPopover(a.name, btn)
     btn.onmouseleave = () => scheduleCloseMemberPopover()
@@ -3043,18 +3403,144 @@ function closeViewer() {
 
 async function refreshFiles() {
   if (!dir) return
-  const reqDir = dir
+  const reqDir = dir, reqBox = box, reqSeq = openSeq
   try {
     const list = await api.files(reqDir)
-    if (dir !== reqDir) return
-    $('#files').replaceChildren(...list.map(f => {
+    if (dir !== reqDir || box !== reqBox || openSeq !== reqSeq) return
+    if (!Array.isArray(list)) return
+
+    const storageKey = 'file-groups:v1:' + JSON.stringify([reqDir, reqBox])
+    let storedStates = {}
+    try {
+      const raw = localStorage.getItem(storageKey)
+      if (raw) storedStates = JSON.parse(raw) || {}
+    } catch (_) {}
+
+    // Pinned files: active box memory.md, then reports/roadmap.md
+    const isBoxMemory = f => {
+      const norm = f.replace(/\\/g, '/')
+      return norm === `${reqBox}/memory.md` || (norm === '.chat/memory.md' && reqBox === '.chat')
+    }
+    const isRoadmap = f => f.replace(/\\/g, '/') === 'reports/roadmap.md'
+
+    const pinnedFiles = []
+    const memoryFile = list.find(isBoxMemory)
+    if (memoryFile) pinnedFiles.push(memoryFile)
+
+    const roadmapFile = list.find(isRoadmap)
+    if (roadmapFile && !pinnedFiles.includes(roadmapFile)) pinnedFiles.push(roadmapFile)
+
+    const pinnedSet = new Set(pinnedFiles)
+    const rest = list.filter(f => !pinnedSet.has(f))
+
+    // Grouping by sprint under reports/
+    const sprintMap = new Map()
+    const otherFiles = []
+
+    for (const f of rest) {
+      const norm = f.replace(/\\/g, '/')
+      const b = base(f)
+      if (norm.startsWith('reports/')) {
+        const m = /^sprint-([1-9]\d*)(?:-[^.]+)?\.md$/i.exec(b)
+        if (m) {
+          const n = parseInt(m[1], 10)
+          if (Number.isSafeInteger(n) && n > 0) {
+            if (!sprintMap.has(n)) sprintMap.set(n, [])
+            sprintMap.get(n).push(f)
+            continue
+          }
+        }
+      }
+      otherFiles.push(f)
+    }
+
+    const sortedSprintNums = [...sprintMap.keys()].sort((a, b) => b - a)
+    const activeGroupIds = new Set()
+
+    const makeFileButton = f => {
       const b = el('button', 'frow')
       b.title = f
+      b.setAttribute('aria-label', f)
       b.append(fileIcon(), el('span', '', base(f)))
       b.onclick = () => openFileViewer(f, null)
       return b
-    }))
-  } catch {}
+    }
+
+    const container = document.createDocumentFragment()
+
+    // Render pinned files at top
+    for (const f of pinnedFiles) {
+      container.append(makeFileButton(f))
+    }
+
+    // Render sprint groups
+    for (const n of sortedSprintNums) {
+      const groupId = `sprint:${n}`
+      activeGroupIds.add(groupId)
+      const groupFiles = sprintMap.get(n)
+
+      const specName = `sprint-${n}.md`.toLowerCase()
+      groupFiles.sort((a, b) => {
+        const ba = base(a).toLowerCase(), bb = base(b).toLowerCase()
+        if (ba === specName && bb !== specName) return -1
+        if (bb === specName && ba !== specName) return 1
+        return base(a).localeCompare(base(b), undefined, { numeric: true })
+      })
+
+      const details = el('details', 'file-group')
+      const isOpen = !!storedStates[groupId]
+      details.open = isOpen
+      details.ontoggle = () => {
+        storedStates[groupId] = details.open
+        try { localStorage.setItem(storageKey, JSON.stringify(storedStates)) } catch (_) {}
+      }
+
+      const sum = el('summary', 'file-group-sum', `Sprint ${n} · ${groupFiles.length}`)
+      const itemsDiv = el('div', 'file-group-items')
+      itemsDiv.append(...groupFiles.map(makeFileButton))
+      details.append(sum, itemsDiv)
+      container.append(details)
+    }
+
+    // Render "Khác" group
+    if (otherFiles.length > 0) {
+      const groupId = 'other'
+      activeGroupIds.add(groupId)
+      otherFiles.sort((a, b) => base(a).localeCompare(base(b), undefined, { numeric: true }))
+
+      const details = el('details', 'file-group')
+      const isOpen = !!storedStates[groupId]
+      details.open = isOpen
+      details.ontoggle = () => {
+        storedStates[groupId] = details.open
+        try { localStorage.setItem(storageKey, JSON.stringify(storedStates)) } catch (_) {}
+      }
+
+      const sum = el('summary', 'file-group-sum', `Khác · ${otherFiles.length}`)
+      const itemsDiv = el('div', 'file-group-items')
+      itemsDiv.append(...otherFiles.map(makeFileButton))
+      details.append(sum, itemsDiv)
+      container.append(details)
+    }
+
+    // Prune stale group IDs
+    let changed = false
+    for (const k of Object.keys(storedStates)) {
+      if (!activeGroupIds.has(k)) {
+        delete storedStates[k]
+        changed = true
+      }
+    }
+    if (changed) {
+      try { localStorage.setItem(storageKey, JSON.stringify(storedStates)) } catch (_) {}
+    }
+
+    if (pinnedFiles.length === 0 && sortedSprintNums.length === 0 && otherFiles.length === 0) {
+      $('#files').replaceChildren(el('div', 'none', '—'))
+    } else {
+      $('#files').replaceChildren(container)
+    }
+  } catch (_) {}
 }
 
 $('#new').onclick = async () => {
@@ -3426,8 +3912,7 @@ api.on('message', (d, m, meta) => {
     // would leave a hole that paging (it continues from the last seq shown) never fills, so only count it
     if (!logHasAfter) {
       log.append(msgFragment([m]))
-      markDays()
-      trimLogWindow('append')
+      updateLogLayout('append')
     }
 
     if (logHasAfter || (!nearBottom && m.from !== 'user')) {
@@ -3450,7 +3935,7 @@ api.on('status', (d, name, on, runId) => {
   }
   const key = runKey(d, name)
   if (on) {
-    activeRuns.set(key, { name, runId, label: 'đang khởi động…', stopping: false, phase: 'running', blockedBy: [], startedAt: Date.now(), activeAt: Date.now() })
+    activeRuns.set(key, { name, runId, label: 'đang khởi động…', stopping: false, phase: 'running', blockedBy: [], startedAt: Date.now(), activeAt: Date.now(), detail: null, detailTruncated: false })
   } else {
     const cur = activeRuns.get(key)
     if (cur && (!runId || cur.runId === runId)) activeRuns.delete(key)
@@ -3475,6 +3960,8 @@ api.on('progress', (d, name, data) => {
     if (data.chain !== undefined) r.chain = data.chain
     if (data.label === 'đang dừng…') r.stopping = true
     if (data.startedAt) Object.assign(r, { startedAt: data.startedAt, activeAt: data.activeAt })
+    r.detail = data.detail !== undefined ? data.detail : null
+    r.detailTruncated = !!data.detailTruncated
     if (d === dir) patchRun(r)
   }
 })
