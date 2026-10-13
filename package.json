@@ -49,5 +49,6 @@
     "markdown-it": "15.0.2"
   },
   "description": "Nhóm agent AI (Claude, Codex, agy) làm việc chung trong một box chat theo dự án",
-  "author": "Dam Huy Nam Anh"
+  "author": "Dam Huy Nam Anh",
+  "license": "MIT"
 }
