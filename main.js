@@ -1444,55 +1444,107 @@ async function handleAgentPreview(request) {
     const cached = current.cache.get(relative)
     return new Response(cached.bytes, { status: 200, headers: cached.headers })
   }
+  if (current.pending?.has(relative)) {
+    await current.pending.get(relative)
+    if (current.cache.has(relative)) {
+      const cached = current.cache.get(relative)
+      return new Response(cached.bytes, { status: 200, headers: cached.headers })
+    }
+  }
 
-  if (!current.resourcePaths.has(relative) && current.resourcePaths.size >= 128) {
+  const isNewPath = !current.resourcePaths.has(relative)
+  if (isNewPath && current.resourcePaths.size >= 128) {
     return plain('Resource Limit Exceeded', 429)
   }
+  if (isNewPath) current.resourcePaths.add(relative)
 
   let fileInfo
   try {
     fileInfo = core.resolveProjectFile(current.targetBase, relative)
   } catch (e) {
+    if (isNewPath) current.resourcePaths.delete(relative)
     const status = e.code === 'NOT_FOUND' ? 404 : e.code === 'OUTSIDE_PROJECT' ? 403 : 400
     return plain(e.message || 'File Error', status)
   }
 
-  const limit = isCss ? 2 * 1024 * 1024 : 10 * 1024 * 1024
-  let readRes
+  let fileSize = 0
   try {
-    readRes = await core.readBoundedFile(fileInfo, limit, isCss ? 'CSS vượt quá 2 MiB' : 'Ảnh vượt quá 10 MiB')
-  } catch (e) {
-    const status = e.code === 'TOO_LARGE' ? 413 : e.code === 'NOT_FOUND' ? 404 : 403
-    return plain(e.message || 'Read Error', status)
+    fileSize = rawFs.statSync(fileInfo.real).size
+  } catch {
+    if (isNewPath) current.resourcePaths.delete(relative)
+    return plain('File Error', 400)
   }
 
-  if (current.closed) return plain('Not Found', 404)
+  if (current.totalBytes + (current.pendingBytes || 0) + fileSize > 32 * 1024 * 1024) {
+    if (isNewPath) current.resourcePaths.delete(relative)
+    return plain('Total Size Limit Exceeded', 413)
+  }
+  current.pendingBytes = (current.pendingBytes || 0) + fileSize
+
+  let readPromise
+  const doRead = async () => {
+    try {
+      const limit = isCss ? 2 * 1024 * 1024 : 10 * 1024 * 1024
+      const readRes = await core.readBoundedFile(fileInfo, limit, isCss ? 'CSS vượt quá 2 MiB' : 'Ảnh vượt quá 10 MiB')
+      return readRes
+    } finally {
+      current.pendingBytes -= fileSize
+    }
+  }
+  readPromise = doRead()
+  if (current.pending) current.pending.set(relative, readPromise)
+
+  let readRes
+  try {
+    readRes = await readPromise
+  } catch (e) {
+    if (isNewPath) current.resourcePaths.delete(relative)
+    const status = e.code === 'TOO_LARGE' ? 413 : e.code === 'NOT_FOUND' ? 404 : 403
+    return plain(e.message || 'Read Error', status)
+  } finally {
+    current.pending?.delete(relative)
+  }
+
+  if (current.closed) {
+    if (isNewPath) current.resourcePaths.delete(relative)
+    return plain('Not Found', 404)
+  }
 
   const bytes = readRes.bytes
 
   if (isCss) {
     if (bytes.some(b => b < 32 && b !== 9 && b !== 10 && b !== 13)) {
+      if (isNewPath) current.resourcePaths.delete(relative)
       return plain('CSS không phải UTF-8 hợp lệ', 400)
     }
     try { new TextDecoder('utf-8', { fatal: true }).decode(bytes) }
-    catch { return plain('CSS không phải UTF-8 hợp lệ', 400) }
+    catch {
+      if (isNewPath) current.resourcePaths.delete(relative)
+      return plain('CSS không phải UTF-8 hợp lệ', 400)
+    }
   }
 
   let mime
   if (isImg) {
     const detectedType = core.imageType(bytes)
-    if (!detectedType) return plain('File không phải ảnh hợp lệ', 415)
-    if (core.IMAGE_EXTENSIONS[ext] !== detectedType) return plain('File không đúng định dạng ảnh', 415)
+    if (!detectedType) {
+      if (isNewPath) current.resourcePaths.delete(relative)
+      return plain('File không phải ảnh hợp lệ', 415)
+    }
+    if (core.IMAGE_EXTENSIONS[ext] !== detectedType) {
+      if (isNewPath) current.resourcePaths.delete(relative)
+      return plain('File không đúng định dạng ảnh', 415)
+    }
     mime = core.IMAGE_MIME[detectedType]
   } else {
     mime = 'text/css; charset=utf-8'
   }
 
   if (current.totalBytes + bytes.length > 32 * 1024 * 1024) {
+    if (isNewPath) current.resourcePaths.delete(relative)
     return plain('Total Size Limit Exceeded', 413)
   }
 
-  current.resourcePaths.add(relative)
   current.totalBytes += bytes.length
 
   const resHeaders = {
@@ -1856,6 +1908,7 @@ ipcMain.handle('openHtmlExternal', async (event, dir, href, workspaceId = null) 
     if (ext !== '.html' && ext !== '.htm') {
       return { ok: false, code: 'UNSUPPORTED', message: 'Chỉ hỗ trợ mở file HTML' }
     }
+    const statBefore = rawFs.statSync(fileInfo.real)
     const branchInfo = target.workspace?.branch ? ` (nhánh ${target.workspace.branch})` : ''
     const answer = await dialog.showMessageBox(win, {
       type: 'question',
@@ -1867,6 +1920,10 @@ ipcMain.handle('openHtmlExternal', async (event, dir, href, workspaceId = null) 
     })
     if (answer.response !== 1) return { ok: true, opened: false }
     const verified = core.resolveProjectFile(target.base, target.href)
+    const statAfter = rawFs.statSync(verified.real)
+    if (verified.real !== fileInfo.real || statAfter.dev !== statBefore.dev || statAfter.ino !== statBefore.ino) {
+      return { ok: false, code: 'FILE_CHANGED', message: 'File thay đổi trong lúc xác nhận' }
+    }
     const verifiedExt = path.extname(verified.real).toLowerCase()
     if (verifiedExt !== '.html' && verifiedExt !== '.htm') {
       return { ok: false, code: 'UNSUPPORTED', message: 'Chỉ hỗ trợ mở file HTML' }

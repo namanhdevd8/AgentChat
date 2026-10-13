@@ -2005,10 +2005,7 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
     pv = await call('createHtmlPreview', root, 'qa.html')
     const big = await Promise.all(Array.from({ length: 5 }, (_, i) => handle(u(`cap/big${i}.png`))))
     const servedBig = big.filter(r => r.status === 200).length
-    try {
-      assert.ok(servedMany <= 127 && servedBig <= 3, `gửi cùng lúc: 200 ảnh → phục vụ ${servedMany} (trần 128 path gồm entry); 5 ảnh 8 MiB → phục vụ ${servedBig} (trần 32 MiB)`)
-      console.log('ĐÃ SỬA T45-cap-song-song: bỏ try trong check.js')
-    } catch (e) { console.log(`BUG T45-cap-song-song: ${e.message}`) }
+    assert.ok(servedMany <= 127 && servedBig <= 3, `gửi cùng lúc: 200 ảnh → phục vụ ${servedMany} (trần 128 path gồm entry); 5 ảnh 8 MiB → phục vụ ${servedBig} (trần 32 MiB)`)
     // open in browser: the file confirmed in the dialog is the one opened; a symlink swapped meanwhile is refused
     fs.writeFileSync(at('a1.html'), '<p>1</p>'); fs.writeFileSync(at('a2.html'), '<p>2</p>'); fs.symlinkSync('a1.html', at('swap.html'))
     dialogAnswer = 1; openedPaths.length = 0
@@ -2018,10 +2015,7 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
     fs.rmSync(at('swap.html')); fs.symlinkSync('a1.html', at('swap.html'))
     onDialog = () => { fs.rmSync(at('swap.html')); fs.symlinkSync('a2.html', at('swap.html')) }
     ext = await call('openHtmlExternal', root, 'swap.html'); onDialog = null; dialogAnswer = 0
-    try {
-      assert.ok(!ext.opened && openedPaths.length === 0, `symlink đổi sang file khác trong dự án trong lúc xác nhận → vẫn mở ${openedPaths.map(p => path.basename(p))}`)
-      console.log('ĐÃ SỬA T45-doi-symlink-luc-xac-nhan: bỏ try trong check.js')
-    } catch (e) { console.log(`BUG T45-doi-symlink-luc-xac-nhan: ${e.message}`) }
+    assert.ok(!ext.opened && openedPaths.length === 0, `symlink đổi sang file khác trong dự án trong lúc xác nhận → vẫn mở ${openedPaths.map(p => path.basename(p))}`)
     await call('closeHtmlPreview', pv.preview.id)
     for (const f of ['leak.html', 'leak.css', 'leak.png', 'qa.html', 'two.html', 'd.json', 'a1.html', 'a2.html', 'swap.html']) fs.rmSync(at(f), { force: true })
     fs.rmSync(path.join(wt, 'leak.html')); fs.rmSync(at('cap'), { recursive: true, force: true })
