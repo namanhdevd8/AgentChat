@@ -105,4 +105,5 @@ Làm **#1, #3, #4** trước. Ba mục này nhỏ, cùng nằm ở luồng gọi
 - Chi phí theo agent và theo sprint; gắn chip trạng thái vào đúng lượt; đưa file mới sửa lên đầu File chung.
 - Tin `needs-deps` cần ghi rõ End-User phải tự gộp rồi chạy `npm install`, vì hiện bấm Thử lại sẽ kẹt mãi (góp ý QA T37).
 - R7 cho codex/agy: chưa có nguồn số đo ngữ cảnh, đang trả null.
+- Tự tạo link file: "Node.js", "Vue.js" bị biến thành link chết (QA T41); chỉ tạo link khi file có thật hoặc chuỗi có dạng đường dẫn.
 - Mục cũ vẫn còn: E (diff + hoàn tác), L (lượt rỗng có commit), lỗi `team-changed` ghi đè draft.
