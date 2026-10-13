@@ -50,3 +50,4 @@ Trả lời hộp thoại xin quyền theo thời gian thực. Chế độ `-p` 
   - Cấp quyền sau khi bị từ chối: chỉ chạy lại một lượt, bấm hai lần vẫn một lượt.
 - T30, T32 → Xong. **T31 giữ Chờ duyệt đến khi End-User thử tay** hộp thoại Toàn quyền và nút "Cho phép và chạy lại" với Claude thật.
 - Lỗi nhẹ, để backlog (chưa tái hiện được vì ⚙ mở dạng modal): khi nhận `team-changed`, FE (index.html:4265) lấy revision mới nhưng giữ draft cũ, nên bấm Lưu sẽ ghi đè thay vì báo CONFLICT. Sửa khi có cách mở ⚙ song song, hoặc khi End-User gặp lỗi này.
+- 2026-10-13: End-User đóng T31, Sprint 8 hoàn tất.

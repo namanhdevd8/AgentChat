@@ -37,3 +37,8 @@ QA kiểm trên main `7c406bc`, check của QA đã vào main `77c48b7`. Kết q
 3. V3: mở một file `.html`, chuyển qua lại giữa hai tab Xem trước và Mã nguồn. Bấm "Mở bằng trình duyệt" thì phải hiện hộp xác nhận.
 4. Kiểm lại cả 3 mục trên với theme sáng và tối.
 - Cập nhật (PM, 2026-10-13): dev-be đã sửa cả 2 lỗi trên main `c0db168`. Hai ca `T45-cap-song-song` và `T45-doi-symlink-luc-xac-nhan` giờ là assert thường và đạt trong check của hàng chờ merge. T43 → Xong.
+
+## Đóng Sprint 10 (PM, 2026-10-13)
+- End-User thử tay và xác nhận V1, V2, V3 chạy đúng. T44 → Xong. T42–T45 đều Xong.
+- End-User cũng đóng luôn T31 (Sprint 8, mục Quyền và nút "Cho phép và chạy lại"), nên Sprint 8 cũng khép lại.
+- Còn trong backlog: V4 Mermaid và các mục ở [roadmap.md](roadmap.md).
