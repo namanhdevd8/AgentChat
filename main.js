@@ -355,6 +355,15 @@ async function commitWorkspace(job, result, changed, auditComplete, outside) {
     if (beforeHead !== job.baseSha && !await git(cwd, ['merge-base', '--is-ancestor', job.baseSha, beforeHead]).then(() => true).catch(() => false))
       throw gitError('TARGET_CHANGED', 'Lịch sử nhánh workspace bị viết lại trong lúc agent chạy')
     const files = await workspaceChanges(cwd)
+    if (outside.length) {
+      const probe = await repoProbe(job.root).catch(() => null)
+      if (probe?.sha) {
+        const diff = nul((await git(cwd, ['diff', '--no-renames', '--name-only', '-z', probe.sha]).catch(() => ({ stdout: '' }))).stdout)
+        const untracked = nul((await git(cwd, ['ls-files', '--others', '--exclude-standard', '-z']).catch(() => ({ stdout: '' }))).stdout)
+        const diffSet = new Set([...diff, ...untracked])
+        outside = outside.filter(file => isChatPath(file) || diffSet.has(file))
+      }
+    }
     if (!auditComplete || outside.length || files.some(file => !changed.includes(file) || isChatPath(file) || !core.scopeAllows(job.scope, file))) {
       if (files.length) throw gitError('SCOPE_AUDIT', 'Không tự commit vì thay đổi chưa qua kiểm tra phạm vi', { files })
       return null
@@ -449,13 +458,13 @@ async function processMerge(root, id) {
       updateEntry(root, id, item => { item.baseSha = probe.sha })
       fs.mkdirSync(path.dirname(integration), { recursive: true })
       await git(root, ['worktree', 'add', '--detach', integration, probe.sha])
-      if (!await bootstrapDependencies(root, integration)) throw gitError('NEEDS_DEPS', 'Integration worktree chưa có dependency phù hợp')
       try { await git(integration, ['merge', '--no-ff', '--no-commit', entry.headSha]) }
       catch (e) {
         const conflicts = nul((await git(integration, ['diff', '--name-only', '--diff-filter=U', '-z'])).stdout)
         if (conflicts.length) throw gitError('CONFLICT', 'Nhánh xung đột với thay đổi đã gộp', { files: conflicts })
         throw e
       }
+      if (!await bootstrapDependencies(root, integration)) throw gitError('NEEDS_DEPS', 'Integration worktree chưa có dependency phù hợp')
       await git(integration, ['-c', 'user.name=Agent Chat', '-c', 'user.email=agent-chat@local', 'commit', '-m', `merge agent ${entry.agent}`, '-m', `Agent-Chat-Queue: ${entry.id}`])
       const candidateSha = await gitHead(integration)
       entry = updateEntry(root, id, item => { item.candidateSha = candidateSha; item.state = 'checking'; item.updatedAt = now() })
@@ -927,6 +936,15 @@ async function executeJob(job) {
         metadataChanged = core.changedPaths(metadataBefore, metadataAfter)
         if (!settled(metadataBefore) || !settled(metadataAfter)) auditComplete = false
         paths.push(...metadataChanged.filter(file => !core.scopeAllows(job.scope, file)))
+      }
+      if (job.worktree && paths.length) {
+        const probe = await repoProbe(job.root).catch(() => null)
+        if (probe?.sha) {
+          const diff = nul((await git(job.cwd, ['diff', '--no-renames', '--name-only', '-z', probe.sha]).catch(() => ({ stdout: '' }))).stdout)
+          const untracked = nul((await git(job.cwd, ['ls-files', '--others', '--exclude-standard', '-z']).catch(() => ({ stdout: '' }))).stdout)
+          const diffSet = new Set([...diff, ...untracked])
+          paths = paths.filter(file => isChatPath(file) || diffSet.has(file))
+        }
       }
     } catch { auditComplete = false }
     if (job.auditController.signal.aborted) {
