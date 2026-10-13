@@ -59,3 +59,15 @@ QA chạy trên main `5ddbaeb`, check của QA đã vào main ở `6e7eb53`. `no
   - Mong muốn: kiểm manifest **sau khi** merge nhánh vào integration. Nếu deps đổi thật thì dừng ở trạng thái `needs-deps` và có một tin hệ thống, không tự cài. Nếu chỉ đổi `version` thì vẫn gộp như T38.
 - Giao dev-be sửa cả hai lỗi trong T38 (T38 quay lại Đang làm). Sửa xong thì đổi 2 xfail này thành assert thường trong `check.js`. QA chạy lại hai ca này rồi T37 mới đóng.
 - T34 → Xong. T35 và T36 giữ Chờ duyệt cho tới khi End-User thử tay trong Electron: cuộn khi gom tin, phím trên File chung, theme sáng/tối, cửa sổ hẹp.
+
+## Nghiệm thu T37 lần 2 (PM, 2026-10-13): đạt
+- QA kiểm trên main `90d16de`: `node check.js` xanh, harness main.js chạy thêm 2 lần vẫn ổn định.
+- Hai ca `T37-tu-merge-main` và `T37-doi-deps-van-gop` đã đạt ở dạng assert. QA thêm 2 ca mới cũng đạt: nhánh chỉ tăng version vẫn gộp được; agent tự sửa file ngoài phạm vi vẫn bị cảnh báo đúng tên và không được commit. R2–R7 không hồi quy.
+- T37, T38 → Xong. **T35 và T36 giữ Chờ duyệt cho tới khi End-User thử tay** (xem danh sách bên dưới). T31 (Sprint 8) vẫn chờ thử tay.
+- Backlog (góp ý của QA): khi bị chặn vì đổi deps, tin hiện chỉ ghi "chưa có dependency phù hợp", và bấm Thử lại sẽ kẹt mãi. Nên ghi rõ End-User cần tự gộp rồi chạy `npm install`.
+
+### Việc End-User thử tay (khởi động lại app trước, vì main.js và core.js đã đổi)
+1. R2: chat có nhiều tin "chuyển T… sang…" / "Đã gộp nhánh…" liên tiếp thì gom thành "N cập nhật · Xem". Bấm Xem và Thu gọn không làm nhảy vị trí cuộn. Tìm một tin nằm trong nhóm thì nhảy tới đúng tin đó.
+2. R3: memory.md và roadmap.md được ghim ở đầu File chung, các file khác nhóm theo sprint. Mở/đóng nhóm được bằng phím. Đổi box rồi quay lại thì nhóm vẫn giữ trạng thái mở. Hàng chờ merge ẩn khi trống.
+3. R4: thanh đang chạy hiện nhãn ngắn, bấm vào mới xem đủ lệnh. Nút Dừng vẫn thấy khi thu hẹp cửa sổ. Kiểm cả theme sáng và tối.
+4. R5/R7: nút "Timeline · Chi phí" dễ thấy. Popup trên avatar Claude hiện số đo ngữ cảnh; codex/agy hiện "chưa có dữ liệu".
