@@ -1198,6 +1198,33 @@ function viewerRoot(root, workspaceId, href = '') {
   return expected
 }
 
+// Absolute links in old replies may omit workspace metadata. Only this project's registered worktrees qualify.
+function viewerTarget(root, href, fromFile, workspaceId) {
+  const decoded = core.decodedPath(href)
+  const contains = (base, file) => {
+    const rel = path.relative(base, file)
+    return rel !== '..' && !rel.startsWith('..' + path.sep) && !path.isAbsolute(rel)
+  }
+  if (path.isAbsolute(decoded)) {
+    fromFile = null
+    workspaceId = null
+    let relative = contains(root, decoded) ? path.relative(root, decoded) : null
+    if (relative === null) {
+      const record = readWorktrees(root).agents.find(item => contains(managedPath(root, 'agents', item.id), decoded))
+      if (record) {
+        workspaceId = record.id
+        relative = path.relative(viewerRoot(root, record.id), decoded)
+        if (isChatPath(relative.split(path.sep).join('/'))) workspaceId = null
+      }
+    }
+    // core resolves the root's realpath; a relative href also works when userData itself has a symlinked parent.
+    if (relative !== null) href = relative.split(path.sep).map(encodeURIComponent).join('/') || '.'
+  }
+  const base = viewerRoot(root, workspaceId, decoded)
+  const record = base === root ? null : readWorktrees(root).agents.find(item => item.id === workspaceId)
+  return { base, href, fromFile, workspace: record ? { id: record.id, branch: record.branch } : null }
+}
+
 function watchProject(dir, file = null, workspaceId = null) {
   clearProjectWatch()
   if (dir == null) return { ok: true }
@@ -1317,13 +1344,9 @@ function fullEscalations(before, next) {
 }
 function resolveFile(dir, input, workspaceId = null) {
   const root = knownProject(dir)
-  if (typeof input !== 'string' || !input || /[\0-\x1f\x7f]/.test(input) || input.includes('\\')) throw new Error('Đường dẫn không hợp lệ')
-  let decoded
-  const raw = input.split('#')[0].split('?')[0]
-  try { decoded = path.isAbsolute(raw) && fs.existsSync(raw) ? raw : decodeURIComponent(raw) } catch { throw new Error('Đường dẫn mã hóa không hợp lệ') }
-  if (/^[A-Za-z][A-Za-z0-9+.-]*:/.test(decoded) || decoded.startsWith('//')) throw new Error('Không hỗ trợ kiểu liên kết này')
+  const decoded = core.decodedPath(input)
   if (decoded.split('/').includes('..')) throw new Error('Đường dẫn không được chứa ..')
-  const file = core.resolveProjectFile(viewerRoot(root, workspaceId, decoded), decoded)
+  const file = core.resolveProjectFile(viewerRoot(root, workspaceId, decoded), input)
   if (!file.canOpenExternal) throw new Error('Không hỗ trợ mở trực tiếp file này')
   return file.real
 }
@@ -1602,10 +1625,10 @@ ipcMain.handle('retract', (event, dir, seq) => {
   })
 })
 ipcMain.handle('tasks', (event, dir) => { validSender(event); return core.taskBoardIndexed(knownProject(dir)) })
-ipcMain.handle('readProjectFile', (event, dir, href, fromFile, workspaceId) => {
+ipcMain.handle('readProjectFile', async (event, dir, href, fromFile, workspaceId) => {
   validSender(event)
-  const root = knownProject(dir), base = viewerRoot(root, workspaceId, href)
-  return core.readProjectFile(base, href, fromFile)
+  const root = knownProject(dir), target = viewerTarget(root, href, fromFile, workspaceId)
+  return { ...await core.readProjectFile(target.base, target.href, target.fromFile), workspace: target.workspace }
 })
 ipcMain.handle('saveImage', (event, dir, data) => { validSender(event); return apiCall(async () => ({ path: core.saveImage(knownProject(dir), data) })) })
 ipcMain.handle('readImage', (event, dir, href, fromFile, workspaceId) => {

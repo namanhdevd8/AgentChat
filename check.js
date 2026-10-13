@@ -365,11 +365,21 @@ async function viewerChecks() {
   assert.strictEqual((await R('./roadmap.md?x=1#h', 'reports/a.md')).file.path, 'reports/roadmap.md')
   r = await R('../src/x.js', 'reports/a.md'); assert.deepStrictEqual([r.file.path, r.file.format, r.file.canOpenExternal], ['src/x.js', 'text', false])
   assert.ok((await R(path.join(box, 'reports/roadmap.md'))).ok) // absolute link from old chats
+  const fileURL = rel => require('url').pathToFileURL(path.join(box, rel)).href
+  for (const rel of ['index.html', 'renderer.js', 'data.json', 'config.yaml', 'table.csv', 'notes.txt', 'src/việt #%.tsx']) {
+    w(rel, '<script>this is source, not executable HTML</script>')
+    const source = await R(fileURL(rel))
+    assert.deepStrictEqual([source.ok, source.file.path, source.file.format, source.file.canOpenExternal], [true, rel, 'text', false])
+    assert.strictEqual(source.file.content, '<script>this is source, not executable HTML</script>')
+  }
+  assert.strictEqual((await R(fileURL('reports/out.md'))).code, 'OUTSIDE_PROJECT')
+  assert.strictEqual((await R('file://remote.example/a.js')).code, 'INVALID_PATH')
+  assert.strictEqual((await R(fileURL('renderer.js') + '%00')).code, 'INVALID_PATH')
   assert.strictEqual((await R('reports/bom.md')).file.content, 'xin chào')
   for (const [href, from, want] of [['../x', null, 'OUTSIDE_PROJECT'], ['%2e%2e/%2e%2e/etc/hosts', null, 'OUTSIDE_PROJECT'],
     ['reports/../../x', null, 'OUTSIDE_PROJECT'], [`../${path.basename(box)}x/s.md`, null, 'OUTSIDE_PROJECT'],
     ['reports/out.md', null, 'OUTSIDE_PROJECT'], ['/etc/hosts', null, 'OUTSIDE_PROJECT'], ['roadmap.md', '../../etc/hosts', 'OUTSIDE_PROJECT'],
-    ['javascript:alert(1)', null, 'INVALID_PATH'], ['file:///etc/hosts', null, 'INVALID_PATH'], ['a\\b', null, 'INVALID_PATH'], ['%zz', null, 'INVALID_PATH'],
+    ['javascript:alert(1)', null, 'INVALID_PATH'], ['file:///etc/hosts', null, 'OUTSIDE_PROJECT'], ['a\\b', null, process.platform === 'win32' ? 'NOT_FOUND' : 'INVALID_PATH'], ['%zz', null, 'INVALID_PATH'],
     ['reports/nope.md', null, 'NOT_FOUND'], ['reports/bin.dat', null, 'UNSUPPORTED'], ['reports', null, 'UNSUPPORTED'], ['reports/big.txt', null, 'TOO_LARGE']]) {
     r = await R(href, from); assert.strictEqual(r.code, want, `${href} → ${r.code}`)
   }
@@ -1021,6 +1031,53 @@ async function rendererChecks() {
   assert.deepStrictEqual(notices, [], 'merge response from the previous box must be ignored')
 }
 
+// File links: exercise the renderer's routing and viewer state, alongside the real main/core checks below.
+async function rendererFileChecks() {
+  const ui = fs.readFileSync(path.join(__dirname, 'renderer.js'), 'utf8'), vm = require('vm'), nodes = new Map(), opened = [], watched = []
+  const part = (from, to) => ui.slice(ui.indexOf(from), ui.indexOf(to, ui.indexOf(from)))
+  const el = (tag, className = '', textContent = '') => ({ tag, className, textContent, children: [], attrs: {},
+    append(...c) { this.children.push(...c) }, replaceChildren(...c) { this.children = c }, setAttribute(k, v) { this.attrs[k] = v },
+    getAttribute(k) { return this.attrs[k] }, focus() {}, showModal() { this.open = true }, close() { this.open = false } })
+  const $ = id => { if (!nodes.has(id)) nodes.set(id, el('div')); return nodes.get(id) }
+  const workspace = { id: 'dev-tree', branch: 'agents/dev' }, content = '<script>alert(1)</script>', name = 'việt #%.html'
+  const ctx = vm.createContext({ $, el, dir: '/p', team: [{ name: 'pm' }], base: p => p.split('/').pop(), NodeFilter: { SHOW_TEXT: 4 },
+    window: { markdownit: require('markdown-it') }, document: { activeElement: null, createTextNode: text => el('text', '', text),
+      createDocumentFragment: () => el('frag'), createTreeWalker: root => { let i = 0; return { nextNode: () => root.textNodes[i++] } } },
+    api: { readProjectFile: async (...args) => { opened.push(args); return { ok: true, workspace, file: { path: name, name, format: 'text', content } } },
+      watchProject: async (...args) => watched.push(args), openLink: () => assert.fail('file link must not open the browser') } })
+  vm.runInContext(part('let mdInstance', 'function loadImages'), ctx)
+  vm.runInContext(part('let currentViewerPath', 'async function refreshFiles'), ctx)
+  const href = 'file:///Users/a/Library/Application%20Support/Agent%20Chat/renderer.js'
+  const md = ctx.initMarkdown()
+  assert.ok(md.render(`[renderer.js](${href})`).includes(`href="${href}"`), 'the link from the screenshot must be clickable')
+  for (const denied of ['javascript:alert(1)', 'data:text/html,x', 'vbscript:x', '//remote/x.js']) assert.strictEqual(md.validateLink(denied), false)
+  const linked = (text, parent = '') => {
+    const node = { nodeValue: text, parentElement: { closest: selector => selector === parent },
+      parentNode: { replaceChild: frag => { node.fragment = frag } } }
+    ctx.linkifyFiles({ textNodes: [node] })
+    return node.fragment?.children.filter(n => n.tag === 'a').map(n => n.attrs.href) || []
+  }
+  assert.deepStrictEqual(linked('renderer.js index.html src/view.ts config.yaml data.json .chat2/memory.md reports/custom.abc'),
+    ['renderer.js', 'index.html', 'src/view.ts', 'config.yaml', 'data.json', '.chat2/memory.md', 'reports/custom.abc'])
+  assert.deepStrictEqual(linked(href), [href])
+  assert.deepStrictEqual(linked('https://example.com/a.js x@example.js console.log()'), [])
+  assert.deepStrictEqual(linked('renderer.js', 'pre'), [])
+  assert.deepStrictEqual(linked('renderer.js', 'a'), [])
+  let click, prevented = false
+  const anchor = el('a', '', 'renderer.js'); anchor.setAttribute('href', href)
+  ctx.bindLinkHandler({ querySelectorAll: () => [anchor], addEventListener: (event, handler) => { click = handler } })
+  await click({ target: { closest: () => anchor }, preventDefault: () => { prevented = true } })
+  assert.ok(prevented)
+  assert.deepStrictEqual(opened[0], ['/p', href, null, undefined])
+  assert.deepStrictEqual(watched[0], ['/p', 'vi%E1%BB%87t%20%23%25.html', workspace.id])
+  assert.strictEqual($('#viewer-body').children[0].tag, 'pre')
+  assert.strictEqual($('#viewer-body').children[0].textContent, content, 'HTML source must remain inert text')
+  assert.strictEqual($('#viewer-title').textContent, name + ' [Nhánh agents/dev]')
+  await vm.runInContext('openFileViewer(currentViewerHref, null, currentViewerWorkspace)', ctx)
+  assert.deepStrictEqual(opened[1], ['/p', 'vi%E1%BB%87t%20%23%25.html', null, workspace.id])
+  console.log('ok (file links and viewer)')
+}
+
 // ---- Sprint 9 FE: R2 grouping rule and R3 File chung, run from renderer.js in a vm (geometry/keyboard/theme still need Electron) ----
 async function rendererS9Checks() {
   const ui = fs.readFileSync(path.join(__dirname, 'renderer.js'), 'utf8'), vm = require('vm'), nodes = new Map(), store = new Map(), opened = []
@@ -1032,6 +1089,7 @@ async function rendererS9Checks() {
   const ctx = vm.createContext({ $, el, base: p => p.split(/[\\/]/).pop(), fileIcon: () => el('svg'), openFileViewer: f => opened.push(f),
     document: { createDocumentFragment: () => el('frag') }, dir: '/p', box: '.chat', openSeq: 1, api: { files: async () => list },
     localStorage: { getItem: k => store.has(k) ? store.get(k) : null, setItem: (k, v) => store.set(k, v) } })
+  vm.runInContext(part('const fileHref', 'let currentViewerHref'), ctx)
   vm.runInContext(part('function isGroupableSystemMsg', 'function createMsgElement'), ctx)
   vm.runInContext(part('async function refreshFiles', "$('#new').onclick"), ctx)
   // R2: only the allowlisted success kinds are folded; never by text, never errors/actions
@@ -1321,6 +1379,32 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
   assert.deepStrictEqual(entries.map(e => [e.agent, e.state]), [['dev-a', 'blocked-dirty']])
   await waitFor('tin báo chưa gộp', () => log().some(m => m.from === 'system' && m.text.startsWith('@dev-a chưa gộp được nhánh')))
   assert.strictEqual(lines()[0], 'l0')
+  // A file:// link from an agent's unmerged worktree must show that tree, including old replies without workspace metadata.
+  const linkedWorkspace = JSON.parse(fs.readFileSync(registryFile, 'utf8')).agents.find(a => a.agent === 'dev-a')
+  const toURL = require('url').pathToFileURL
+  let viewed = await call('readProjectFile', root, toURL(path.join(linkedWorkspace.path, 'a.txt')).href)
+  assert.ok(viewed.ok, JSON.stringify(viewed))
+  assert.deepStrictEqual([viewed.file.content.split('\n')[0], viewed.workspace.id], ['A0', linkedWorkspace.id])
+  viewed = await call('readProjectFile', root, viewed.file.path, null, viewed.workspace.id)
+  assert.strictEqual(viewed.file.content.split('\n')[0], 'A0', 'reload must keep the inferred worktree')
+  viewed = await call('readProjectFile', root, toURL(at('a.txt')).href, 'missing.md', linkedWorkspace.id)
+  assert.deepStrictEqual([viewed.file.content.split('\n')[0], viewed.workspace], ['l0', null], 'absolute main link overrides the reply workspace')
+  viewed = await call('readProjectFile', root, toURL(path.join(linkedWorkspace.path, '.chat/memory.md')).href)
+  assert.deepStrictEqual([viewed.ok, viewed.workspace, viewed.file.path], [true, null, '.chat/memory.md'])
+  const linkedSource = path.join(linkedWorkspace.path, 'việt #%.html')
+  fs.writeFileSync(linkedSource, '<script>source</script>')
+  try {
+    viewed = await call('readProjectFile', root, toURL(linkedSource).href)
+    assert.deepStrictEqual([viewed.file.format, viewed.file.content], ['text', '<script>source</script>'])
+    const href = viewed.file.path.split('/').map(encodeURIComponent).join('/')
+    assert.strictEqual((await call('readProjectFile', root, href, null, viewed.workspace.id)).file.content, viewed.file.content)
+  } finally { fs.unlinkSync(linkedSource) }
+  const siblingWorkspace = linkedWorkspace.path + '-other'
+  fs.mkdirSync(siblingWorkspace); fs.writeFileSync(path.join(siblingWorkspace, 'secret.txt'), 'outside')
+  try {
+    viewed = await call('readProjectFile', root, toURL(path.join(siblingWorkspace, 'secret.txt')).href, null, linkedWorkspace.id)
+    assert.strictEqual(viewed.code, 'OUTSIDE_PROJECT')
+  } finally { fs.rmSync(siblingWorkspace, { recursive: true, force: true }) }
   fs.rmSync(at('dirty.tmp'))
   const blockedId = entries[0].id
   assert.ok((await call('retryMerge', root, { queueId: blockedId })).ok)
@@ -1520,7 +1604,7 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
     console.log('ok (boxes)')
   }
 }
-logChecks().then(needsChecks).then(timelineChecks).then(taskChecks).then(auditChecks).then(viewerChecks).then(runChecks).then(sprint7Checks).then(sprint8Checks).then(sprint9Checks).then(sprint6Checks).then(rendererChecks).then(rendererS9Checks).then(mainChecks).then(() => console.log('ok'), e => { console.error(e); process.exit(1) })
+logChecks().then(needsChecks).then(timelineChecks).then(taskChecks).then(auditChecks).then(viewerChecks).then(runChecks).then(sprint7Checks).then(sprint8Checks).then(sprint9Checks).then(sprint6Checks).then(rendererChecks).then(rendererFileChecks).then(rendererS9Checks).then(mainChecks).then(() => console.log('ok'), e => { console.error(e); process.exit(1) })
 
 // PM creates a task and moves it in the same turn (no revision yet): "" is accepted only for PM on a todo task
 {

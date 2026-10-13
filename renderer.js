@@ -1264,8 +1264,8 @@ function initMarkdown() {
     mdInstance = new window.markdownit({ html: false, linkify: false, breaks: true })
     mdInstance.validateLink = (url) => {
       const trimmed = (url || '').trim()
-      if (/^(?:javascript|data|vbscript|file):/i.test(trimmed) || /^\/\//.test(trimmed)) return false
-      if (/^[a-z0-9+.-]+:/i.test(trimmed) && !/^https?:/i.test(trimmed)) return false
+      if (/^(?:javascript|data|vbscript):/i.test(trimmed) || /^\/\//.test(trimmed)) return false
+      if (/^[a-z0-9+.-]+:/i.test(trimmed) && !/^(?:https?|file):/i.test(trimmed)) return false
       return true
     }
     // no src the browser would fetch by itself: loadImages reads project files through main
@@ -1309,7 +1309,7 @@ function linkifyFiles(root, context = {}) {
     }
     textNodes.push(node)
   }
-  const regex = /((?:reports|\.chat)\/[\w.\/-]+\w|(?<![\w@])@[\w-]+)/ // file paths, and @mentions (same name rule as core.mentions)
+  const regex = /((?<![\w@.:/\\-])(?:file:\/\/[^\s<>()[\]"']+|(?:[A-Za-z]:[\\/]|\/)?(?:[\w.-]+[\\/])*[\w.-]+\.(?:md|txt|jsonl?|log|csv|ya?ml|[cm]?jsx?|tsx?|html?|css|scss|py|go|rs|java|sql|sh|toml|xml|svg|png|jpe?g|gif|webp|pdf)\b(?!\w|\s*\())|(?<![\w@.:/\\-])(?:reports|\.chat\d*)\/[\w.\/-]+\w|(?<![\w@])@[\w-]+)/i
   const members = new Set(team.map(a => a.name.toLowerCase()))
   for (const tNode of textNodes) {
     const parts = tNode.nodeValue.split(regex)
@@ -3327,6 +3327,8 @@ $('#timeline-range').replaceChildren(...TL_RANGES.map(([label, ms]) => {
 
 let currentViewerPath = null
 let currentViewerCanExternal = false
+const fileHref = p => p.split('/').map(encodeURIComponent).join('/') // paths from main are literal, not URL-encoded
+let currentViewerHref = null
 let currentViewerWorkspace = null
 let viewerGen = 0
 let lastFocusBeforeViewer = null
@@ -3335,6 +3337,7 @@ async function openFileViewer(href, fromFile = null, workspace = null) {
   if (!dir || !href) return
   const thisGen = ++viewerGen
   lastFocusBeforeViewer = document.activeElement
+  currentViewerHref = href
   currentViewerWorkspace = workspace
 
   const dialog = $('#viewer')
@@ -3343,7 +3346,7 @@ async function openFileViewer(href, fromFile = null, workspace = null) {
   const bodyEl = $('#viewer-body')
   const extBtn = $('#viewer-external')
 
-  const branchLabel = workspace?.branch ? ` [Nhánh ${workspace.branch} · chưa gộp]` : ''
+  let branchLabel = workspace?.branch ? ` [Nhánh ${workspace.branch}]` : ''
   titleEl.textContent = base(href) + branchLabel
   pathEl.textContent = href
   bodyEl.replaceChildren(el('div', 'none', 'Đang tải…'))
@@ -3357,17 +3360,21 @@ async function openFileViewer(href, fromFile = null, workspace = null) {
   try {
     const res = await api.readProjectFile(dir, href, fromFile, workspace?.id)
     if (thisGen !== viewerGen) return
+    if (Object.hasOwn(res, 'workspace')) workspace = res.workspace
+    currentViewerWorkspace = workspace
+    branchLabel = workspace?.branch ? ` [Nhánh ${workspace.branch}]` : ''
 
     if (res.ok) {
       const file = res.file
       currentViewerPath = file.path
+      currentViewerHref = fileHref(file.path)
       currentViewerCanExternal = !!file.canOpenExternal
       titleEl.textContent = (file.name || base(file.path)) + branchLabel
       pathEl.textContent = file.path
       extBtn.disabled = !file.canOpenExternal
 
       if (file.format === 'markdown') {
-        const rendered = renderMarkdown(file.content, { dir, fromFile: file.path, workspace })
+        const rendered = renderMarkdown(file.content, { dir, fromFile: currentViewerHref, workspace })
         bodyEl.replaceChildren(rendered)
       } else {
         const pre = el('pre', 'viewer-text')
@@ -3375,9 +3382,10 @@ async function openFileViewer(href, fromFile = null, workspace = null) {
         bodyEl.replaceChildren(pre)
       }
 
-      api.watchProject(dir, file.path, workspace?.id).catch(() => {})
+      api.watchProject(dir, currentViewerHref, workspace?.id).catch(() => {})
     } else {
       currentViewerPath = res.file?.path || href
+      currentViewerHref = res.file?.path ? fileHref(res.file.path) : href
       currentViewerCanExternal = !!res.file?.canOpenExternal
       titleEl.textContent = (res.file?.name || base(href)) + branchLabel
       pathEl.textContent = currentViewerPath
@@ -3400,6 +3408,7 @@ function closeViewer() {
   const dialog = $('#viewer')
   if (dialog.open) dialog.close()
   currentViewerPath = null
+  currentViewerHref = null
   currentViewerCanExternal = false
   currentViewerWorkspace = null
   if (dir) api.watchProject(dir, null).catch(() => {})
@@ -3481,7 +3490,7 @@ async function refreshFiles() {
       b.title = f
       b.setAttribute('aria-label', f)
       b.append(fileIcon(), el('span', '', base(f)))
-      b.onclick = () => openFileViewer(f, null)
+      b.onclick = () => openFileViewer(fileHref(f), null)
       return b
     }
 
@@ -3731,12 +3740,12 @@ setInterval(() => {
 
 $('#viewer-close').onclick = () => closeViewer()
 $('#viewer-reload').onclick = () => {
-  if (currentViewerPath) openFileViewer(currentViewerPath, null, currentViewerWorkspace)
+  if (currentViewerHref) openFileViewer(currentViewerHref, null, currentViewerWorkspace)
 }
 $('#viewer-external').onclick = async () => {
   if (currentViewerPath && currentViewerCanExternal) {
     try {
-      await api.openFile(dir, currentViewerPath, currentViewerWorkspace?.id)
+      await api.openFile(dir, currentViewerHref, currentViewerWorkspace?.id)
     } catch (e) {
       showToast(e.message.replace(/^.*?Error: /, ''))
     }
@@ -4001,7 +4010,7 @@ api.on('project-changed', (d, changed) => {
     if (changed.tasks) loadTasks()
     if (changed.files) refreshFiles()
     if (changed.file && currentViewerPath === changed.file) {
-      openFileViewer(currentViewerPath, null, currentViewerWorkspace)
+      openFileViewer(currentViewerHref, null, currentViewerWorkspace)
     }
   }
 })
