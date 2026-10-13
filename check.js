@@ -596,7 +596,7 @@ async function sprint7Checks() {
   for (const key of ['FAKE_TEXT', 'FAKE_TID', 'FAKE_IN']) delete process.env[key]
   // T27 (static; the popup/⚙ still need a manual look): labels from the contract and the sessions event are wired
   const ui = fs.readFileSync(path.join(__dirname, 'renderer.js'), 'utf8')
-  for (const s of ['Ngưỡng xoay phiên (token vào)', '0 = tắt. Áp dụng cho lượt kế tiếp.', 'Token vào lượt gần nhất', 'Chưa có số đo',
+  for (const s of ['Ngưỡng xoay phiên (token ngữ cảnh)', '0 = tắt. Áp dụng cho lượt kế tiếp khi có số đo ngữ cảnh.', 'Ngữ cảnh bước cuối', 'Chưa có dữ liệu',
     'Tự xoay: tắt', 'Sẽ mở phiên mới ở lượt kế tiếp', 'Không nhớ phiên', "'sessions-changed'"]) assert.ok(ui.includes(s), `renderer.js thiếu: ${s}`)
 }
 
