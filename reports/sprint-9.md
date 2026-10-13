@@ -71,3 +71,8 @@ QA chạy trên main `5ddbaeb`, check của QA đã vào main ở `6e7eb53`. `no
 2. R3: memory.md và roadmap.md được ghim ở đầu File chung, các file khác nhóm theo sprint. Mở/đóng nhóm được bằng phím. Đổi box rồi quay lại thì nhóm vẫn giữ trạng thái mở. Hàng chờ merge ẩn khi trống.
 3. R4: thanh đang chạy hiện nhãn ngắn, bấm vào mới xem đủ lệnh. Nút Dừng vẫn thấy khi thu hẹp cửa sổ. Kiểm cả theme sáng và tối.
 4. R5/R7: nút "Timeline · Chi phí" dễ thấy. Popup trên avatar Claude hiện số đo ngữ cảnh; codex/agy hiện "chưa có dữ liệu".
+
+## Lỗi End-User thử tay R3 (PM, 2026-10-13)
+- Hiện tượng (ảnh `.chat/attachments/img-aa6da05f002c.png`, `img-d5a840f792b9.png`): File chung chỉ có một nhóm "khác · 24". memory.md và roadmap.md không được ghim, sprint không được nhóm.
+- Nguyên nhân: `core.files` (core.js:1670) trả về **đường dẫn tuyệt đối**, ví dụ `/Users/namanh/Dev/ai-chat/reports/sprint-1.md`. Nhưng `renderer.js` (khoảng dòng 3420–3445) so khớp đường dẫn tương đối: `.chat/memory.md`, `reports/roadmap.md`, `startsWith('reports/')`. Vì vậy không file nào khớp. Check của QA dùng fixture tương đối nên không bắt được lỗi này.
+- Sửa (dev-fe, T35): chuyển đường dẫn về dạng tương đối so với `dir` trước khi so khớp; khi mở file vẫn giữ đường dẫn gốc. Thêm một ca vào `check.js` dùng đúng output thật của `core.files` (đường dẫn tuyệt đối). agents.json vẫn nằm trong nhóm "Khác".
