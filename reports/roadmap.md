@@ -98,3 +98,11 @@ Cấu hình còn treo: techlead vẫn `owns: []` (toàn quyền, khóa cả dự
 ## Đề xuất của PM
 
 Làm **#1, #3, #4** trước. Ba mục này nhỏ, cùng nằm ở luồng gọi CLI, và giúp End-User kiểm soát được agent cũng như chi phí. Sau đó làm #2 trước khi cho nhiều dev agent chạy song song.
+
+## Backlog sau Sprint 9 (cập nhật 2026-10-13)
+- **R1 "Cần bạn":** khi End-User gửi tin mới gọi PM, mọi yêu cầu cũ của PM bị đóng theo. End-User chọn để sau, vì hiện chỉ đọc rồi bấm x.
+- **R6:** ghi memory qua block, để PM và techlead không còn chờ nhau trên `.chat/memory.md`.
+- Chi phí theo agent và theo sprint; gắn chip trạng thái vào đúng lượt; đưa file mới sửa lên đầu File chung.
+- Tin `needs-deps` cần ghi rõ End-User phải tự gộp rồi chạy `npm install`, vì hiện bấm Thử lại sẽ kẹt mãi (góp ý QA T37).
+- R7 cho codex/agy: chưa có nguồn số đo ngữ cảnh, đang trả null.
+- Mục cũ vẫn còn: E (diff + hoàn tác), L (lượt rỗng có commit), lỗi `team-changed` ghi đè draft.
