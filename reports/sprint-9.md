@@ -29,4 +29,17 @@ Code nền: main `f32a970` (0.6.0: thu hồi tin, bộ icon SVG). FE gồm `rend
 2. Sau contract, làm song song:
    - dev-be **T34**: R7.
    - dev-fe **T35**: R2 + R3. dev-fe **T36**: R4 + R5 + hiện số đo ngữ cảnh R7 trong popup.
-3. PM nhận đủ T34, T35, T36 rồi gọi qa **T37** nghiệm thu.
+3. PM nhận đủ T34, T35, T36 (và T38) rồi gọi qa **T37** nghiệm thu.
+
+Contract T33: [sprint-9-design.md](sprint-9-design.md), PM nhận 2026-10-13. Theo mục 7 của contract, dev-be sửa thêm assertion adapter/run/session trong `check.js`, còn dev-fe sửa assertion nhãn UI trong `check.js`. Hai bên không sửa cùng một block. QA bổ sung các ca còn lại.
+
+## Hotfix T38 (dev-be): hàng chờ merge kẹt ở trạng thái NEEDS_DEPS
+PM phát hiện ngày 2026-10-13: hai nhánh pm (`8a53be0`) và techlead (`d4daff7`) nằm ở `needs-deps`. Chat không hiện tin hệ thống nào, và app cũng không tự gộp lại.
+- Nguyên nhân: main lên 0.6.0 (`f32a970`), commit này đổi `version` trong `package.json` và `package-lock.json`. Workspace đang có commit chưa gộp thì `startWorkspace` không fast-forward (main.js:212). Tiếp đó `bootstrapDependencies` so manifest của workspace với thư mục chính, thấy khác nên trả về false. Mục xếp vào hàng có state `needs-deps` (main.js:359) và không được pump. Mọi lượt sau của agent đó đều kẹt như vậy.
+- Mong muốn: chỉ đổi version (hoặc main đổi manifest) thì không chặn được nhánh chỉ sửa tài liệu. Integration worktree vốn đã tự kiểm dependency ở main.js:428. Mọi trạng thái lỗi của hàng chờ đều phải có tin hệ thống trong chat.
+- Nghiệm thu: tái hiện bằng repo mẫu (nhánh agent có commit, main bump version) thì nhánh vẫn gộp được, hoặc có tin báo rõ kèm nút Thử lại.
+- Cách gỡ tạm: End-User bấm **Thử lại** trên mục đang kẹt trong hàng chờ merge.
+
+## Điều kiện để dev bắt đầu (End-User)
+1. Bấm Thử lại cho nhánh pm và techlead trong hàng chờ merge, để `sprint-9.md` và `sprint-9-design.md` vào main. Nếu không, worktree của dev sẽ không có hai file này.
+2. Phạm vi trong ⚙: dev-fe hiện chỉ có `index.html`, cần thêm `renderer.js` và `check.js`; dev-be cần thêm `check.js` (danh sách của dev-be cũng đang thiếu `package-lock.json`).
