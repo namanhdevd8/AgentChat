@@ -71,6 +71,11 @@ const agyOut = J({ event: 'init', conversation_id: 'c1' },
 assert.deepStrictEqual(ag.parse(agyOut, { resumed: true }), { id: 'c1', text: 'ok', usage: U(6, 3), error: null })
 assert.deepStrictEqual(ag.parse('{"conversation_id":"c1","response":"ok"}').text, 'ok') // old single-JSON fixture
 assert.ok(ag.parse(J({ event: 'result', result: { response: 'x', status: 'ERROR' } })).error)
+// resumed after a failed turn: agy still says ERROR with the old error though this turn answered (agy 1.3.3)
+const agyStale = (...steps) => ag.parse(J({ event: 'user_input' }, ...steps.map((t, i) => step(i, null, { step_type: t })),
+  { event: 'result', result: { response: 'ok2', status: 'ERROR', error: 'Individual quota reached. Resets in 4h10m8s.' } }), { resumed: true })
+assert.deepStrictEqual([agyStale('system_message', 'agent_response').error, agyStale('error_message', 'agent_response').error], [null, null])
+assert.ok(agyStale('agent_response', 'error_message').error.includes('quota'))
 assert.ok(ag.parse(J({ event: 'init', conversation_id: 'c1' })).error) // no terminal
 
 // progress labels: one plain line, project-relative, no raw output

@@ -244,7 +244,7 @@ const CLI = {
     args: (p, id, a = {}) => ['-p', p, '--output-format', 'stream-json', '--print-timeout', '0', '--mode', a.readOnly ? 'plan' : 'accept-edits',
       ...(a.permissions?.mode === 'full' && !a.readOnly ? ['--dangerously-skip-permissions'] : []), ...opt('--add-dir', a.sharedChat),
       ...opt('--model', a.model), ...opt('--effort', a.effort), ...opt('--conversation', id)],
-    state: context => ({ id: null, text: null, usage: null, error: null, terminal: false, steps: new Map(), afterBoundary: !context.resumed }),
+    state: context => ({ id: null, text: null, usage: null, error: null, terminal: false, steps: new Map(), afterBoundary: !context.resumed, lastStep: null }),
     event(e, s, context) {
       if (e.event === 'init') s.id = e.conversation_id || e.init?.conversation_id || s.id
       if (e.event === 'user_input') { s.afterBoundary = true; s.steps.clear() }
@@ -253,6 +253,7 @@ const CLI = {
         s.id ||= update.conversation_id
         if (update.step_type === 'user_input') { s.afterBoundary = true; s.steps.clear(); return }
         if (!s.afterBoundary) return
+        s.lastStep = update.step_type || s.lastStep
         const status = String(update.state || update.status || e.status || '').toUpperCase()
         const index = update.step_index ?? e.step_index
         if (s.afterBoundary && /SUCCESS|COMPLETED|DONE/.test(status) && index != null && (update.usage || e.usage)) {
@@ -268,7 +269,9 @@ const CLI = {
         s.id = result.conversation_id || e.conversation_id || s.id
         s.text = result.response ?? (typeof e.result === 'string' ? e.result : e.response)
         if (!s.usage && !context.resumed) s.usage = rawUsage(result.usage || e.usage)
-        if (status !== 'SUCCESS') s.error = errorText(result.error || status) || 'Agy báo lỗi'
+        // agy keeps reporting ERROR with the conversation's last error (a quota hit last turn, a 500 it retried past) even
+        // after the turn answered: a turn that ended on the agent's answer succeeded
+        if (status !== 'SUCCESS' && !(s.text && s.lastStep === 'agent_response')) s.error = errorText(result.error || status) || 'Agy báo lỗi'
       }
     },
     result: s => ({ id: s.id, text: s.text, usage: s.usage || emptyUsage(true),
