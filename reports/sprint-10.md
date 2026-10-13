@@ -21,3 +21,18 @@ End-User duyệt V1, V2 và V3 theo [sprint-10-proposal.md](sprint-10-proposal.m
    - IPC mới (nếu có) và ca kiểm cho QA.
 2. Sau contract, làm song song: dev-be **T43** (đọc ảnh/SVG, đọc tài nguyên cho xem trước HTML, IPC) và dev-fe **T44** (khung xem đổi cỡ, hiện ảnh, tab Xem trước/Mã nguồn, iframe).
 3. PM nhận đủ T43 và T44 rồi gọi qa **T45** nghiệm thu. Trọng tâm là bảo mật của V3 và V2.
+
+## Nghiệm thu T45 (PM, 2026-10-13)
+QA kiểm trên main `7c406bc`, check của QA đã vào main `77c48b7`. Kết quả: **V1, V2, V3 đạt**, kiểm cả trên Electron 44.4.5 thật (`node check.js --electron`).
+- V3: iframe `sandbox=""`, không đoạn JS nào chạy (script, onload, `javascript:`, srcdoc, SVG). Server đếm request nhận 0 request. Meta refresh, `<base>` và bấm link đều không điều hướng được trang. Esc vẫn đóng được khi focus nằm trong iframe. CSS, `@import` và ảnh vẫn hiện đúng.
+- Node: 20 ca T41 lặp lại cho xem trước HTML và `readImage`. Symlink tài nguyên, token cũ, cổng request và điều hướng đều bị chặn.
+- **Còn 2 lỗi cho dev-be** (check.js in ra `BUG …`, đều là tiêu chí ở mục 7.1 của contract):
+  1. `T45-cap-song-song`: gửi cùng lúc 200 ảnh thì cả 200 đều được phục vụ, vượt trần 128. Nguyên nhân: main.js:1446 kiểm `resourcePaths.size` trước khi đọc, nhưng chỉ cộng sau khi đọc xong. Cần giữ chỗ (reserve) trước khi đọc.
+  2. `T45-doi-symlink-luc-xac-nhan`: trong lúc hộp xác nhận "Mở bằng trình duyệt" đang mở, đổi symlink sang file HTML khác thì app vẫn mở file mới (main.js:1868). Cần so file sau xác nhận với file đã xác minh trước đó (realpath + dev/ino), lệch thì từ chối.
+- Trạng thái: T45 → Xong. T43 trả lại dev-be sửa 2 lỗi; sửa xong thì bỏ try/BUG để thành assert. T44 giữ Chờ duyệt tới khi End-User thử tay.
+
+### Việc End-User thử tay (khởi động lại app, vì main.js và preload.js đã đổi)
+1. V1: kéo góc và dùng phím mũi tên để đổi cỡ khung xem. Phóng to rồi thu nhỏ, đóng rồi mở lại, khung phải nhớ cỡ.
+2. V2: bấm một link ảnh hoặc `.svg`, thử "Vừa khung" và "100%".
+3. V3: mở một file `.html`, chuyển qua lại giữa hai tab Xem trước và Mã nguồn. Bấm "Mở bằng trình duyệt" thì phải hiện hộp xác nhận.
+4. Kiểm lại cả 3 mục trên với theme sáng và tối.
