@@ -25,3 +25,8 @@ Chưa thêm trình xem PDF/Office hay chạy HTML trong app. Đường dẫn dà
 `npm run check` đạt (exit 0), gồm renderer VM, core thật và main IPC với Electron giả lập + repo/worktree Git thật trong thư mục tạm. Các ca mới: link giống ảnh, định dạng văn bản, ký tự đặc biệt, nhánh chưa gộp khác main, tải lại giữ nhánh, `.chat` dùng chung, thư mục có tên gần giống worktree bị từ chối, link ngoài dự án/symlink bị chặn, HTML hiện dạng text. `git diff --check` và kiểm tra cú pháp Node đạt.
 
 Sau khi gộp cần **khởi động lại app** vì thay đổi `main.js` và `core.js`. Chưa kiểm tay trong Electron thật: mở link `renderer.js` trong tin cũ của dev-fe; thử Tải lại; mở `index.html` để xác nhận hiện mã nguồn; thử một report Markdown để kiểm hồi quy.
+
+## Nghiệm thu (PM, 2026-10-13)
+- QA đã soát độc lập (T41) trên main `93570dc` và báo **đạt**. QA thử 20 cách vượt phạm vi qua IPC thật, tất cả đều bị chặn, kể cả qua `openFile` và `readImage`; các cách này: `..` thô và `%2e%2e`, symlink file và thư mục trỏ ra ngoài, worktree integration, worktree giả, `file://` có host lạ, `.chat/../..`, `fromFile` trỏ ra ngoài. Tất cả các ca đã ghi vào check.js. HTML chỉ hiện dạng chữ, tải lại vẫn giữ đúng nhánh, viewer `.md` không hồi quy.
+- T41 → Xong. **T40 giữ Chờ duyệt** cho tới khi End-User khởi động lại app và bấm thử link `renderer.js` và `index.html` trong tin cũ của dev-fe.
+- Backlog (lỗi nhẹ, QA báo): tên như "Node.js" hay "Vue.js" trong tin cũng bị tự biến thành link, bấm vào chỉ báo không tìm thấy. Nên chỉ tự tạo link khi file tồn tại, hoặc khi chuỗi có dạng đường dẫn.
