@@ -32,3 +32,15 @@ Nguồn: đánh giá P0 của techlead [p0-research-review-2026-10-14.md](p0-res
 
 ## Điều kiện trước khi bắt đầu
 Thư mục chính đang có file chưa commit: `research_notes/` và `reports/Dự án tương tự Agent Chat.md`. Vì vậy app chưa gộp được nhánh của techlead (báo cáo P0) và các nhánh sau. End-User cần commit hai mục này hoặc thêm chúng vào `.gitignore`.
+
+## Nghiệm thu T49 lần 1 (PM, 2026-10-14): chưa đạt, còn 4 lỗi BE (T47)
+QA kiểm trên main `969ff10` bằng repo tạm và main.js thật. Check của QA đã vào main `2dc1977`. `npm run check` vẫn xanh, vì các lỗi được ghi thành xfail/`BUG T49-…`.
+- **Đạt:** agent tự `done` bị chặn, kể cả task manual. Task manual không tự đóng khi check xanh, PM đóng được nếu kèm lý do. Code trên main đổi sau khi check thì bằng chứng chuyển thành "Cần kiểm lại" và PM bị từ chối. IPC `taskEvidence` không lộ đường dẫn nội bộ.
+- **Lỗi (dev-be sửa trong T47):**
+  1. **Chặn** `T49-review-reviewId`: khi bật worktree, agent gửi `review` cho task của mình thì luôn bị từ chối. Nguyên nhân: main.js:~1680 gắn thêm `reviewId` vào change, còn `parseTaskChanges` (core.js:1587) chỉ nhận `id/status/expectedRevision`. Hậu quả: mọi bàn giao code bị hỏng ngay sau khi khởi động lại app.
+  2. `T49-dung-check-cua-task-khac`: PM đóng được T901 bằng `checkIds` của T902, vì main.js:378 chỉ kiểm check đó pass mà không kiểm nó có thuộc đúng task và đúng lần bàn giao không.
+  3. `T49-check-cu-cua-ban-giao-truoc`: task mở lại rồi bàn giao code mới, nhưng merge bị chặn trước khi chạy check. Lúc này task vẫn hiện "Đã kiểm" và PM đóng được bằng check của lần bàn giao trước (lọc ở main.js:240). Bằng chứng phải gắn với lần bàn giao hiện tại.
+  4. `T49-G6-chi-phi-luot-loi`: lượt lỗi tốn 0,5 USD mà chuỗi có trần 0,1 vẫn gọi tiếp. Nguyên nhân: `core.run` gắn `partial` cho mọi lượt không thành công, nên main.js:1467 bỏ qua luôn phần chi phí đã đo được. Phải cộng phần đã biết và chỉ đánh dấu phần chưa biết.
+- Sửa xong thì đổi các xfail/`BUG T49-…` thành assert thường. Ca `T49-bo-qua` phải chạy thật sau khi sửa lỗi 1.
+- **End-User chưa khởi động lại app** cho tới khi T47 sửa xong, nếu không lỗi 1 sẽ chặn bàn giao của mọi dev.
+- Trạng thái: T47 → Đang làm. T48 và T49 giữ Chờ duyệt; QA chạy lại các ca này sau khi sửa.
