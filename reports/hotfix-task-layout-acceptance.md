@@ -48,3 +48,20 @@ Code được gộp trước khi task này tồn tại, nên check queue cũ kh�
 - Bảng task app cấp lúc 14:01 UTC xác nhận T55 ở `review`, verification `ready`, có đúng checkId trên. Đây là bằng chứng của T55; không dùng dòng “check gần nhất” trong worktree PM để suy trạng thái hotfix.
 - Giữ T55 Chờ duyệt; T56 đang được QA kiểm độc lập. Chưa có kết quả T56 hoặc phản hồi thử tay trên box thật, nên chưa đủ điều kiện đóng hotfix. Không gọi lại QA cho cùng việc đang chạy.
 - Cảnh báo `T49-nhan-queue-bi-chan` vẫn là backlog đã biết, không được ghi thành lỗi mới của bố cục. Khi đủ nghiệm thu, PM kiểm lại hiệu lực bằng chứng theo bảng task hiện hành trước khi gửi done.
+
+## QA T56 lần 1 — bố cục đạt, còn lỗi Esc (2026-10-14)
+
+QA báo kiểm độc lập trên main `18a0b92`, Electron 44.4.5 thật, bằng `node check.js --electron`; đã chạy `npm run check` và bổ sung ca IPC chậm. PM ghi nhận kết quả QA, chưa tự chạy lại Electron.
+
+- **Đạt:** cột 240/300/635px ở cả sáng/tối; panel mở đủ tám trạng thái; tên/người nhận/lỗi dài; không tràn, chồng nội dung hoặc che nút đóng. Tên tối đa hai dòng, metadata riêng, cảnh báo đổi test còn nguyên, nhóm Xong gập sẵn và output `<script>` hiện thành chữ.
+- **Đạt:** Enter trên tên mở spec; Esc đóng viewer và trả focus về tên. Enter/Space trên trạng thái mở panel bằng `taskEvidence` thật, nhãn truy cập và `aria-expanded` đúng.
+- **Đạt:** trả lời IPC đến muộn sau đổi box/tải lại không đưa task/bằng chứng cũ trở lại. QA đã thử bỏ chốt chặn trên bản thử để xác nhận ca mới thực sự phát hiện lỗi.
+- **Chưa đạt:** focus ở nút trạng thái sau khi Enter/Space mở panel → bấm Esc ngay không đóng panel; phải Tab vào panel rồi Esc mới đóng. PM đọc code xác nhận handler hiện chỉ gắn ở `renderTaskEvidencePanel`, `renderer.js:3237`.
+
+### Trả T55 cho techlead
+
+1. Sửa trong phạm vi hotfix: Esc đóng panel tương ứng khi focus vẫn ở nút trạng thái hoặc ở trong panel; `aria-expanded=false`, xóa trạng thái mở và giữ/trả focus về nút. Không bắt Esc toàn cục làm ảnh hưởng viewer hay panel/task khác; giữ thao tác mở bằng Enter/Space.
+2. Thêm assert bắt đúng chuỗi **focus nút → Enter/Space → Esc ngay, chưa Tab** và kiểm Esc trong panel vẫn hoạt động. Ca IPC chậm QA vừa thêm phải được giữ khi đồng bộ/gộp main; không sửa phần T53.
+3. Chạy `npm run check` và xác minh ca phím trên Electron thật; gửi lại review T55 để bằng chứng gắn bản sửa mới. CheckId của nguồn `18a0b92` là lịch sử, không dùng thay kết quả kiểm bản sửa Esc.
+
+PM trả T55 về Đang làm. T56 giữ Chờ duyệt; sau khi bản sửa đã gộp, PM gọi QA kiểm lại ca Esc và hồi quy mở/đóng/focus. Chưa đóng hotfix hoặc báo đã đạt toàn bộ bàn phím; phần thử trên box thật vẫn chờ sau nghiệm thu QA. Không cần task mới vì Esc đã nằm trong tiêu chí T55/T56.
