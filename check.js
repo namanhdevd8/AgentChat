@@ -1945,6 +1945,10 @@ const denials = deny ? [{ tool_name: 'Bash', tool_use_id: 'u1', tool_input: { co
 const customReply = JSON.parse(process.env.FAKE_REPLY || '{}')['dev-r']
 const text = customReply !== undefined ? customReply : (granted ? 'đã chạy npm test' : retry ? 'đã trả lời' : mode.startsWith('empty') ? '' : 'bị chặn')
 out({ type: 'system', subtype: 'init', session_id: 'C' + process.pid })
+if (mode === 'errcost') { // S11 G6: a failed turn that still cost money
+  out({ type: 'result', subtype: 'error_during_execution', is_error: true, result: 'lỗi', session_id: 'C' + process.pid, usage: { input_tokens: 1, output_tokens: 1 }, total_cost_usd: 0.5 })
+  process.exit(0)
+}
 out({ type: 'assistant', message: { id: 'M' + process.pid, content: [{ type: 'text', text: text || '' }], usage: { input_tokens: Number(process.env.FAKE_IN || 1) } } })
 out({ type: 'result', subtype: 'success', is_error: false, result: text, session_id: 'C' + process.pid,
   usage: { input_tokens: Number(process.env.FAKE_IN || 1), output_tokens: 1 }, total_cost_usd: 0.001, permission_denials: denials })
@@ -2643,6 +2647,125 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
     assert.strictEqual(badEvidence.ok, false)
     assert.strictEqual(badEvidence.error.code, 'INVALID_ARGUMENT')
     console.log('ok (sprint 11 BE IPC & verification)')
+  }
+
+  // T49 (QA, independent): Sprint 11 end to end through executeJob + merge queue — gate, evidence binding, freshness, manual, G6
+  {
+    const sleep = ms => new Promise(r => setTimeout(r, ms))
+    const xfail = async (id, fn) => { try { await fn(); console.log(`ĐÃ SỬA ${id}: bỏ xfail trong check.js`) } catch (e) { console.log(`BUG ${id}: ${e.message.split('\n')[0]}`) } }
+    // fresh agents (clean worktrees) + pm; worktrees on again
+    let cfg = await call('projectSettings', root)
+    let on2
+    for (let i = 0; i < 100 && (!on2 || on2.error?.code === 'BUSY'); i++) {
+      if (on2) await sleep(50)
+      on2 = await call('saveProjectSettings', root, { settings: { ...cfg.settings, costCeiling: null, worktreesEnabled: true }, expectedRevision: cfg.revision })
+    }
+    assert.ok(on2.ok, JSON.stringify(on2.error))
+    const qaAgent = (name, owns) => ({ name, cli: 'codex', role: name === 'pm' ? 'PM' : 'Dev', owns, resume: false, allowedCommands: ['npm run check'] })
+    const st = await call('saveTeam', root, [...core.team(root), qaAgent('pm', ['reports/**']), qaAgent('qa-a', ['*.txt']), qaAgent('qa-b', ['*.txt']), qaAgent('qa-c', ['*.txt'])],
+      { expectedRevision: core.teamRevision(root) })
+    assert.ok(st.ok, JSON.stringify(st.error))
+    const tf = at('.chat/tasks.json'), now = new Date().toISOString()
+    let existing = []; try { existing = JSON.parse(fs.readFileSync(tf, 'utf8')).tasks } catch {}
+    const mk = (id, assignee, acceptance) => ({ id, title: 'QA ' + id, assignee, spec: 'reports/qa.md', createdAt: now, updatedAt: now, acceptance })
+    fs.writeFileSync(tf, JSON.stringify({ version: 1, tasks: [...existing, mk('T901', 'qa-a', 'code'), mk('T902', 'qa-b', 'code'), mk('T903', 'qa-c', 'manual'), mk('T904', 'qa-a', 'code')] }))
+    for (const id of ['t901', 't902', 't903', 't904']) fs.writeFileSync(at(`${id}.txt`), Array.from({ length: 10 }, (_, i) => `${id}-${i}`).join('\n'))
+    git('add', 't901.txt', 't902.txt', 't903.txt', 't904.txt'); git('commit', '-qm', 'một file riêng cho mỗi task QA') // evidence is per file
+    const tasks = async () => Object.fromEntries((await call('tasks', root)).tasks.map(t => [t.id, t]))
+    const block = arr => 'xong\n```task-status\n' + JSON.stringify(arr) + '\n```'
+    const turn = async (agent, text, edits = {}) => {
+      process.env.FAKE_REPLY = JSON.stringify({ [agent]: text }); process.env.FAKE_EDITS = JSON.stringify(edits)
+      const m = log().length; await call('send', root, `@${agent} làm`)
+      await waitFor(`${agent} trả lời`, () => log().slice(m).some(x => x.from === agent)); await sleep(400)
+      delete process.env.FAKE_REPLY; delete process.env.FAKE_EDITS
+      return log().slice(m)
+    }
+    const until = async (what, fn, ms = 30000) => { for (const end = Date.now() + ms; Date.now() < end; await sleep(100)) { const v = await fn(); if (v) return v } throw new Error('Hết giờ chờ: ' + what) }
+    const review = async (agent, id, line, text) => {
+      const t = await tasks(), said = await turn(agent, block([{ id, status: 'review', expectedRevision: t[id].revision }]), { [agent]: [[`${id.toLowerCase()}.txt`, line, text]] })
+      assert.strictEqual((await tasks())[id].status, 'review', `${agent} gửi review ${id} không được nhận: ` + JSON.stringify(said.map(m => `[${m.from}] ${m.text}`)))
+      await settle(1, `merge ${agent} ${id}`)
+      return until(`${id} có kết quả kiểm`, async () => { const v = (await tasks())[id]; return v.verification.state !== 'pending' && v })
+    }
+    const approve = async (id, approval) => { const t = await tasks(); return turn('pm', block([{ id, status: 'done', expectedRevision: t[id].revision, approval }])) }
+
+    // G6: a failed turn's cost counts toward the chain ceiling (worktrees on: dev-p and qa-a run side by side, qa-a routes last)
+    cfg = await call('projectSettings', root)
+    assert.ok((await call('saveProjectSettings', root, { settings: { ...cfg.settings, costCeiling: 0.1 }, expectedRevision: cfg.revision })).ok)
+    process.env.FAKE_CLAUDE = 'errcost'; process.env.FAKE_REPLY = JSON.stringify({ 'qa-a': '@qa-b tiếp' }); process.env.FAKE_SLOW_MS = '2500'
+    mark = log().length; await call('send', root, '@dev-p @qa-a bắt đầu')
+    await waitFor('qa-a trả lời', () => log().slice(mark).some(m => m.from === 'qa-a'))
+    await waitFor('qa-b chạy hoặc chuỗi dừng', () => log().slice(mark).some(m => m.from === 'qa-b' || m.kind === 'chain-stop'), 15000)
+    delete process.env.FAKE_CLAUDE; delete process.env.FAKE_REPLY; delete process.env.FAKE_SLOW_MS
+    const g6 = log().slice(mark)
+    assert.ok(g6.findIndex(m => m.agent === 'dev-p') < g6.findIndex(m => m.from === 'qa-a'), 'thứ tự ca G6: dev-p phải lỗi trước khi qa-a gọi tiếp')
+    assert.ok(g6.some(m => m.agent === 'dev-p' && m.outcome === 'error' && m.usage?.costUsd > 0.4), 'G6: lượt lỗi của dev-p phải có chi phí')
+    await xfail('T49-G6-chi-phi-luot-loi', async () => assert.ok(g6.some(m => m.kind === 'chain-stop' && /chi phí/.test(m.text)) && !g6.some(m => m.from === 'qa-b'),
+      'lượt lỗi tốn 0,5 USD nhưng chuỗi trần 0,1 vẫn gọi tiếp (' + g6.map(m => `[${m.from}] ${m.text}`).join(' → ') + '): core gắn partial cho mọi lượt không thành công nên recordChainTurn bỏ qua cả phần chi phí đã biết'))
+    cfg = await call('projectSettings', root)
+    assert.ok((await call('saveProjectSettings', root, { settings: { ...cfg.settings, costCeiling: null }, expectedRevision: cfg.revision })).ok)
+
+    // non-PM done is refused even with an approval; manual task closes only through the PM with a reason (no review needed)
+    let out, t = await tasks()
+    out = await turn('qa-c', block([{ id: 'T903', status: 'done', expectedRevision: t.T903.revision, approval: { kind: 'manual', reason: 'tự đóng' } }]))
+    assert.ok((await tasks()).T903.status !== 'done' && out.some(m => m.from === 'qa-c' && m.text.startsWith('xong')), 'agent tự đóng task (kể cả manual) phải bị chặn, lời trả lời giữ nguyên')
+    // review → queue → check: ready with exactly the check of that hand-off. Everything below needs an owner's review to land.
+    let r1
+    try { r1 = await review('qa-a', 'T901', 2, 'S11-A') } catch (e) {
+      console.log(`BUG T49-review-reviewId: ${e.message.split('\n')[0]} — main gắn reviewId vào change (main.js ~1680) nhưng parseTaskChanges chỉ nhận id/status/expectedRevision (core.js:1587)`)
+      console.log('BUG T49-bo-qua: các ca bằng chứng/duyệt (dùng check task khác, check cũ của bàn giao trước, manual, stale) chưa chạy được vì lỗi trên')
+      await settle(1, 'merge qa-a không liên kết').catch(() => {})
+      return
+    }
+    const r2 = await review('qa-b', 'T902', 8, 'S11-B')
+    assert.deepStrictEqual([r1.status, r1.verification.state, r1.verification.checkIds.length, r2.verification.state], ['review', 'ready', 1, 'ready'], JSON.stringify([r1.verification, r2.verification]))
+    const [X] = r1.verification.checkIds, [Y] = r2.verification.checkIds
+    const ev = await call('taskEvidence', root, { taskId: 'T901', expectedRevision: r1.revision })
+    assert.ok(ev.ok && ev.checks.some(c => c.id === X && c.outcome === 'passed' && c.candidateSha) && !JSON.stringify(ev).includes(userData), 'taskEvidence: hồ sơ đúng task, không lộ đường dẫn nội bộ')
+    // non-PM done with a check approval on its own code task
+    out = await turn('qa-a', block([{ id: 'T901', status: 'done', expectedRevision: r1.revision, approval: { kind: 'checks', checkIds: [X] } }]))
+    assert.ok((await tasks()).T901.status === 'review' && out.some(m => m.from === 'qa-a' && m.text.startsWith('xong')), 'agent tự done phải bị chặn')
+    // PM cites another task's passing check
+    await xfail('T49-dung-check-cua-task-khac', async () => {
+      out = await approve('T901', { kind: 'checks', checkIds: [Y] })
+      assert.strictEqual((await tasks()).T901.status, 'review', 'PM đóng được T901 bằng check của T902 (approval.checkIds không bị kiểm thuộc đúng task/bàn giao)')
+    })
+    if ((await tasks()).T901.status === 'review') { out = await approve('T901', { kind: 'checks', checkIds: [X] }) }
+    const d1 = (await tasks()).T901
+    assert.deepStrictEqual([d1.status, d1.verification.approval?.reviewer], ['done', 'pm'], 'PM đóng được bằng đúng check của task: ' + JSON.stringify(out.map(m => `[${m.from}] ${m.text}`)))
+
+    // reopen + new hand-off whose merge is blocked before any check: the old pass must not make it ready
+    t = await tasks(); await turn('pm', block([{ id: 'T902', status: 'doing', expectedRevision: t.T902.revision }]))
+    fs.writeFileSync(at('dirty.tmp'), 'x')
+    t = await tasks(); await turn('qa-b', block([{ id: 'T902', status: 'review', expectedRevision: t.T902.revision }]), { 'qa-b': [['t902.txt', 8, 'S11-B2']] })
+    await settle(1, 'merge qa-b bị chặn vì thư mục bẩn')
+    const v2 = (await tasks()).T902
+    await xfail('T49-check-cu-cua-ban-giao-truoc', async () => {
+      assert.notStrictEqual(v2.verification.state, 'ready', `bàn giao mới chưa được kiểm (queue ${queue().at(-1).state}) nhưng vẫn "ready" nhờ check ${v2.verification.checkIds} của lần trước`)
+      await approve('T902', { kind: 'checks', checkIds: v2.verification.checkIds.length ? v2.verification.checkIds : [Y] })
+      assert.strictEqual((await tasks()).T902.status, 'review', 'PM đóng được T902 khi code mới chưa từng chạy check')
+    })
+    fs.rmSync(at('dirty.tmp'))
+
+    // manual task: a green merge never closes it; only the PM with a reason
+    const r3 = await review('qa-c', 'T903', 9, 'S11-C')
+    assert.deepStrictEqual([r3.status, r3.verification.state], ['review', 'manual'])
+    await approve('T903', { kind: 'manual', reason: 'Đã nghiệm thu tay theo spec' })
+    const d3 = (await tasks()).T903
+    assert.deepStrictEqual([d3.status, d3.verification.approval?.kind, d3.verification.approval?.reviewer], ['done', 'manual', 'pm'])
+
+    // freshness: main changes the hand-off's file after the check → stale, PM refused
+    const r4 = await review('qa-a', 'T904', 3, 'S11-D')
+    assert.strictEqual(r4.verification.state, 'ready', JSON.stringify(r4.verification))
+    const L = fs.readFileSync(at('t904.txt'), 'utf8').split('\n'); L[3] = 'main sửa sau check'; fs.writeFileSync(at('t904.txt'), L.join('\n'))
+    git('commit', '-qam', 'main đổi file của T904')
+    const s4 = (await tasks()).T904
+    assert.strictEqual(s4.verification.state, 'stale', 'code của bàn giao đổi trên main sau check phải thành stale')
+    await approve('T904', { kind: 'checks', checkIds: r4.verification.checkIds })
+    assert.strictEqual((await tasks()).T904.status, 'review', 'PM đóng được task có bằng chứng đã cũ')
+    // legacy: the log is still readable and old done events keep their state
+    assert.ok((await call('logPage', root)).page.messages.length > 0)
+    console.log('ok (T49 sprint 11 end to end)')
   }
 }
 // Cài đặt › CLI Agent: a scan lists each real file once, PATH first and executables only; a check reads the version and
