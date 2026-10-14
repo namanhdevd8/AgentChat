@@ -60,3 +60,23 @@ QA worktree sạch, HEAD **`a097c78`**; code kiểm đã lưu dù app báo từ 
 5. PM sẽ điều phối làm mới bằng chứng T53/T55 khi code và test ổn định. QA kiểm lại contract mục 9 còn thiếu, giữ kết quả T56 riêng; không coi việc sửa ba lỗi là bằng chứng tự động rằng toàn Sprint 12 đạt.
 
 T56 dùng approval manual có reason dẫn tên báo cáo; chưa cần trường report tùy chọn vì chưa xác nhận app đang chạy đã nạp hotfix T54. Không đổi acceptance hoặc dùng manual cho task code.
+
+## Nhận bản sửa và giao QA lần 2 (2026-10-14)
+
+**Nền nghiệm thu mới: main `db0ea6ad2520a575dfe3b56c17a4b89e0257ac8f` (`db0ea6a`).** Nguồn BE `f74675e639ded7a9b1b1fa06455ca0b6317d0c2f` đã gộp vào 16:48:20 UTC, queue `a276e849-94c2-4582-a4da-108d9b4e0d89` ở trạng thái merged.
+
+- Check app trên nguồn: `251cd6b1-63b9-48a7-8466-1c87770c64f1`, exit 0, 71.944 giây. Check bản gộp: **`66ab6944-e5ef-4d2a-a568-b9304c3d89ae`**, exit 0, 72.499 giây, treeStable=true. Hồ sơ gộp liên kết đủ T51/T54/T57 và đúng reviewIds/source/candidate lần này.
+- PM đối chiếu `check.js` với nhánh QA `a097c78`: giữ toàn bộ ca QA, chốt yêu cầu marker cuối và marker sau T57. Chỉ đổi fixture pingPong từ lời nhắn cố định thành `lượt {n}` để ca phanh chạy độc lập với bộ lọc tin trùng; ca S2 lời nhắn giống nhau vẫn còn. Không có assert bị bỏ hoặc chuyển xfail.
+- PM đọc diff thấy `ask` được đưa ra ngoài Git lock, claim vẫn được tạo trong khóa; Tiếp tục tra childChainId từ claim/cache/store/log; S2 lọc trước khi thêm pending. Đây là đối chiếu bản sửa, chưa phải kết luận toàn contract đạt. PM không chạy lại bộ kiểm sản phẩm.
+
+### Giao T52 kiểm lại
+
+QA đồng bộ main `db0ea6a`, giữ các assertion và fixture đã được tích hợp; hoàn tất xung đột trong lượt nếu có. Không dùng bản sao vá tạm của lần 1. Mục queue QA cũ check-failed không phải bản sửa sản phẩm mới; không bấm Yêu cầu sửa để xử lý mục đó.
+
+1. Kiểm lại cả ba lỗi trên code thật: repair kết thúc và queue/worktree tiếp tục được; Tiếp tục tuần tự/đồng thời cùng childChainId; tin trùng khi halt không tạo pending/thẻ rỗng. Bổ sung kiểm quanh sửa khóa: double click, lỗi trước khi có job, yêu cầu đến lúc claim đã tạo nhưng chưa dispatch, restart không cấp trùng hoặc che mất việc chưa chạy.
+2. **Điểm cần soát thêm:** trong bản sửa vẫn có fallback trả `chainId: stopId` nếu tìm thấy bản ghi continue nhưng không giải ra childChainId. Kiểm bằng log legacy/mất trường liên kết và đối chiếu contract mục 5.3; không chỉ thử đường claim hiện hành. Dữ kiện không đủ phải báo không khả dụng thay vì báo chuỗi cha là chuỗi tiếp tục thành công.
+3. Hoàn tất các ca bắt buộc còn lại của contract mục 9, đặc biệt pending giữ tin nguồn, nhánh đến muộn, restart/claim, bằng chứng kiểm và merge attempt. Ghi từng nhóm đạt/chưa đạt/chưa kiểm; không suy toàn contract đạt chỉ từ ba regression đã xanh.
+4. Kiểm T54 và T57 cùng hồi quy Sprint 11 trên harness chạy tới cuối. Chạy `npm run check` và `node check.js --electron` mỗi bộ một lần sau khi chuẩn bị ca kiểm, lưu SHA/exit/output; lỗi hoặc timeout thì báo, không chạy vòng lặp tìm lần xanh. Ca mới chỉ chạy lại khi có thay đổi hoặc giả thuyết cụ thể cần xác minh.
+5. Gửi kết luận T52 và review bằng block cuối cùng. **T56 đã Xong, không mở lại**; hồi quy giao diện trong lần này thuộc nghiệm thu tích hợp T52. T51/T53/T54/T55/T57 giữ review trong thời gian chờ.
+
+PM chuyển T52 sang Đang làm. Sau QA, mới làm mới bằng chứng T53/T55 và xét đóng các task code; không dùng hồ sơ cũ trước chốt cuối harness. Phản hồi trên box thật của T55 vẫn chưa có.
