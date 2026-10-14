@@ -2125,7 +2125,8 @@ function electronChecks() {
   fs.mkdirSync(appDir) // loadFile('index.html') resolves against the entry's folder: mirror the project there with symlinks
   for (const f of fs.readdirSync(__dirname)) fs.symlinkSync(path.join(__dirname, f), path.join(appDir, f))
   fs.writeFileSync(path.join(appDir, 'qa-entry.js'), `(${qaElectronEntry})()`)
-  const r = spawnSync(path.join(__dirname, 'node_modules', '.bin', 'electron'), [path.join(appDir, 'qa-entry.js')], { encoding: 'utf8', timeout: 150000,
+  // the Electron binary itself (not the .bin wrapper): on timeout the real process is killed, never left holding the pipes
+  const r = spawnSync(require('electron'), [path.join(appDir, 'qa-entry.js')], { encoding: 'utf8', timeout: 150000, killSignal: 'SIGKILL',
     env: { ...process.env, QA_MAIN: path.join(appDir, 'main.js'), SHELL: '/nonexistent' } })
   fs.rmSync(tmp, { recursive: true, force: true })
   const line = String(r.stdout + r.stderr).split('\n').find(l => l.startsWith('E2E '))
@@ -2141,7 +2142,8 @@ function qaElectronEntry() { // runs inside Electron, serialized by electronChec
   const MAIN = process.env.QA_MAIN
   const ud = fs.mkdtempSync(path.join(os.tmpdir(), 'qa-e2e-ud-')); app.setPath('userData', ud)
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'qa-e2e-root-')))
-  const results = [], hits = [], consoleMsgs = [], served = [], navs = []
+  const results = [], hits = [], consoleMsgs = [], served = [], navs = [], uncaught = []
+  process.on('uncaughtException', e => uncaught.push(String(e?.stack || e).split('\n').slice(0, 2).join(' '))) // T57: what End-User saw as a crash dialog
   const check = (name, ok, info = '') => { results.push({ name, ok: !!ok, info }); }
   const server = http.createServer((req, res) => { hits.push(req.url); res.end('x') })
   server.listen(0, '127.0.0.1', async () => {
@@ -2176,6 +2178,7 @@ function qaElectronEntry() { // runs inside Electron, serialized by electronChec
     w('.chat/tasks.json', JSON.stringify({ version: 1, tasks: [
       { id: 'T1', title: 'Task thật cần bằng chứng', assignee: 'dev', spec: 'reports/s.md', createdAt: tAt, updatedAt: tAt, acceptance: 'code' },
       { id: 'T2', title: 'Task thật nghiệm thu tay', assignee: 'qa', spec: 'reports/s.md', createdAt: tAt, updatedAt: tAt, acceptance: 'manual' }] }))
+    fs.writeFileSync(path.join(ud, 'window.json'), JSON.stringify({ x: 40, y: 40, width: 1200, height: 800, maximized: true })) // T57: restore maximized
     fs.writeFileSync(path.join(ud, 'projects.json'), JSON.stringify([root]))
     require(MAIN)
     await app.whenReady()
@@ -2187,6 +2190,7 @@ function qaElectronEntry() { // runs inside Electron, serialized by electronChec
     win.webContents.on('console-message', (...a) => { const m = typeof a[0] === 'object' && a[0].message !== undefined ? a[0].message : a[2]; consoleMsgs.push(String(m)) })
     win.webContents.on('did-frame-navigate', (e, url, code, status, isMain) => navs.push([url, isMain]))
     await new Promise(r => win.webContents.isLoading() ? win.webContents.once('did-finish-load', r) : r())
+    const startedMax = win.isMaximized(); win.unmaximize(); await new Promise(r => setTimeout(r, 300))
     try { core.trustConfig(root, core.configTrust(root).texts) } catch {}
     const js = code => win.webContents.executeJavaScript(code, true)
     const sleep = ms => new Promise(r => setTimeout(r, ms))
@@ -2252,6 +2256,7 @@ function qaElectronEntry() { // runs inside Electron, serialized by electronChec
     await press('Enter')
     const specOpen = await js(`[document.querySelector('#viewer').open, document.querySelector('#viewer-path')?.textContent || document.querySelector('#viewer-title')?.textContent]`)
     await press('Escape')
+    for (let i = 0; i < 20 && !(await js(`document.activeElement?.classList.contains('tree-task-title')`)); i++) await sleep(100) // focus comes back after the dialog closes
     const specBack = await js(`[document.querySelector('#viewer').open, document.activeElement?.classList.contains('tree-task-title'), document.querySelector('.tree-task-item[data-task-id="T1"] .tree-task-evidence-btn').getAttribute('aria-expanded')]`)
     check('T56 Enter trên tên mở spec (không mở bằng chứng), Esc đóng và trả focus', specOpen[0] && /s\.md/.test(specOpen[1]) && !specBack[0] && specBack[1] && specBack[2] === 'false', JSON.stringify([specOpen, specBack]))
     // Enter/Space on the status button: opens the evidence (real taskEvidence IPC); Esc closes, focus back on the button
@@ -2336,6 +2341,15 @@ function qaElectronEntry() { // runs inside Electron, serialized by electronChec
       JSON.stringify(layouts.map(l => [l.theme, l.width, l.asideW, l.dark, l.hScroll, l.bad.length, l.warnShown, l.doneCollapsed])) + ' lỗi: '
         + JSON.stringify(layouts.filter(l => Math.abs(l.asideW - l.width) > 1 || l.hScroll || l.bad.length || !l.warnShown || !l.doneCollapsed || l.scripts).slice(0, 3)))
     nativeTheme.themeSource = 'system'; win.webContents.setZoomFactor(1)
+    // ---- T57: maximized restored at start; theme changes after the window is closed must not throw ----
+    check('T57 mở app khôi phục cửa sổ phóng to (window.json maximized:true)', startedMax)
+    const keepAlive = new BrowserWindow({ show: false }) // so closing the app window doesn't quit before we look
+    await new Promise(r => { win.once('closed', r); win.close() })
+    for (const t of ['dark', 'light', 'dark', 'system']) { nativeTheme.themeSource = t; await sleep(150) }
+    let saved = null; try { saved = JSON.parse(fs.readFileSync(path.join(ud, 'window.json'), 'utf8')) } catch {}
+    check('T57 đóng cửa sổ rồi đổi theme: không có uncaught exception, window.json lưu maximized:false', !uncaught.length && saved?.maximized === false,
+      JSON.stringify({ uncaught, saved }))
+    keepAlive.destroy()
     console.log('E2E ' + JSON.stringify({ electron: process.versions.electron, results }))
     app.exit(results.every(r => r.ok) ? 0 : 1)
   })
@@ -2394,6 +2408,9 @@ function mainChecks() {
   const r = require('child_process').spawnSync(process.execPath, [__filename, '--main'], { encoding: 'utf8', timeout: 300000,
     env: { ...process.env, SHELL: '/nonexistent' } }) // SHELL: main.js must not replace PATH (fake CLI) with the login shell's
   assert.strictEqual(r.status, 0, 'main.js (chuỗi agent / worktree / merge) lỗi:\n' + String(r.stdout + r.stderr).slice(-4000))
+  // a promise that never settles drains the event loop: node exits 0 halfway and every later case is silently skipped
+  assert.ok(String(r.stdout).includes('ok (main harness end)'), 'main harness dừng giữa chừng (await không bao giờ xong), các ca sau không chạy. Dòng cuối:\n'
+    + String(r.stdout).trim().split('\n').slice(-3).join('\n'))
   for (const line of String(r.stdout).split('\n')) if (/^(BUG|ĐÃ SỬA) /.test(line)) console.log(line)
 }
 
@@ -2484,7 +2501,8 @@ if (mergeRef) require('child_process').execFileSync('git', ['-c', 'user.name=x',
 if (process.env.FAKE_PROGRESS) fs.appendFileSync('progress-' + me + '.txt', 'x')
 if (process.env.FAKE_SLOW_MS) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Number(process.env.FAKE_SLOW_MS))
 out({ type: 'thread.started', thread_id: 'M' + process.pid })
-out({ type: 'item.completed', item: { type: 'agent_message', text: JSON.parse(process.env.FAKE_REPLY || '{}')[me] || 'xong' } })
+const turnNo = (() => { const f = require('path').join(__dirname, 'turn-counter'); const n = (Number(fs.existsSync(f) && fs.readFileSync(f, 'utf8')) || 0) + 1; fs.writeFileSync(f, String(n)); return n })()
+out({ type: 'item.completed', item: { type: 'agent_message', text: (JSON.parse(process.env.FAKE_REPLY || '{}')[me] || 'xong').replace('{n}', turnNo) } })
 out({ type: 'turn.completed', usage: { input_tokens: Number(process.env.FAKE_IN || 1), output_tokens: 1 } })
 `, { mode: 0o755 })
   // fake claude: denies Bash(npm test) unless granted via --allowedTools or full; FAKE_CLAUDE=emptydeny|emptynodeny for the retry rules
@@ -2543,7 +2561,7 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
   }
   const turns = from => log().slice(from).filter(m => /^dev-/.test(m.from)).length
   const stops = () => log().map((m, seq) => ({ ...m, seq })).filter(m => m.kind === 'chain-stop')
-  const pingPong = JSON.stringify({ 'dev-a': '@dev-b tiếp', 'dev-b': '@dev-a tiếp' })
+  const pingPong = JSON.stringify({ 'dev-a': '@dev-b lượt {n}', 'dev-b': '@dev-a lượt {n}' })
 
   // S7 K1/K2/K4 through executeJob: handoff saved by the app and stripped from chat, @ inside it not routed,
   // turn > limit → next turn opens a new session with one system note; sessions IPC shows the measurement
@@ -3014,6 +3032,8 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
   assert.ok(repairMsg, 'repair system message must be logged')
   assert.strictEqual(repairMsg.from, 'system')
   assert.strictEqual(repairMsg.initiatedBy, 'user')
+  // the repair turn (no change here) re-queues dev-c's still-red branch: let it settle before counting the next merges
+  await waitFor('hàng chờ ổn định sau lượt sửa', () => queue().every(done)); q0 = queue().length
 
   // two devs edit different lines of the same file in parallel → both merged automatically
   await edit({ 'dev-a': [['a.txt', 2, 'A2']], 'dev-b': [['a.txt', 8, 'B8']] }, '@dev-a @dev-b sửa a.txt')
@@ -3351,6 +3371,59 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
     console.log('ok (T49 sprint 11 end to end)')
   }
 
+  // T52 (QA, independent): Sprint 12 S1/S2/Tiếp tục through the real main.js, shared checkout (worktrees off), fresh agents
+  {
+    const sleep = ms => new Promise(r => setTimeout(r, ms))
+    let cfg = await call('projectSettings', root), off
+    for (let i = 0; i < 200 && (!off || off.error?.code === 'BUSY'); i++) {
+      if (off) await sleep(50)
+      off = await call('saveProjectSettings', root, { settings: { ...cfg.settings, worktreesEnabled: false, costCeiling: null }, expectedRevision: cfg.revision })
+    }
+    assert.ok(off.ok, JSON.stringify(off.error))
+    const agentTurns = from => log().slice(from).filter(m => ['qa-a', 'qa-b'].includes(m.from)).length
+    const stopsFrom = from => log().map((m, seq) => ({ ...m, seq })).slice(from).filter(m => m.kind === 'chain-stop')
+    const until = async (what, fn, ms = 30000) => { for (const end = Date.now() + ms; Date.now() < end; await sleep(100)) { const v = await fn(); if (v) return v } throw new Error('Hết giờ chờ: ' + what) }
+    const quiet = async (from, ms = 2500) => { let n = -1; while (n !== log().length) { n = log().length; await sleep(ms) } return log().slice(from) }
+    // 1. three successful turns without output, different words each time → no 4th job, one stop with qa-b pending
+    process.env.FAKE_REPLY = JSON.stringify({ 'qa-a': '@qa-b lượt {n}, xem giúp', 'qa-b': '@qa-a lượt {n}, đã xem' })
+    let mark = log().length; await call('send', root, '@qa-a bắt đầu S12')
+    const stop1 = await waitFor('S12 phanh sau 3 lượt', () => stopsFrom(mark)[0])
+    await quiet(mark)
+    assert.strictEqual(agentTurns(mark), 3, 'S12: phải dừng cấp sau đúng 3 lượt thành công không tiến triển')
+    let view = await until('S12 thẻ dừng ready', async () => { const v = await call('chainState', root, { messageId: stop1.seq }); return v.ok && v.state.phase === 'ready' && v.state })
+    assert.ok(view.canContinue && view.pending.some(p => p.agent === 'qa-b') && view.idleRunIds.length === 3, JSON.stringify(view))
+    // Tiếp tục: the first call claims; a repeat after it succeeded returns the same child chain, never a second one
+    mark = log().length
+    const c1 = await call('continueChain', root, { messageId: stop1.seq })
+    const c2 = await call('continueChain', root, { messageId: stop1.seq })
+    assert.ok(c1.ok && !c1.alreadyContinued, JSON.stringify(c1))
+    assert.ok(c2.ok && c2.alreadyContinued && c2.chainId === c1.chainId, 'Tiếp tục lặp sau lần thành công phải trả cùng childChainId: ' + JSON.stringify(c2))
+    const stop2 = await waitFor('S12 phanh lần 2 sau Tiếp tục', () => stopsFrom(mark)[0])
+    delete process.env.FAKE_REPLY; await quiet(mark)
+    assert.strictEqual(log().slice(mark).filter(m => m.kind === 'chain-continue').length, 1, 'chỉ một tin chain-continue')
+    assert.strictEqual(agentTurns(mark), 3, 'chuỗi tiếp tục cũng dừng sau 3 lượt không tiến triển')
+    assert.ok(stop2.seq > stop1.seq)
+
+    // 2. every recipient filtered as a duplicate (same words, same context) → the chain ends quietly, no empty "Tiếp tục"
+    process.env.FAKE_REPLY = JSON.stringify({ 'qa-a': '@qa-b kiểm tra giúp', 'qa-b': '@qa-a đã kiểm' })
+    mark = log().length; await call('send', root, '@qa-a S12 trùng')
+    await waitFor('qa-a trả lời', () => log().slice(mark).some(m => m.from === 'qa-a'))
+    const after2 = await quiet(mark); delete process.env.FAKE_REPLY
+    assert.ok(agentTurns(mark) <= 3 && !after2.some(m => m.kind === 'chain-stop'),
+      'S2: yêu cầu trùng (cùng chữ, cùng bối cảnh) không được thành pending/chain-stop: ' + after2.filter(m => m.from !== 'user').map(m => `[${m.from}] ${m.text}`).join(' → '))
+
+    // 3. source novelty: seed A; A→B counts once, B→A and A→B again do not → stop after 4 turns (1 progress + 3 idle)
+    fs.writeFileSync(at('s12.txt'), 'A\n'); git('add', 's12.txt'); git('commit', '-qm', 'seed S12')
+    process.env.FAKE_REPLY = JSON.stringify({ 'qa-a': '@qa-b đổi {n}', 'qa-b': '@qa-a đổi {n}' })
+    process.env.FAKE_EDITS = JSON.stringify({ 'qa-a': [['s12.txt', 0, 'B']], 'qa-b': [['s12.txt', 0, 'A']] })
+    mark = log().length; await call('send', root, '@qa-a S12 qua lại A/B')
+    await waitFor('S12 phanh A/B', () => stopsFrom(mark)[0], 90000)
+    await quiet(mark); delete process.env.FAKE_REPLY; delete process.env.FAKE_EDITS
+    assert.strictEqual(agentTurns(mark), 4, 'S1: A→B tính một lần, B→A và A→B lặp lại không tính → dừng sau 4 lượt')
+    git('checkout', '--', 's12.txt')
+    console.log('ok (T52 S12 phanh/Tiếp tục/trùng/novelty)')
+  }
+
   // T57: window maximized restoration and persistence
   assert.strictEqual(maximizeCallCount, 1, 'win.maximize() was called on startup when savedBounds had maximized: true')
   isWinMaximized = false
@@ -3384,6 +3457,7 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
   assert.strictEqual(themeListeners.length, 0, 'nativeTheme listener cleaned up on closed')
   assert.doesNotThrow(() => mockNativeTheme.emitUpdated(), 'emit updated after closed must not throw')
   console.log('ok (T57 nativeTheme lifecycle & maximized)')
+  console.log('ok (main harness end)') // mainChecks requires this line: a hung await empties the event loop and exits 0 silently
 }
 // Cài đặt › CLI Agent: a scan lists each real file once, PATH first and executables only; a check reads the version and
 // each account's login through the picked file; a turn whose file is gone points to the setting

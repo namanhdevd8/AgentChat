@@ -23,7 +23,7 @@ const RETRYABLE_MERGE_STATES = ['conflict', 'check-failed', 'blocked-dirty', 'bl
 const jobs = [], orphans = [], loadedRoots = new Set(), rootDirs = new Map()
 const summaryUnavailable = new Set()
 const logGenerations = new Map(), appLogWrites = new Map()
-const continuedChains = new Set()
+const continuedChains = new Map()
 const pendingPermissions = new Map(), permissionReservations = new Map()
 let win, sequence = 0, pumping = false, pumpAgain = false, orphanTimer
 let watched = { dir: null, root: null, file: null, watchers: [], timer: null, changed: null }
@@ -1604,25 +1604,7 @@ async function routeTargets(dir, msg, hops, chain) {
     chain.haltReason = { code: 'cost-ceiling', text: `Dừng chuỗi vì chi phí đã đạt USD ${chain.costCeiling.toFixed(4)}.` }
   }
 
-  // 2. If chain is halting or stopped, put all targets into pending and ensure stop posted
-  if (chain.state === 'halting' || chain.state === 'stopped') {
-    for (const target of targets) {
-      let p = chain.pending.find(item => item.agent === target.name)
-      if (!p) {
-        p = { agent: target.name, sourceRefs: [], taskIds: [], uncertain: false }
-        chain.pending.push(p)
-      }
-      p.sourceRefs.push({ seq: msg.seq, at: msg.at, textHash: createHash('sha256').update(msg.text || '').digest('hex') })
-    }
-    if (!chain.stopPosted) {
-      await haltChain(dir, chain, chain.haltReason || { code: 'no-progress', text: 'Dừng chuỗi sau 3 lượt không có tiến triển mới (chat qua lại).' }, chain.pending.map(p => ({ name: p.agent })))
-    } else {
-      saveStopRecord(root, chain)
-    }
-    return
-  }
-
-  // 3. S2 Deduplication for agent messages in active chains
+  // 2. S2 Deduplication for agent messages
   let filteredTargets = targets
   if (msg.from !== 'user') {
     let cleanText = (msg.text || '').replace(/```task-status[\s\S]*?```/g, '').replace(/```run-command[\s\S]*?```/g, '').replace(/```handoff[\s\S]*?```/g, '')
@@ -1641,7 +1623,33 @@ async function routeTargets(dir, msg, hops, chain) {
       filteredTargets.push(target)
     }
   }
-  if (!filteredTargets.length) return
+
+  // If all targets are duplicates, no new work to dispatch or add to pending
+  if (!filteredTargets.length) {
+    if ((chain.state === 'halting' || chain.state === 'stopped') && chain.pending.length > 0 && !chain.stopPosted) {
+      await haltChain(dir, chain, chain.haltReason || { code: 'no-progress', text: 'Dừng chuỗi sau 3 lượt không có tiến triển mới (chat qua lại).' }, chain.pending.map(p => ({ name: p.agent })))
+    }
+    return
+  }
+
+  // 3. If chain is halting or stopped, put filteredTargets into pending and ensure stop posted
+  if (chain.state === 'halting' || chain.state === 'stopped') {
+    for (const target of filteredTargets) {
+      if (target._dedupeKey) chain.dispatchedKeys.add(target._dedupeKey)
+      let p = chain.pending.find(item => item.agent === target.name)
+      if (!p) {
+        p = { agent: target.name, sourceRefs: [], taskIds: [], uncertain: false }
+        chain.pending.push(p)
+      }
+      p.sourceRefs.push({ seq: msg.seq, at: msg.at, textHash: createHash('sha256').update(msg.text || '').digest('hex') })
+    }
+    if (!chain.stopPosted) {
+      await haltChain(dir, chain, chain.haltReason || { code: 'no-progress', text: 'Dừng chuỗi sau 3 lượt không có tiến triển mới (chat qua lại).' }, chain.pending.map(p => ({ name: p.agent })))
+    } else {
+      saveStopRecord(root, chain)
+    }
+    return
+  }
 
   // 4. Admission loop with reservedTurns
   for (let i = 0; i < filteredTargets.length; i++) {
@@ -2963,17 +2971,23 @@ ipcMain.handle('requestMergeRepair', (event, dir, request) => {
   validSender(event)
   return apiCall(async () => {
     const root = knownProject(dir)
-    return withGitLock(root, async () => {
+    let preResult = null
+    let actionKey, entryId, repairChainId, repairEventId, targetEventId, owner, detail, repairContext
+    await withGitLock(root, async () => {
       const registry = readWorktrees(root), entry = registry.queue.find(item => item.id === request?.queueId)
       if (!entry) throw gitError('INVALID_ARGUMENT', 'Không tìm thấy mục gộp')
-      const actionKey = 'repair:' + (entry.mergeEvent?.eventId || entry.id)
+      actionKey = 'repair:' + (entry.mergeEvent?.eventId || entry.id)
       const store = readControlStore(root)
       if (store.claims[actionKey]) {
         const claim = store.claims[actionKey]
-        return { runId: claim.runId, chainId: claim.chainId }
+        preResult = { runId: claim.runId, chainId: claim.chainId }
+        return
       }
       const existing = jobs.find(job => job.root === root && job.repairQueueId === entry.id && !job.finished)
-      if (existing) return { runId: existing.runId }
+      if (existing) {
+        preResult = { runId: existing.runId }
+        return
+      }
       if (entry.supersededBy) throw gitError('INVALID_ARGUMENT', 'Mục gộp đã bị thay thế')
       const probe = await repoProbe(root).catch(() => null)
       if (probe?.branch === registry.targetRef && await contained(root, entry.headSha, registry.agents.find(item => item.id === entry.workspaceId), probe.sha)) {
@@ -2981,26 +2995,25 @@ ipcMain.handle('requestMergeRepair', (event, dir, request) => {
       }
       if (!['conflict', 'check-failed'].includes(entry.state))
         throw gitError('INVALID_ARGUMENT', 'Mục gộp không còn cần agent sửa')
-      const owner = core.team(root).find(agent => agent.name === entry.agent)
+      owner = core.team(root).find(agent => agent.name === entry.agent)
       if (!owner) throw gitError('CONFIG_ERROR', 'Không tìm thấy agent sở hữu nhánh')
-      const repairChainId = randomUUID()
-      const repairEventId = actionKey
+      entryId = entry.id
+      repairChainId = randomUUID()
+      repairEventId = actionKey
+      targetEventId = entry.mergeEvent?.eventId || null
       updateControlStore(root, s => {
         s.claims[actionKey] = {
           kind: 'repair',
           actionKey,
           queueId: entry.id,
           eventId: repairEventId,
-          targetEventId: entry.mergeEvent?.eventId || null,
+          targetEventId,
           chainId: repairChainId,
           at: new Date().toISOString()
         }
       })
-      const detail = `${entry.error?.message || 'Lỗi gộp'}${entry.error?.files?.length ? `: ${entry.error.files.join(', ')}` : ''}`
-      await postOnce(root, repairEventId, 'system', `@${owner.name} sửa lỗi trên nhánh của bạn rồi báo lại: ${detail}`, {
-        kind: 'merge-repair', initiatedBy: 'user', queueId: entry.id, eventId: repairEventId, targetEventId: entry.mergeEvent?.eventId
-      })
-      const repairContext = entry.mergeEvent ? {
+      detail = `${entry.error?.message || 'Lỗi gộp'}${entry.error?.files?.length ? `: ${entry.error.files.join(', ')}` : ''}`
+      repairContext = entry.mergeEvent ? {
         category: entry.mergeEvent.category,
         phase: entry.mergeEvent.phase,
         code: entry.mergeEvent.code,
@@ -3011,14 +3024,25 @@ ipcMain.handle('requestMergeRepair', (event, dir, request) => {
         checkIds: entry.mergeEvent.checkIds,
         untrusted: true
       } : null
-      const chain = newChain(root, { id: repairChainId })
-      const job = await ask(root, owner, 0, { repairQueueId: entry.id, repairContext }, chain)
-      updateControlStore(root, s => {
-        if (s.claims[actionKey]) s.claims[actionKey].runId = job.runId
-      })
-      emitWorktreeState(root).catch(() => {})
-      return { runId: job.runId, chainId: repairChainId }
     })
+    if (preResult) return preResult
+
+    await postOnce(root, repairEventId, 'system', `@${owner.name} sửa lỗi trên nhánh của bạn rồi báo lại: ${detail}`, {
+      kind: 'merge-repair', initiatedBy: 'user', queueId: entryId, eventId: repairEventId, targetEventId
+    })
+    const chain = newChain(root, { id: repairChainId })
+    let job
+    try {
+      job = await ask(root, owner, 0, { repairQueueId: entryId, repairContext }, chain)
+    } catch (err) {
+      updateControlStore(root, s => { delete s.claims[actionKey] })
+      throw err
+    }
+    updateControlStore(root, s => {
+      if (s.claims[actionKey]) s.claims[actionKey].runId = job.runId
+    })
+    emitWorktreeState(root).catch(() => {})
+    return { runId: job.runId, chainId: repairChainId }
   })
 })
 ipcMain.handle('files', (event, dir) => { validSender(event); return core.files(knownProject(dir)) })
@@ -3055,12 +3079,26 @@ ipcMain.handle('continueChain', (event, dir, request) => {
 
     const claimKey = 'continue:' + stopId
     const legacyKey = `${stop.seq}:${stop.runId || ''}`
-    if (continuedChains.has(legacyKey)) {
-      return { chainId: stopId, alreadyContinued: true }
-    }
+
+    const existingClaim = store.claims[claimKey]
     const logIndex = await core.getLogIndex(root)
-    if (logIndex.records.some(r => r.kind === 'chain-continue' && (r.continuedFrom === stop.seq || r.stopId === stopId))) {
-      return { chainId: stopId, alreadyContinued: true }
+    const continueRecord = logIndex.records.find(r => r.kind === 'chain-continue' && (r.continuedFrom === stop.seq || r.stopId === stopId))
+    const resolvedChildId = existingClaim?.childChainId
+      || continuedChains.get(legacyKey)
+      || store.stops[stopId]?.state?.continuedTo
+      || originChain?.continuedTo
+      || continueRecord?.childChainId
+
+    if (resolvedChildId) {
+      const existingChain = activeChains.get(resolvedChildId)
+      return {
+        chainId: resolvedChildId,
+        alreadyContinued: true,
+        state: existingChain ? getChainView(root, existingChain) : (store.stops[stopId]?.state || null)
+      }
+    }
+    if (continuedChains.has(legacyKey) || continueRecord) {
+      return { chainId: stopId, alreadyContinued: true, state: store.stops[stopId]?.state || null }
     }
 
     const pendingList = originChain?.pending?.length ? originChain.pending
@@ -3108,7 +3146,7 @@ ipcMain.handle('continueChain', (event, dir, request) => {
       }
     }
 
-    continuedChains.add(legacyKey)
+    continuedChains.set(legacyKey, childChainId)
     if (originChain) {
       originChain.state = 'continued'
       originChain.continuedTo = childChainId
