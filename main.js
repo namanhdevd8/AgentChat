@@ -2332,10 +2332,11 @@ ipcMain.handle('projects', async event => {
   return (await Promise.all(projects().map(async dir => {
     const found = core.boxes(dir)
     // ponytail: only the box each folder has open is counted (core reads one box per folder); others show no badge
-    let needs = 0
-    try { needs = (await needsFor(rootOf(dir))).length } catch {}
+    let needs = 0, running = 0
+    try { running = activeFor(dir).length; needs = (await needsFor(rootOf(dir))).length } catch {}
+    // jobs only run in the open box: switchBox refuses while a folder is busy
     return (found.length ? found : [{ chat: '.chat', name: path.basename(dir) }])
-      .map(box => ({ dir, ...box, needs: box.chat === core.chatName(dir) ? needs : 0 }))
+      .map(box => box.chat === core.chatName(dir) ? { dir, ...box, needs, running } : { dir, ...box, needs: 0, running: 0 })
   }))).flat()
 })
 ipcMain.handle('timeline', (event, dir, since) => {

@@ -94,6 +94,8 @@
   .space::before { content: '#'; color: var(--faint); font-family: var(--mono); }
   .space:hover { background: var(--hover); color: var(--ink); }
   .space.on { background: var(--surface); border-color: var(--line); color: var(--ink); font-weight: 500; }
+  /* an agent is mid-turn in this box: the # becomes a pulsing dot */
+  .space.running::before, .switcher-item.running::before { content: ''; flex: none; width: 7px; height: 7px; margin: 0 1px; border-radius: 50%; background: var(--ok); animation: pulse 1.4s ease-in-out infinite; }
   .space span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .space .space-badge { margin-left: auto; flex: none; overflow: visible; }
   .nav-foot { display: flex; align-items: flex-end; gap: 6px; margin-top: auto; padding-top: 14px; }

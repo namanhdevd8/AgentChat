@@ -277,6 +277,7 @@ async function loadProjects() {
     const b = el('button', 'space' + (on ? ' on' : ''))
     b.title = (p.chat === '.chat' ? p.dir : `${p.dir} (${p.chat})`) + (i < 9 ? ` · ${MOD}${i + 1}` : '')
     b.append(el('span', '', p.name))
+    setSpaceRunning(b, p.running)
     if (!on) setSpaceBadge(b, p.needs)
     b.onclick = () => openProject(p.dir, p.chat)
     return b
@@ -291,6 +292,13 @@ function setSpaceBadge(button, n) {
   badge.textContent = n
   badge.title = `${n} việc cần bạn`
 }
+function setSpaceRunning(button, n) {
+  button.classList.toggle('running', n > 0)
+  if (n) button.title += ` · ${n} agent đang chạy`
+}
+// a turn started or ended in some box: its dot changes (a PM fan-out starts several at once)
+let projectsTimer = null
+const loadProjectsSoon = () => { clearTimeout(projectsTimer); projectsTimer = setTimeout(loadProjects, 150) }
 
 function syncActive(list) {
   if (!dir) return
@@ -4562,6 +4570,7 @@ function renderSwitcher() {
     b.type = 'button'
     b.setAttribute('role', 'option')
     b.append(el('span', '', p.name), el('small', '', tilde(p.chat === '.chat' ? p.dir : `${p.dir} · ${p.chat}`)))
+    setSpaceRunning(b, p.running)
     if (!(p.dir === dir && p.chat === box)) setSpaceBadge(b, p.needs)
     b.onclick = () => { $('#switcher').close(); openProject(p.dir, p.chat) }
     return b
@@ -4860,6 +4869,7 @@ api.on('message', (d, m, meta) => {
 })
 
 api.on('status', (d, name, on, runId) => {
+  loadProjectsSoon()
   if (openingDir === d) {
     pendingEvents.push({ type: 'status', name, on, runId })
     return
