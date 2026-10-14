@@ -252,6 +252,11 @@ let orphanLocks = []
 let openSeq = 0, openingDir = null, pendingEvents = []
 const runKey = (d, name) => d + '\0' + name
 
+// Sprint 12 state: chain views and merge details
+const chainViewsByMsg = new Map()
+const chainStopUpdateCallbacks = new Map()
+let activeChainUnbinds = []
+
 // Sprint 6 state: paging, search, worktree, totals
 let logGeneration = null
 let logHasBefore = false
@@ -340,6 +345,8 @@ async function openProject(d, c = d === dir ? box : null) {
   renderBoard()
   needs = []
   turnTimes.clear()
+  chainViewsByMsg.clear()
+  chainStopUpdateCallbacks.clear()
   $('#title').textContent = base(d)
   $('#path').textContent = tilde(c && c !== '.chat' ? `${d} · ${c}` : d)
   $('#log').replaceChildren()
@@ -445,6 +452,8 @@ async function openProject(d, c = d === dir ? box : null) {
       if (Array.isArray(ev.data?.team)) team = ev.data.team
     } else if (ev.type === 'permissions-changed') {
       permissionRequests = Array.isArray(ev.data?.requests) ? ev.data.requests : []
+    } else if (ev.type === 'chain-changed') {
+      if (ev.state) applyChainViewUpdate(ev.state)
     }
   }
   pendingEvents = []
@@ -1457,6 +1466,315 @@ function markRetracted(seq) {
   }
 }
 
+function renderMergeDetails(ev) {
+  if (!ev) return null
+  const box = el('details', 'merge-details-box')
+  const summary = el('summary', 'merge-details-summary', 'Chi tiết lỗi merge')
+  const body = el('div', 'merge-details-body')
+
+  if (ev.phase || ev.category) {
+    const row = el('div', 'merge-details-row')
+    if (ev.phase) {
+      row.append(el('span', 'merge-details-label', 'Bước: '), el('span', '', ev.phase))
+    }
+    if (ev.category) {
+      if (row.children.length > 0) row.append(' · ')
+      row.append(el('span', 'merge-details-label', 'Loại: '), el('span', '', ev.category))
+    }
+    body.append(row)
+  }
+
+  if (ev.candidateSha || ev.sourceSha || ev.headSha || (Array.isArray(ev.checkIds) && ev.checkIds.length > 0)) {
+    const row = el('div', 'merge-details-row')
+    if (ev.candidateSha) {
+      row.append(el('span', 'merge-details-label', 'Candidate SHA: '), el('code', '', ev.candidateSha.slice(0, 7)))
+    }
+    if (ev.sourceSha) {
+      if (row.children.length > 0) row.append(' · ')
+      row.append(el('span', 'merge-details-label', 'Nguồn SHA: '), el('code', '', ev.sourceSha.slice(0, 7)))
+    }
+    if (!ev.candidateSha && !ev.sourceSha && ev.headSha) {
+      row.append(el('span', 'merge-details-label', 'SHA: '), el('code', '', ev.headSha.slice(0, 7)))
+    }
+    if (Array.isArray(ev.checkIds) && ev.checkIds.length > 0) {
+      if (row.children.length > 0) row.append(' · ')
+      row.append(el('span', 'merge-details-label', 'Checks: '), el('span', '', ev.checkIds.join(', ')))
+    }
+    body.append(row)
+  }
+
+  if (Array.isArray(ev.files) && ev.files.length > 0) {
+    const row = el('div', 'merge-details-row')
+    row.append(el('span', 'merge-details-label', 'Files: '))
+    ev.files.forEach((f, idx) => {
+      if (idx > 0) row.append(', ')
+      row.append(el('code', '', f))
+    })
+    body.append(row)
+  }
+
+  if (ev.commandResult) {
+    const cmdRow = el('div', 'merge-details-row')
+    cmdRow.append(el('span', 'merge-details-label', 'Lệnh: '))
+    cmdRow.append(el('code', '', ev.commandResult.command || ''))
+    if (ev.commandResult.exitCode != null || ev.commandResult.signal) {
+      cmdRow.append(' · ')
+      cmdRow.append(el('span', 'merge-details-label', 'Mã thoát: '))
+      cmdRow.append(el('span', '', String(ev.commandResult.exitCode != null ? ev.commandResult.exitCode : ev.commandResult.signal)))
+    }
+    body.append(cmdRow)
+  }
+
+  if (ev.excerpt) {
+    const pre = el('pre', 'merge-err-log')
+    pre.textContent = ev.excerpt
+    body.append(pre)
+  }
+
+  box.append(summary, body)
+  return box
+}
+
+const CHAIN_PHASE_LABELS = {
+  draining: 'Đang hoàn tất nhánh',
+  ready: 'Sẵn sàng tiếp tục',
+  continued: 'Đã tiếp tục',
+  interrupted: 'Đã ngắt',
+  unavailable: 'Không khả dụng'
+}
+
+const CHAIN_REASON_TEXTS = {
+  'no-progress': 'Chuỗi không có tiến triển',
+  'turn-limit': 'Đạt giới hạn lượt chạy',
+  'cost-ceiling': 'Đạt trần chi phí chuỗi',
+  'tracking-limit': 'Chạm giới hạn theo dõi',
+  'restart-interrupted': 'Gián đoạn do khởi động lại'
+}
+
+function registerChainStopCallback(key, cb) {
+  if (!key) return
+  const strKey = String(key)
+  if (!chainStopUpdateCallbacks.has(strKey)) {
+    chainStopUpdateCallbacks.set(strKey, new Set())
+  }
+  chainStopUpdateCallbacks.get(strKey).add(cb)
+}
+
+function applyChainViewUpdate(state) {
+  if (!state || !state.stopId) return
+  const stopKey = String(state.stopId)
+  const existing = chainViewsByMsg.get(stopKey) || (state.chainId ? chainViewsByMsg.get(String(state.chainId)) : null)
+  if (existing) {
+    const curRev = parseInt(existing.revision || '0', 10)
+    const nextRev = parseInt(state.revision || '0', 10)
+    if (!isNaN(curRev) && !isNaN(nextRev) && nextRev <= curRev) {
+      return
+    }
+  }
+
+  chainViewsByMsg.set(stopKey, state)
+  if (state.chainId) chainViewsByMsg.set(String(state.chainId), state)
+
+  const cbs = chainStopUpdateCallbacks.get(stopKey)
+  if (cbs) {
+    for (const cb of cbs) {
+      try { cb(state) } catch (e) { /* ignore */ }
+    }
+  }
+  if (state.chainId && chainStopUpdateCallbacks.has(String(state.chainId))) {
+    const chainCbs = chainStopUpdateCallbacks.get(String(state.chainId))
+    for (const cb of chainCbs) {
+      try { cb(state) } catch (e) { /* ignore */ }
+    }
+  }
+
+  if (typeof renderNeeds === 'function') renderNeeds()
+}
+
+function renderChainStopCard(m, sys) {
+  const msgKey = m.seq != null ? String(m.seq) : String(m.runId || m.stopId || '')
+  let currentState = (m.stopId ? chainViewsByMsg.get(String(m.stopId)) : null) || chainViewsByMsg.get(msgKey) || m.state || null
+  if (currentState) {
+    chainViewsByMsg.set(msgKey, currentState)
+    if (currentState.stopId) chainViewsByMsg.set(String(currentState.stopId), currentState)
+  }
+
+  const card = el('div', 'chain-stop-card')
+  const hdr = el('div', 'chain-stop-hdr')
+  const badge = el('span', 'chain-phase-badge')
+  const reasonSpan = el('span', 'chain-stop-reason')
+  hdr.append(badge, reasonSpan)
+
+  const body = el('div', 'chain-stop-body')
+  const actions = el('div', 'chain-stop-actions')
+  card.append(hdr, body, actions)
+  sys.append(card)
+
+  const contBtn = el('button', 'box press btn sm primary', 'Tiếp tục')
+  contBtn.type = 'button'
+  actions.append(contBtn)
+
+  const renderCardContent = (state) => {
+    const phase = state?.phase || 'ready'
+    badge.className = 'chain-phase-badge badge-' + phase
+    badge.textContent = CHAIN_PHASE_LABELS[phase] || phase
+
+    let reasonText = state?.reason?.text || (state?.reason?.code && CHAIN_REASON_TEXTS[state.reason.code]) || ''
+    if (!reasonText && m.text) reasonText = m.text
+    reasonSpan.textContent = reasonText || ''
+    reasonSpan.hidden = !reasonText
+
+    body.replaceChildren()
+
+    if (Array.isArray(state?.running) && state.running.length > 0) {
+      const runRow = el('div', 'chain-stop-row')
+      runRow.append(el('span', '', 'Đang chờ hoàn tất: '))
+      state.running.forEach((r, idx) => {
+        if (idx > 0) runRow.append(', ')
+        runRow.append(el('span', '', `@${r.agent}${r.phase ? ` (${r.phase})` : ''}`))
+      })
+      body.append(runRow)
+    }
+
+    if (Array.isArray(state?.pending) && state.pending.length > 0) {
+      const pendRow = el('div', 'chain-stop-row')
+      pendRow.append(el('span', '', 'Chờ tiếp tục cho: '))
+      state.pending.forEach((p, idx) => {
+        if (idx > 0) pendRow.append('; ')
+        const pSpan = el('span', '', `@${p.agent}`)
+        if (p.taskIds && p.taskIds.length) {
+          pSpan.append(` (task: ${p.taskIds.join(', ')})`)
+        }
+        if (p.sourceSeqs && p.sourceSeqs.length) {
+          pSpan.append(' (từ ')
+          p.sourceSeqs.forEach((seq, sIdx) => {
+            if (sIdx > 0) pSpan.append(', ')
+            const link = el('a', 'chain-source-link', `tin #${seq}`)
+            link.role = 'button'
+            link.tabIndex = 0
+            link.onclick = (e) => { e.preventDefault(); jumpToMessage(seq) }
+            link.onkeydown = (e) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault()
+                jumpToMessage(seq)
+              }
+            }
+            pSpan.append(link)
+          })
+          pSpan.append(')')
+        }
+        pendRow.append(pSpan)
+      })
+      body.append(pendRow)
+    }
+
+    const turns = state?.turns ?? m.chain?.turns
+    const limit = state?.limit ?? m.chain?.limit
+    const costUsd = state?.costUsd ?? m.chain?.costUsd
+    if (turns != null || costUsd != null) {
+      const statsRow = el('div', 'chain-stop-row muted')
+      let parts = []
+      if (turns != null) parts.push(`${turns}${limit != null ? '/' + limit : ''} lượt`)
+      if (costUsd != null) parts.push(`$${Number(costUsd).toFixed(3)}`)
+      statsRow.textContent = parts.join(' · ')
+      body.append(statsRow)
+    }
+
+    if (state?.costIncomplete || m.chain?.costIncomplete || m.costIncomplete) {
+      body.append(el('div', 'chain-cost-notice muted', 'Chi phí chuỗi chưa đủ dữ liệu'))
+    }
+
+    if (phase === 'continued') {
+      contBtn.disabled = true
+      contBtn.textContent = 'Đã tiếp tục'
+      contBtn.title = state?.continuedTo ? `Đã tiếp tục sang ${state.continuedTo}` : 'Chuỗi đã được tiếp tục'
+    } else if (phase === 'draining') {
+      contBtn.disabled = true
+      contBtn.textContent = 'Tiếp tục'
+      contBtn.title = 'Chờ các nhánh đang chạy hoàn tất trước khi tiếp tục'
+    } else if (phase === 'interrupted' || phase === 'unavailable') {
+      contBtn.disabled = true
+      contBtn.textContent = 'Tiếp tục'
+      contBtn.title = state?.reason?.text || 'Không thể tiếp tục'
+    } else if (state && state.canContinue === false) {
+      contBtn.disabled = true
+      contBtn.textContent = 'Tiếp tục'
+      contBtn.title = state?.reason?.text || 'Không đủ điều kiện tiếp tục'
+    } else {
+      contBtn.disabled = false
+      contBtn.textContent = 'Tiếp tục'
+      contBtn.title = 'Chạy tiếp chuỗi với bộ đếm mới'
+    }
+  }
+
+  const updateCard = (newState) => {
+    if (currentState) {
+      const curRev = parseInt(currentState.revision || '0', 10)
+      const nextRev = parseInt(newState.revision || '0', 10)
+      if (!isNaN(curRev) && !isNaN(nextRev) && nextRev <= curRev) {
+        return
+      }
+    }
+    currentState = newState
+    chainViewsByMsg.set(msgKey, newState)
+    if (newState.stopId) {
+      chainViewsByMsg.set(String(newState.stopId), newState)
+      registerChainStopCallback(String(newState.stopId), updateCard)
+    }
+    if (newState.chainId) {
+      chainViewsByMsg.set(String(newState.chainId), newState)
+      registerChainStopCallback(String(newState.chainId), updateCard)
+    }
+    renderCardContent(newState)
+  }
+
+  contBtn.onclick = async () => {
+    const thisDir = dir, thisSeq = openSeq, thisBox = box
+    contBtn.disabled = true
+    contBtn.textContent = 'Đang tiếp tục…'
+    try {
+      const res = await api.continueChain(thisDir, { messageId: m.seq != null ? m.seq : m.runId })
+      if (thisDir !== dir || thisSeq !== openSeq || thisBox !== box) return
+      if (!res || !res.ok) throw new Error(res?.error?.message || 'Không thể tiếp tục')
+      if (res.state) {
+        applyChainViewUpdate(res.state)
+        updateCard(res.state)
+      } else if (res.alreadyContinued) {
+        contBtn.textContent = 'Đã tiếp tục'
+        contBtn.disabled = true
+      } else {
+        contBtn.textContent = 'Đã tiếp tục'
+      }
+    } catch (err) {
+      if (thisDir !== dir || thisSeq !== openSeq || thisBox !== box) return
+      showToast(err.message.replace(/^.*?Error: /, ''))
+      if (currentState) {
+        renderCardContent(currentState)
+      } else {
+        contBtn.disabled = false
+        contBtn.textContent = 'Tiếp tục'
+      }
+    }
+  }
+
+  registerChainStopCallback(msgKey, updateCard)
+  if (m.stopId) registerChainStopCallback(String(m.stopId), updateCard)
+  if (m.chainId) registerChainStopCallback(String(m.chainId), updateCard)
+
+  renderCardContent(currentState)
+
+  if (typeof api !== 'undefined' && typeof api.chainState === 'function') {
+    const reqDir = dir, reqSeq = openSeq, reqBox = box
+    api.chainState(reqDir, { messageId: m.seq != null ? m.seq : m.runId }).then(res => {
+      if (!sameOpen(reqDir, reqSeq) || box !== reqBox) return
+      if (res && res.ok && res.state) {
+        applyChainViewUpdate(res.state)
+        updateCard(res.state)
+      }
+    }).catch(() => {})
+  }
+}
+
 function isGroupableSystemMsg(m) {
   if (!m || m.from !== 'system') return false
   if (m.usage != null || m.error != null) return false
@@ -1499,9 +1817,19 @@ function createMsgElement(m) {
     const hdr = el('div', '', m.text)
     card.append(hdr)
     if (m.at) card.append(el('time', 'sys-time', hhmm(m.at)))
+    if (m.mergeEvent) {
+      const details = renderMergeDetails(m.mergeEvent)
+      if (details) card.append(details)
+    }
     if (m.queueId && m.owner && ['CONFLICT', 'CHECK_FAILED', 'CHECK_MUTATED_TREE'].includes(m.error?.code)) {
-      const repBtn = el('button', 'box press btn sm primary', `Gọi @${m.owner} sửa`)
+      const repBtn = el('button', 'box press btn sm primary merge-repair-btn', `Gọi @${m.owner} sửa`)
       repBtn.type = 'button'
+      repBtn.dataset.queueId = m.queueId
+      const queueItem = (worktreeState?.queue || []).find(q => q.id === m.queueId || q.queueId === m.queueId)
+      if (!queueItem || !queueItem.canRepair) {
+        repBtn.disabled = true
+        repBtn.title = 'Không thể gọi sửa (đã nhận claim, đã gộp hoặc không còn trong hàng chờ)'
+      }
       repBtn.onclick = () => runMergeAction('requestMergeRepair', m.queueId, repBtn, `Đã yêu cầu @${m.owner} sửa xung đột`)
       card.append(repBtn)
     }
@@ -1617,30 +1945,8 @@ function createMsgElement(m) {
     sys.append(renderMarkdown(m.text, { dir, fromFile: null, workspace: m.workspace || null }))
     if (usage) sys.append(usage)
     if (m.at) sys.append(el('time', 'sys-time', hhmm(m.at)))
-    // only main's own chain-stop record: its text is agent-influenced, and main refuses a second continue of the same chain
     if (m.kind === 'chain-stop') {
-      if (m.chain?.costIncomplete || m.costIncomplete) {
-        sys.append(el('div', 'chain-cost-notice muted', 'Chi phí chuỗi chưa đủ dữ liệu'))
-      }
-      const btnWrap = el('div')
-      const contBtn = el('button', 'box press btn sm primary', 'Tiếp tục')
-      contBtn.type = 'button'
-      contBtn.title = 'Chạy tiếp chuỗi với bộ đếm mới'
-      contBtn.onclick = async () => {
-        contBtn.disabled = true
-        contBtn.textContent = 'Đang tiếp tục…'
-        try {
-          const res = await api.continueChain(dir, { messageId: m.seq != null ? m.seq : m.runId })
-          if (!res.ok) throw new Error(res.error.message)
-          contBtn.textContent = 'Đã tiếp tục'
-        } catch (err) {
-          showToast(err.message.replace(/^.*?Error: /, ''))
-          contBtn.disabled = false
-          contBtn.textContent = 'Tiếp tục'
-        }
-      }
-      btnWrap.append(contBtn)
-      sys.append(btnWrap)
+      renderChainStopCard(m, sys)
     }
     node = sys
   } else {
@@ -2266,9 +2572,25 @@ function renderWorktreeUI() {
   }
   sec.hidden = false
   renderMergeQueue(queue)
+  updateChatRepairButtons()
   if (currentPopoverAgent) {
     const agent = team.find(a => a.name === currentPopoverAgent)
     if (agent) updateMemberPopoverContent(agent)
+  }
+}
+
+function updateChatRepairButtons() {
+  const btns = document.querySelectorAll('.merge-repair-btn')
+  for (const btn of btns) {
+    const qid = btn.dataset.queueId
+    const item = (worktreeState?.queue || []).find(q => q.id === qid || q.queueId === qid)
+    if (!item || !item.canRepair) {
+      btn.disabled = true
+      btn.title = 'Không thể gọi sửa (đã nhận claim, đã gộp hoặc không còn trong hàng chờ)'
+    } else {
+      btn.disabled = false
+      btn.title = ''
+    }
   }
 }
 
@@ -2335,6 +2657,11 @@ function renderMergeQueue(queue) {
         errDiv.append(pre)
       }
       card.append(errDiv)
+    }
+
+    if (item.mergeEvent) {
+      const detailsEl = renderMergeDetails(item.mergeEvent)
+      if (detailsEl) card.append(detailsEl)
     }
 
     const actions = el('div', 'merge-card-actions')
@@ -3563,7 +3890,35 @@ function renderNeeds() {
         needButton('Yêu cầu sửa', () => prefill(`@${item.from} Yêu cầu sửa ${replyAbout(item)}: `)),
         needButton('Từ chối', () => prefill(`@${item.from} Từ chối ${replyAbout(item)}: `)))
     } else if (item.kind === 'chain') {
+      const msgKey = String(item.seq)
+      let cView = chainViewsByMsg.get(msgKey) || (item.stopId ? chainViewsByMsg.get(String(item.stopId)) : null) || item.chainView || null
       const resume = needButton('Tiếp tục', () => needAction(resume, () => api.continueChain(dir, { messageId: item.seq })), 'btn sm primary')
+      if (cView) {
+        if (cView.phase === 'continued') {
+          resume.disabled = true
+          resume.textContent = 'Đã tiếp tục'
+          resume.title = 'Chuỗi đã được tiếp tục'
+        } else if (cView.phase === 'draining') {
+          resume.disabled = true
+          resume.textContent = 'Tiếp tục'
+          resume.title = 'Chờ các nhánh đang chạy hoàn tất trước khi tiếp tục'
+        } else if (cView.phase === 'interrupted' || cView.phase === 'unavailable' || cView.canContinue === false) {
+          resume.disabled = true
+          resume.textContent = 'Tiếp tục'
+          resume.title = cView.reason?.text || 'Không thể tiếp tục'
+        } else {
+          resume.disabled = false
+          resume.textContent = 'Tiếp tục'
+          resume.title = 'Chạy tiếp chuỗi với bộ đếm mới'
+        }
+      } else {
+        if (item.canContinue === false || item.phase === 'draining' || item.phase === 'continued' || item.phase === 'interrupted' || item.phase === 'unavailable') {
+          resume.disabled = true
+          if (item.phase === 'continued') resume.textContent = 'Đã tiếp tục'
+          else if (item.phase === 'draining') resume.title = 'Chờ các nhánh đang chạy hoàn tất trước khi tiếp tục'
+          else resume.title = item.reason?.text || 'Không thể tiếp tục'
+        }
+      }
       actions.append(resume)
     } else actions.append(needButton('Mở mục Quyền', () => openSettingsForAgent(item.from)))
     card.append(head, text, actions)
@@ -4990,6 +5345,26 @@ api.on('permissions-changed', (d, data) => {
     renderNeeds()
   }
 })
+
+function handleChainChanged(d, state) {
+  if (openingDir === d) {
+    pendingEvents.push({ type: 'chain-changed', dir: d, state })
+    return
+  }
+  if (d !== dir) return
+  if (!state || !state.stopId) return
+  applyChainViewUpdate(state)
+}
+
+if (typeof api !== 'undefined') {
+  if (typeof api.onChainChanged === 'function') {
+    const unsub = api.onChainChanged((d, state) => handleChainChanged(d, state))
+    if (typeof unsub === 'function') activeChainUnbinds.push(unsub)
+  }
+  if (typeof api.on === 'function') {
+    api.on('chain-changed', (d, state) => handleChainChanged(d, state))
+  }
+}
 
 // ---- Right panel tab "Dự án": the files of the main folder, of an agent's worktree, or of one commit, with what changed.
 // Click opens the file (or its diff when it changed); right-click copies its path.

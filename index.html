@@ -631,6 +631,82 @@
     font-size: 12px;
     margin: 4px 0;
   }
+  .chain-stop-card {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-top: 6px;
+    padding: 8px 10px;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    font-size: 12.5px;
+    line-height: 1.5;
+  }
+  .chain-stop-hdr {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+  .chain-phase-badge {
+    font-size: 11px;
+    font-weight: 500;
+    padding: 1px 6px;
+    border-radius: 4px;
+    border: 1px solid var(--line);
+  }
+  .badge-draining { border-color: var(--warn-line); color: var(--warn-ink); background: var(--warn-bg); }
+  .badge-ready { border-color: var(--ok); color: var(--ok); }
+  .badge-continued { border-color: var(--line); color: var(--faint); }
+  .badge-interrupted { border-color: var(--danger); color: var(--danger); }
+  .badge-unavailable { border-color: var(--line); color: var(--muted); }
+  .chain-source-link {
+    color: var(--accent);
+    cursor: pointer;
+    text-decoration: underline;
+  }
+  .chain-stop-row {
+    font-size: 12px;
+    line-height: 1.4;
+  }
+  .chain-stop-actions {
+    margin-top: 2px;
+  }
+  .merge-details-box {
+    margin-top: 6px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--surface);
+    font-size: 12px;
+  }
+  .merge-details-summary {
+    padding: 4px 8px;
+    cursor: pointer;
+    font-weight: 500;
+    user-select: none;
+  }
+  .merge-details-summary:hover {
+    color: var(--ink);
+  }
+  .merge-details-body {
+    padding: 6px 8px;
+    border-top: 1px solid var(--line);
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    user-select: text;
+  }
+  .merge-details-row {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    flex-wrap: wrap;
+    font-size: 11.5px;
+  }
+  .merge-details-label {
+    font-weight: 500;
+  }
   /* cost of the whole box, a strip under the timeline header (not scoped to the chosen range) */
   .stats-panel { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 20px; padding: 10px 20px; border-bottom: 1px solid var(--line); font-size: 13px; flex: none; }
   .stats-panel h3 { margin: 0; }

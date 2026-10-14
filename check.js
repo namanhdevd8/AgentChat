@@ -1767,6 +1767,300 @@ async function rendererS11Checks() {
   console.log('ok (sprint 11 FE task verification & evidence)')
 }
 
+async function rendererS12Checks() {
+  const ui = fs.readFileSync(path.join(__dirname, 'renderer.js'), 'utf8'), vm = require('vm')
+  const html = fs.readFileSync(path.join(__dirname, 'index.html'), 'utf8')
+
+  // 1. Static HTML & CSS contract assertions
+  assert.ok(html.includes('.chain-stop-card'), 'CSS: thiếu .chain-stop-card')
+  assert.ok(html.includes('.chain-stop-hdr'), 'CSS: thiếu .chain-stop-hdr')
+  assert.ok(html.includes('.chain-phase-badge'), 'CSS: thiếu .chain-phase-badge')
+  assert.ok(html.includes('.badge-draining') && html.includes('.badge-ready'), 'CSS: thiếu badge draining/ready')
+  assert.ok(html.includes('.badge-continued') && html.includes('.badge-interrupted') && html.includes('.badge-unavailable'), 'CSS: thiếu badge continued/interrupted/unavailable')
+  assert.ok(html.includes('.chain-source-link'), 'CSS: thiếu .chain-source-link')
+  assert.ok(html.includes('.merge-details-box'), 'CSS: thiếu .merge-details-box')
+  assert.ok(html.includes('.merge-details-summary') && html.includes('.merge-details-body'), 'CSS: thiếu merge-details summary/body')
+  assert.ok(html.includes('flex-wrap: wrap'), 'CSS: thiếu flex-wrap: wrap trên tree-task-row')
+
+  // UI assertions in renderer.js
+  assert.ok(ui.includes('renderChainStopCard'), 'renderer: thiếu renderChainStopCard')
+  assert.ok(ui.includes('renderMergeDetails'), 'renderer: thiếu renderMergeDetails')
+  assert.ok(ui.includes('CHAIN_PHASE_LABELS'), 'renderer: thiếu CHAIN_PHASE_LABELS')
+  assert.ok(ui.includes('applyChainViewUpdate'), 'renderer: thiếu applyChainViewUpdate')
+  assert.ok(ui.includes('chainViewsByMsg'), 'renderer: thiếu chainViewsByMsg')
+  assert.ok(ui.includes('updateChatRepairButtons'), 'renderer: thiếu updateChatRepairButtons')
+
+  // 2. VM DOM & functional tests
+  const nodes = new Map()
+  const el = (tag, className = '', initialText = '') => {
+    let _text = initialText
+    return {
+      tag, className, style: { setProperty() {} }, children: [], attrs: {}, dataset: {},
+      get textContent() {
+        if (this.children.length > 0) {
+          return this.children.map(c => typeof c === 'string' ? c : (c.textContent || '')).join(' ')
+        }
+        return _text
+      },
+      set textContent(v) {
+        _text = String(v)
+        this.children = []
+      },
+      append(...c) { this.children.push(...c) },
+      appendChild(c) { this.children.push(c) },
+      replaceChildren(...c) { this.children = c; _text = '' },
+      setAttribute(k, v) { this.attrs[k] = String(v) },
+      getAttribute(k) { return this.attrs[k] },
+      remove() {
+        if (this.parent) {
+          this.parent.children = this.parent.children.filter(c => c !== this)
+        }
+      },
+      classList: {
+        _classes: new Set(className ? className.split(' ').filter(Boolean) : []),
+        add(c) { this._classes.add(c) },
+        remove(c) { this._classes.delete(c) },
+        contains(c) { return this._classes.has(c) }
+      },
+      querySelector(sel) {
+        const match = node => {
+          if (!node) return null
+          if (sel.startsWith('.')) {
+            const cls = sel.slice(1)
+            if ((node.className || '').split(' ').includes(cls)) return node
+          }
+          if (sel.startsWith('#')) {
+            const id = sel.slice(1)
+            if (node.id === id) return node
+          }
+          if (!sel.startsWith('.') && !sel.startsWith('#')) {
+            if (node.tag === sel) return node
+          }
+          for (const child of node.children || []) {
+            const found = match(child)
+            if (found) return found
+          }
+          return null
+        }
+        for (const child of this.children || []) {
+          const found = match(child)
+          if (found) return found
+        }
+        return null
+      },
+      querySelectorAll(sel) {
+        const results = []
+        const search = node => {
+          if (!node) return
+          if (sel.startsWith('.')) {
+            const cls = sel.slice(1)
+            if ((node.className || '').split(' ').includes(cls)) results.push(node)
+          }
+          if (!sel.startsWith('.') && !sel.startsWith('#')) {
+            if (node.tag === sel) results.push(node)
+          }
+          for (const child of node.children || []) search(child)
+        }
+        for (const child of this.children || []) search(child)
+        return results
+      }
+    }
+  }
+
+  const patchAppend = node => {
+    const oldAppend = node.append
+    node.append = function (...c) {
+      for (const child of c) { if (child && typeof child === 'object') child.parent = this }
+      oldAppend.apply(this, c)
+    }
+  }
+
+  const $ = id => {
+    const key = id.replace(/^#/, '')
+    if (!nodes.has(key)) {
+      const node = el('div', '', '')
+      node.id = key
+      node.parentElement = el('div')
+      nodes.set(key, node)
+    }
+    return nodes.get(key)
+  }
+
+  let continueChainCalls = []
+  let jumpToCalls = []
+  let chainStateResponses = new Map()
+  let renderNeedsCalls = 0
+
+  const ctx = vm.createContext({
+    $,
+    el: (tag, cls = '', txt = '') => {
+      const node = el(tag, cls, txt)
+      patchAppend(node)
+      return node
+    },
+    dir: '/test-dir', box: '.chat', openSeq: 1,
+    document: {
+      activeElement: null,
+      querySelectorAll: (sel) => {
+        const results = []
+        for (const root of nodes.values()) {
+          results.push(...root.querySelectorAll(sel))
+        }
+        return results
+      }
+    },
+    sameOpen: (d, s) => d === '/test-dir' && s === 1,
+    showToast: () => {},
+    jumpToMessage: (seq) => jumpToCalls.push(seq),
+    runMergeAction: () => {},
+    renderNeeds: () => { renderNeedsCalls++ },
+    api: {
+      continueChain: async (d, opts) => {
+        continueChainCalls.push({ d, opts })
+        return { ok: true, chainId: 'chain-123', alreadyContinued: false }
+      },
+      chainState: async (d, opts) => {
+        const key = String(opts.messageId)
+        if (chainStateResponses.has(key)) return chainStateResponses.get(key)
+        return { ok: false, error: { message: 'not found' } }
+      }
+    }
+  })
+
+  const part = (from, to) => ui.slice(ui.indexOf(from), ui.indexOf(to, ui.indexOf(from)))
+
+  vm.runInContext(part('const chainViewsByMsg = new Map()', '// Sprint 6 state: paging'), ctx)
+  vm.runInContext(part('function renderMergeDetails(ev) {', 'function isGroupableSystemMsg(m) {'), ctx)
+
+  // Test 1: renderMergeDetails
+  const sampleMergeEv = {
+    queueId: 'q-1',
+    attempt: 1,
+    category: 'conflict',
+    phase: 'checkout',
+    message: 'Conflict merging files',
+    files: ['core.js', 'renderer.js'],
+    commandResult: { command: 'git merge dev', exitCode: 1, signal: null },
+    candidateSha: '0123456789abcdef0123456789abcdef01234567',
+    sourceSha: 'fedcba9876543210fedcba9876543210fedcba98',
+    checkIds: ['check-1', 'check-2'],
+    excerpt: 'CONFLICT (content): Merge conflict in core.js'
+  }
+  const detailsNode = ctx.renderMergeDetails(sampleMergeEv)
+  assert.ok(detailsNode, 'renderMergeDetails must return element')
+  assert.strictEqual(detailsNode.tag, 'details')
+  assert.ok(detailsNode.className.includes('merge-details-box'))
+  const textContent = detailsNode.textContent
+  assert.ok(textContent.includes('checkout') && textContent.includes('conflict'), 'details must include phase and category')
+  assert.ok(textContent.includes('core.js') && textContent.includes('renderer.js'), 'details must include files')
+  assert.ok(textContent.includes('git merge dev') && textContent.includes('1'), 'details must include command and exitCode')
+  assert.ok(textContent.includes('0123456') && textContent.includes('fedcba9'), 'details must include shortened candidateSha and sourceSha')
+  assert.ok(textContent.includes('check-1, check-2'), 'details must include checkIds')
+  const pre = detailsNode.querySelector('.merge-err-log')
+  assert.ok(pre, 'must render pre.merge-err-log')
+  assert.strictEqual(pre.textContent, sampleMergeEv.excerpt, 'excerpt must be inert textContent')
+
+  // Test 2: renderChainStopCard with draining -> ready transition
+  const sysNode = el('div', 'sys')
+  patchAppend(sysNode)
+  const stopMsg = {
+    seq: 101,
+    from: 'system',
+    kind: 'chain-stop',
+    stopId: 'stop-abc',
+    chainId: 'chain-1',
+    text: 'Chuỗi agent dừng',
+    chain: { turns: 3, limit: 12, costUsd: 0.045, costIncomplete: false }
+  }
+
+  // Initial draining state
+  const drainingState = {
+    stopId: 'stop-abc',
+    chainId: 'chain-1',
+    box: '.chat',
+    revision: '1',
+    phase: 'draining',
+    reason: { code: 'no-progress', text: 'Chờ các nhánh chạy nốt' },
+    threshold: 3,
+    idleRunIds: [],
+    turns: 3,
+    limit: 12,
+    costUsd: 0.045,
+    costIncomplete: false,
+    pending: [{ agent: 'dev-be', sourceSeqs: [99], taskIds: ['T51'], uncertain: false }],
+    running: [{ agent: 'dev-fe', runId: 'run-99', phase: 'test' }],
+    canContinue: false,
+    continuedTo: null
+  }
+  chainStateResponses.set('101', { ok: true, state: drainingState })
+  stopMsg.state = drainingState
+
+  ctx.renderChainStopCard(stopMsg, sysNode)
+  await new Promise(r => setImmediate(r))
+  const cardNode = sysNode.querySelector('.chain-stop-card')
+  assert.ok(cardNode, 'must render .chain-stop-card inside sys')
+
+  const badge = cardNode.querySelector('.chain-phase-badge')
+  assert.ok(badge, 'card must have phase badge')
+  assert.ok(badge.className.includes('badge-draining'), 'badge must be badge-draining')
+  assert.strictEqual(badge.textContent, 'Đang hoàn tất nhánh')
+
+  const btn = cardNode.querySelector('button')
+  assert.ok(btn, 'card must have continue button')
+  assert.strictEqual(btn.disabled, true, 'button must be disabled in draining phase')
+
+  // Verify pending sourceSeq link
+  const link = cardNode.querySelector('.chain-source-link')
+  assert.ok(link, 'must render source link for pending item')
+  link.onclick({ preventDefault() {} })
+  assert.deepStrictEqual(jumpToCalls, [99], 'clicking source link must call jumpToMessage(99)')
+
+  // Transition to ready (revision 2)
+  const readyState = {
+    ...drainingState,
+    revision: '2',
+    phase: 'ready',
+    canContinue: true,
+    running: []
+  }
+  ctx.applyChainViewUpdate(readyState)
+  assert.ok(badge.className.includes('badge-ready'), 'badge must update to badge-ready')
+  assert.strictEqual(badge.textContent, 'Sẵn sàng tiếp tục')
+  assert.strictEqual(btn.disabled, false, 'button must be enabled in ready phase')
+
+  // Test 3: Monotonic revision ordering: Late response with revision 1 arriving after revision 2
+  const lateStaleState = {
+    ...drainingState,
+    revision: '1',
+    phase: 'draining',
+    canContinue: false
+  }
+  ctx.applyChainViewUpdate(lateStaleState)
+  // Must NOT revert to draining!
+  assert.ok(badge.className.includes('badge-ready'), 'stale revision must be ignored, badge remains ready')
+  assert.strictEqual(btn.disabled, false, 'stale revision must be ignored, button remains enabled')
+
+  // Test 4: Clicking continue button
+  btn.onclick()
+  await new Promise(r => setImmediate(r))
+  assert.strictEqual(continueChainCalls.length, 1, 'must call api.continueChain')
+  assert.strictEqual(continueChainCalls[0].opts.messageId, 101)
+
+  // Transition to continued (revision 3)
+  const continuedState = {
+    ...readyState,
+    revision: '3',
+    phase: 'continued',
+    canContinue: false
+  }
+  ctx.applyChainViewUpdate(continuedState)
+  assert.ok(badge.className.includes('badge-continued'), 'badge must update to badge-continued')
+  assert.strictEqual(btn.textContent, 'Đã tiếp tục')
+  assert.strictEqual(btn.disabled, true, 'button must be disabled when continued')
+
+  console.log('ok (sprint 12 FE chain-stop & merge details)')
+}
+
 // ---- T45 (QA): V1/V2/V3 on the real Electron, real main.js + renderer.js. Opt-in, opens a window: `node check.js --electron` ----
 // Not in `npm run check` (the merge queue has no display). Fixture project + a loopback server that counts every request.
 function electronChecks() {
@@ -3002,7 +3296,7 @@ function appSettingsChecks() {
   console.log('ok (app settings search)')
 }
 
-logChecks().then(needsChecks).then(timelineChecks).then(taskChecks).then(auditChecks).then(viewerChecks).then(runChecks).then(cliPathChecks).then(appSettingsChecks).then(sprint7Checks).then(sprint8Checks).then(sprint9Checks).then(sprint11CoreChecks).then(sprint6Checks).then(rendererChecks).then(rendererFileChecks).then(rendererS9Checks).then(rendererS10Checks).then(rendererS11Checks).then(rendererT56Checks).then(mainChecks).then(() => console.log('ok'), e => { console.error(e); process.exit(1) })
+logChecks().then(needsChecks).then(timelineChecks).then(taskChecks).then(auditChecks).then(viewerChecks).then(runChecks).then(cliPathChecks).then(appSettingsChecks).then(sprint7Checks).then(sprint8Checks).then(sprint9Checks).then(sprint11CoreChecks).then(sprint6Checks).then(rendererChecks).then(rendererFileChecks).then(rendererS9Checks).then(rendererS10Checks).then(rendererS11Checks).then(rendererT56Checks).then(rendererS12Checks).then(mainChecks).then(() => console.log('ok'), e => { console.error(e); process.exit(1) })
 
 // PM creates a task and moves it in the same turn (no revision yet): "" is accepted only for PM on a todo task
 {
