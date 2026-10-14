@@ -1699,7 +1699,7 @@ async function rendererS11Checks() {
     verification: { state: 'ready', warnings: { total: 1, files: [{ path: 'check.js', reason: 'test' }] } }
   }
   const warnItem = ctx.renderTreeTaskRow(taskWithWarn)
-  const warnBadge = warnItem.children[0].children.find(c => (c.className || '').includes('tree-task-warn-badge'))
+  const warnBadge = warnItem.querySelector('.tree-task-warn-badge')
   assert.ok(warnBadge, 'row must render warning badge when warnings.total > 0')
   assert.strictEqual(warnBadge.textContent, '⚠️ Đổi test')
   assert.ok(warnBadge.title.includes('check.js'), 'warn tooltip must include modified check/test file')
@@ -1707,6 +1707,8 @@ async function rendererS11Checks() {
   // Test 4: Evidence button toggle & api.taskEvidence panel
   const evBtn = itemEl.querySelector('.tree-task-evidence-btn')
   assert.ok(evBtn, 'task row must have evidence button')
+  assert.strictEqual(evBtn.textContent, 'Chưa có dữ liệu kiểm', 'verification state doubles as evidence trigger')
+  assert.strictEqual(evBtn.attrs['aria-label'], 'Bằng chứng T48: Chưa có dữ liệu kiểm')
   assert.strictEqual(evBtn.attrs['aria-expanded'], 'false')
   evBtn.onclick({ stopPropagation() {} })
   assert.strictEqual(evBtn.attrs['aria-expanded'], 'true')

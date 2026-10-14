@@ -3175,6 +3175,20 @@ function renderTreeTaskRow(task) {
   }
   row.append(titleEl)
 
+  const metaEl = el('div', 'tree-task-meta')
+  metaEl.append(el('span', 'tree-task-assignee', '@' + task.assignee))
+
+  // Trạng thái đồng thời là nút mở bằng chứng, tránh lặp hai control trên hàng hẹp.
+  const badgeInfo = getTaskVerificationBadge(task)
+  const isOpen = taskEvidenceOpenStates.has(task.id)
+  const evidenceBtn = el('button', `tree-task-evidence-btn tree-task-badge tree-task-badge-${badgeInfo.state} press`, badgeInfo.label)
+  evidenceBtn.type = 'button'
+  evidenceBtn.setAttribute('aria-expanded', isOpen ? 'true' : 'false')
+  evidenceBtn.setAttribute('aria-controls', `task-evidence-${task.id}`)
+  evidenceBtn.setAttribute('aria-label', `Bằng chứng ${task.id}: ${badgeInfo.label}`)
+  evidenceBtn.title = `Bằng chứng kiểm tra${badgeInfo.reason ? ': ' + badgeInfo.reason : ''}`
+  metaEl.append(evidenceBtn)
+
   // Cảnh báo sửa test/check (G3)
   const warnings = task.verification?.warnings
   if (warnings && (warnings.total > 0 || (warnings.files && warnings.files.length > 0))) {
@@ -3182,27 +3196,10 @@ function renderTreeTaskRow(task) {
     const warnEl = el('span', 'tree-task-warn-badge', '⚠️ Đổi test')
     const fileList = (warnings.files || []).map(f => `${f.path} (${f.reason === 'test' ? 'file test' : f.reason === 'test-config' ? 'cấu hình test' : 'script kiểm tra'})`).join(', ')
     warnEl.title = `Cảnh báo sửa test/check (${total} file)${fileList ? ': ' + fileList : ''}${warnings.truncated ? ' (còn nữa)' : ''}`
-    row.append(warnEl)
+    metaEl.append(warnEl)
   }
 
-  // Verification badge (G1/G2)
-  const badgeInfo = getTaskVerificationBadge(task)
-  const badgeEl = el('span', `tree-task-badge tree-task-badge-${badgeInfo.state}`, badgeInfo.label)
-  badgeEl.title = badgeInfo.reason ? `${badgeInfo.label} · ${badgeInfo.reason}` : badgeInfo.label
-  row.append(badgeEl)
-
-  const assigneeEl = el('span', 'tree-task-assignee', '@' + task.assignee)
-  row.append(assigneeEl)
-
-  // Nút mở Bằng chứng
-  const isOpen = taskEvidenceOpenStates.has(task.id)
-  const evidenceBtn = el('button', 'tree-task-evidence-btn btn sm box press', 'Bằng chứng')
-  evidenceBtn.type = 'button'
-  evidenceBtn.setAttribute('aria-expanded', isOpen ? 'true' : 'false')
-  evidenceBtn.setAttribute('aria-controls', `task-evidence-${task.id}`)
-  evidenceBtn.title = 'Bằng chứng kiểm tra'
-  row.append(evidenceBtn)
-
+  row.append(metaEl)
   item.append(row)
 
   let evidencePanel = null
