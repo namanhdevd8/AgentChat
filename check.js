@@ -980,6 +980,35 @@ async function sprint12CoreChecks() {
   assert.throws(() => core.validateTaskChanges(bMan, [{ id: 'T100', status: 'done', expectedRevision: bMan.tasks[0].revision, approval: { kind: 'manual', reason: 'ok', report: '../bad.md' } }], 'pm'), /report/)
   const okMan = core.validateTaskChanges(bMan, [{ id: 'T100', status: 'done', expectedRevision: bMan.tasks[0].revision, approval: { kind: 'manual', reason: 'ok', report: 'reports/test.md' } }], 'pm')
   assert.strictEqual(okMan[0].approval.report, 'reports/test.md')
+  // 5. Reducer check: coordination messages do not change turns/tokens/cost or toggle completeness flags
+  const d2 = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-chat-s12-reducer-')); core.init(d2)
+  await core.appendLogIndexed(d2, { from: 'dev-a', text: 'turn 1', at, usage: { inputTokens: 100, outputTokens: 50, costUsd: 0.005 } })
+  const totalsBefore = { ...(await core.getLogIndex(d2)).totals }
+  assert.strictEqual(totalsBefore.turns, 1)
+  assert.strictEqual(totalsBefore.tokens, 150)
+  assert.strictEqual(totalsBefore.costUsd, 0.005)
+  assert.strictEqual(totalsBefore.tokensIncomplete, false)
+  assert.strictEqual(totalsBefore.costIncomplete, false)
+
+  // Append coordination notes: chain-stop, chain-continue, merge, merge-repair
+  await core.appendLogIndexed(d2, { from: 'system', text: 'Dừng chuỗi', kind: 'chain-stop', stopId: 's1', chainId: 'c1', targets: ['dev-a'], at })
+  await core.appendLogIndexed(d2, { from: 'system', text: 'Tiếp tục', kind: 'chain-continue', continuedFrom: 1, stopId: 's1', childChainId: 'c2', targets: ['dev-a'], at })
+  await core.appendLogIndexed(d2, { from: 'system', text: 'Đã gộp', kind: 'merge', eventId: 'mf1', queueId: 'q1', at })
+  await core.appendLogIndexed(d2, { from: 'system', text: 'Sửa lỗi', kind: 'merge-repair', eventId: 'mr1', queueId: 'q1', at })
+
+  const totalsAfter = { ...(await core.getLogIndex(d2)).totals }
+  assert.deepStrictEqual(totalsAfter, totalsBefore, 'coordination notes must not alter box totals or completeness flags')
+
+  core.invalidateLogIndex(d2)
+  const totalsRebuild = { ...(await core.getLogIndex(d2)).totals }
+  assert.deepStrictEqual(totalsRebuild, totalsBefore, 'rebuilt index must also not count coordination notes as turns')
+
+  // System error turn with partial usage (G6) still counts and sets cost/incomplete
+  await core.appendLogIndexed(d2, { from: 'system', text: 'dev-p lỗi: crash', runId: 'r-err', agent: 'dev-p', outcome: 'error', usage: { inputTokens: 200, outputTokens: 10, costUsd: 0.01, partial: true }, at })
+  const totalsError = { ...(await core.getLogIndex(d2)).totals }
+  assert.strictEqual(totalsError.turns, 2)
+  assert.strictEqual(totalsError.costIncomplete, true)
+  assert.strictEqual(totalsError.costUsd, 0.015)
 
   console.log('ok (sprint 12 core S1-S3 & T54)')
 }
@@ -3020,7 +3049,8 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
   assert.strictEqual(qItem.mergeEvent.phase, 'checks')
   assert.strictEqual(qItem.mergeEvent.code, 'CHECK_FAILED')
   await waitFor('tin báo chưa gộp', () => log().some(m => m.from === 'system' && m.text.startsWith('@dev-c chưa gộp được nhánh')))
-  const rep1 = await call('requestMergeRepair', root, { queueId: entries[0].id })
+  const [rep1, repTwin] = await Promise.all([1, 2].map(() => call('requestMergeRepair', root, { queueId: entries[0].id }))) // T52: two clicks at once
+  assert.ok(repTwin.ok && repTwin.chainId === rep1.chainId, 'hai yêu cầu sửa đồng thời phải chung một lượt sửa: ' + JSON.stringify([rep1, repTwin]))
   assert.ok(rep1.ok && rep1.runId && rep1.chainId)
   const rep2 = await call('requestMergeRepair', root, { queueId: entries[0].id })
   assert.strictEqual(rep2.runId, rep1.runId, 'repeat repair request returns same runId')
@@ -3032,6 +3062,8 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
   assert.ok(repairMsg, 'repair system message must be logged')
   assert.strictEqual(repairMsg.from, 'system')
   assert.strictEqual(repairMsg.initiatedBy, 'user')
+  assert.strictEqual(log().filter(m => m.kind === 'merge-repair' && m.queueId === entries[0].id).length, 1, 'chỉ một tin yêu cầu sửa')
+  assert.strictEqual(log().filter(m => m.from === 'dev-c' && m.runId === rep1.runId).length, 1)
   // the repair turn (no change here) re-queues dev-c's still-red branch: let it settle before counting the next merges
   await waitFor('hàng chờ ổn định sau lượt sửa', () => queue().every(done)); q0 = queue().length
 
@@ -3371,6 +3403,7 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
     console.log('ok (T49 sprint 11 end to end)')
   }
 
+  let s12 = null
   // T52 (QA, independent): Sprint 12 S1/S2/Tiếp tục through the real main.js, shared checkout (worktrees off), fresh agents
   {
     const sleep = ms => new Promise(r => setTimeout(r, ms))
@@ -3421,6 +3454,35 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
     await quiet(mark); delete process.env.FAKE_REPLY; delete process.env.FAKE_EDITS
     assert.strictEqual(agentTurns(mark), 4, 'S1: A→B tính một lần, B→A và A→B lặp lại không tính → dừng sau 4 lượt')
     git('checkout', '--', 's12.txt')
+    s12 = { stopSeq: stop1.seq, childId: c1.chainId }
+    // mergeEvent invariants over every failure the harness produced (dirty root, red check, conflict, deps, scope…)
+    const managed = path.join(userData, 'worktrees'), codes = { CONFLICT: 'conflict', CHECK_FAILED: 'check', CHECK_MUTATED_TREE: 'check', NEEDS_DEPS: 'dependency',
+      DIRTY_ROOT: 'workspace', CHECK_NOT_ALLOWED: 'configuration', TARGET_CHANGED: 'configuration', SCOPE_AUDIT: 'configuration', CONFIG_UNTRUSTED: 'configuration', PAUSED: 'stopped' }
+    const events = (await call('worktreeState', root)).state.queue.map(e => e.mergeEvent).filter(Boolean)
+    assert.ok(events.length >= 3, 'harness phải tạo nhiều lỗi gộp có mergeEvent: ' + events.length)
+    for (const ev of events) {
+      const where = `${ev.code}/${ev.phase} ${ev.queueId}`
+      assert.strictEqual(ev.eventId, 'merge-failure:' + ev.attemptId, where)
+      assert.strictEqual(ev.category, codes[ev.code] || 'internal', `${where}: category theo code`)
+      assert.ok(ev.files.length <= 50 && ev.excerpt.length <= 8192 && ev.message.length <= 2000, where)
+      assert.ok(!JSON.stringify(ev).includes(managed) && !JSON.stringify(ev).includes(userData), `${where}: lộ đường dẫn nội bộ`)
+      assert.ok(!ev.files.some(f => path.isAbsolute(f) || f.split('/').includes('..')), `${where}: path tuyệt đối/đi ra ngoài`)
+      if (['prepare', 'merge', 'dependencies'].includes(ev.phase)) assert.deepStrictEqual([ev.checkIds, ev.commandResult], [[], null], `${where}: chặn trước check không có check/lệnh`)
+      if (ev.code === 'CHECK_FAILED') assert.ok(ev.commandResult && ev.commandResult.exitCode !== 0 && ev.checkIds.length === 1, `${where}: phải có lệnh lỗi + check`)
+      assert.strictEqual(log().filter(m => m.eventId === ev.eventId).length, 1, `${where}: đúng một tin cho một lỗi`)
+    }
+    // coordination notes are not turns: no runId/usage (the box totals reducer counts a system message with runId as a turn)
+    const notes = log().filter(m => ['chain-stop', 'chain-continue', 'merge', 'merge-repair'].includes(m.kind))
+    assert.ok(!notes.some(m => m.runId || m.usage), 'tin điều phối mang runId/usage sẽ bị tính thành lượt: '
+      + JSON.stringify(notes.filter(m => m.runId || m.usage).slice(0, 2).map(m => ({ kind: m.kind, runId: m.runId }))))
+    // a legacy stop (pre-Sprint 12 log: no stopId/claim, a chain-continue without childChainId) must not pass the parent id off as the child
+    const lst = await core.appendLogIndexed(root, { from: 'system', text: 'Dừng sau 12 lượt agent liên tiếp.', kind: 'chain-stop', canContinue: true, targets: ['qa-a'], at: new Date().toISOString() })
+    await core.appendLogIndexed(root, { from: 'system', text: 'Tiếp tục chuỗi với @qa-a.', kind: 'chain-continue', continuedFrom: lst.message.seq, at: new Date().toISOString() })
+    const qaBefore = log().filter(m => m.from === 'qa-a').length
+    const legacy = await call('continueChain', root, { messageId: lst.message.seq })
+    assert.strictEqual(legacy.ok, false, 'Tiếp tục với stop legacy thiếu childChainId phải báo lỗi: ' + JSON.stringify(legacy))
+    assert.strictEqual(legacy.error?.code, 'UNAVAILABLE', 'phải báo không khả dụng (UNAVAILABLE): ' + JSON.stringify(legacy))
+    await sleep(1500); assert.strictEqual(log().filter(m => m.from === 'qa-a').length, qaBefore, 'stop legacy đã tiếp tục không được cấp lại')
     console.log('ok (T52 S12 phanh/Tiếp tục/trùng/novelty)')
   }
 
@@ -3457,6 +3519,10 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
   assert.strictEqual(themeListeners.length, 0, 'nativeTheme listener cleaned up on closed')
   assert.doesNotThrow(() => mockNativeTheme.emitUpdated(), 'emit updated after closed must not throw')
   console.log('ok (T57 nativeTheme lifecycle & maximized)')
+  // T52: after a restart of main (fresh module state, same userData + log), Tiếp tục still answers with the same child chain
+  delete require.cache[require.resolve('./main')]; require('./main'); await new Promise(r => setImmediate(r))
+  const again = await call('continueChain', root, { messageId: s12.stopSeq })
+  assert.ok(again.ok && again.alreadyContinued && again.chainId === s12.childId, 'Tiếp tục sau restart phải trả cùng childChainId: ' + JSON.stringify(again))
   console.log('ok (main harness end)') // mainChecks requires this line: a hung await empties the event loop and exits 0 silently
 }
 // Cài đặt › CLI Agent: a scan lists each real file once, PATH first and executables only; a check reads the version and

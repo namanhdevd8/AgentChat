@@ -974,6 +974,7 @@ function addIndexedRecord(index, raw, record, start, end) {
   const agent = record.agent || (record.from !== 'user' && record.from !== 'system' ? record.from : null)
   index.records.push({ start, end, from: String(record.from ?? ''), at: record.at, search: searchText(record.text),
     kind: record.kind, summary: record.summary, continuedFrom: record.continuedFrom, eventId: record.eventId,
+    childChainId: record.childChainId, stopId: record.stopId,
     run: agent && record.usage ? { agent: String(agent), ms: value(record.usage.durationMs) || 0, outcome: String(record.outcome || 'success') } : undefined })
   if (record.eventId) {
     if (!index.eventIds) index.eventIds = new Set()

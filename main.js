@@ -1570,7 +1570,6 @@ async function haltChain(dir, chain, reason, targets) {
     canContinue: true,
     stopId: chain.stopId,
     chainId: chain.id,
-    runId: chain.id,
     targets: names,
     continuationTarget: names.map(name => `@${name}`).join(' '),
     costUsd: chain.costUsd,
@@ -3083,11 +3082,18 @@ ipcMain.handle('continueChain', (event, dir, request) => {
     const existingClaim = store.claims[claimKey]
     const logIndex = await core.getLogIndex(root)
     const continueRecord = logIndex.records.find(r => r.kind === 'chain-continue' && (r.continuedFrom === stop.seq || r.stopId === stopId))
+    let childFromRaw = null
+    if (continueRecord && !continueRecord.childChainId && Number.isInteger(continueRecord.continuedFrom)) {
+      const page = await core.logPage(root, { around: continueRecord.continuedFrom, limit: 10 }).catch(() => null)
+      const rawRec = page?.messages?.find(m => m.kind === 'chain-continue' && (m.continuedFrom === stop.seq || m.stopId === stopId))
+      if (rawRec?.childChainId) childFromRaw = rawRec.childChainId
+    }
     const resolvedChildId = existingClaim?.childChainId
       || continuedChains.get(legacyKey)
       || store.stops[stopId]?.state?.continuedTo
       || originChain?.continuedTo
       || continueRecord?.childChainId
+      || childFromRaw
 
     if (resolvedChildId) {
       const existingChain = activeChains.get(resolvedChildId)
@@ -3098,7 +3104,7 @@ ipcMain.handle('continueChain', (event, dir, request) => {
       }
     }
     if (continuedChains.has(legacyKey) || continueRecord) {
-      return { chainId: stopId, alreadyContinued: true, state: store.stops[stopId]?.state || null }
+      throw gitError('UNAVAILABLE', 'Không thể xác định chuỗi đã tiếp tục')
     }
 
     const pendingList = originChain?.pending?.length ? originChain.pending
@@ -3155,7 +3161,7 @@ ipcMain.handle('continueChain', (event, dir, request) => {
 
     const childChain = newChain(root, { id: childChainId, stopId: childChainId })
     await postOnce(root, 'continue:' + stopId, 'system', `Tiếp tục chuỗi với ${targets.map(target => `@${target.name}`).join(' ')}.`,
-      { kind: 'chain-continue', continuedFrom: stop.seq, stopId, childChainId, runId: childChainId, targets: targets.map(t => t.name) })
+      { kind: 'chain-continue', continuedFrom: stop.seq, stopId, childChainId, targets: targets.map(t => t.name) })
 
     for (const target of targets) {
       updateControlStore(root, s => {
