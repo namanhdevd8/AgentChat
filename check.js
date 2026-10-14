@@ -2699,8 +2699,11 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
     delete process.env.FAKE_CLAUDE; delete process.env.FAKE_REPLY; delete process.env.FAKE_SLOW_MS
     const g6 = log().slice(mark)
     assert.ok(g6.findIndex(m => m.agent === 'dev-p') < g6.findIndex(m => m.from === 'qa-a'), 'thứ tự ca G6: dev-p phải lỗi trước khi qa-a gọi tiếp')
+    assert.ok(g6.some(m => m.agent === 'dev-p' && m.outcome === 'error' && m.usage?.costUsd > 0.4), 'G6: lượt lỗi của dev-p phải giữ chi phí đã đo')
     assert.ok(g6.some(m => m.kind === 'chain-stop' && /chi phí/.test(m.text)) && !g6.some(m => m.from === 'qa-b'),
       'lượt lỗi tốn 0,5 USD nhưng chuỗi trần 0,1 vẫn gọi tiếp (' + g6.map(m => `[${m.from}] ${m.text}`).join(' → ') + '): core gắn partial cho mọi lượt không thành công nên recordChainTurn bỏ qua cả phần chi phí đã biết')
+    const stop6 = g6.find(m => m.kind === 'chain-stop')
+    assert.ok(stop6.costUsd >= 0.4 && stop6.costIncomplete === true, 'chain-stop phải mang chi phí đã biết + cờ thiếu dữ liệu: ' + JSON.stringify(stop6))
     cfg = await call('projectSettings', root)
     assert.ok((await call('saveProjectSettings', root, { settings: { ...cfg.settings, costCeiling: null }, expectedRevision: cfg.revision })).ok)
 
@@ -2715,6 +2718,9 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
     const [X] = r1.verification.checkIds, [Y] = r2.verification.checkIds
     const ev = await call('taskEvidence', root, { taskId: 'T901', expectedRevision: r1.revision })
     assert.ok(ev.ok && ev.checks.some(c => c.id === X && c.outcome === 'passed' && c.candidateSha) && !JSON.stringify(ev).includes(userData), 'taskEvidence: hồ sơ đúng task, không lộ đường dẫn nội bộ')
+    // a model can't claim a hand-off id: reviewId in the block is refused, nothing recorded
+    out = await turn('qa-b', block([{ id: 'T902', status: 'review', expectedRevision: r2.revision, reviewId: r1.verification.reviewId }]))
+    assert.ok((await tasks()).T902.verification.reviewId === r2.verification.reviewId && out.some(m => m.from === 'system' && /reviewId/.test(m.text)), 'agent tự khai reviewId phải bị từ chối')
     // non-PM done with a check approval on its own code task
     out = await turn('qa-a', block([{ id: 'T901', status: 'done', expectedRevision: r1.revision, approval: { kind: 'checks', checkIds: [X] } }]))
     assert.ok((await tasks()).T901.status === 'review' && out.some(m => m.from === 'qa-a' && m.text.startsWith('xong')), 'agent tự done phải bị chặn')
@@ -2732,6 +2738,8 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
     await settle(1, 'merge qa-b bị chặn vì thư mục bẩn')
     const v2 = (await tasks()).T902
     assert.notStrictEqual(v2.verification.state, 'ready', `bàn giao mới chưa được kiểm (queue ${queue().at(-1).state}) nhưng vẫn "ready" nhờ check ${v2.verification.checkIds} của lần trước`)
+    await xfail('T49-nhan-queue-bi-chan', async () => assert.strictEqual(v2.verification.state, 'pending',
+      `queue của bàn giao đang ${queue().at(-1).state} nhưng badge là "${v2.verification.reason}" (contract mục 5: queue bị chặn/paused vẫn là pending kèm lý do)`))
     await approve('T902', { kind: 'checks', checkIds: v2.verification.checkIds.length ? v2.verification.checkIds : [Y] })
     assert.strictEqual((await tasks()).T902.status, 'review', 'PM đóng được T902 khi code mới chưa từng chạy check')
     fs.rmSync(at('dirty.tmp'))
