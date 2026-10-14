@@ -1380,6 +1380,278 @@ async function rendererS10Checks() {
   console.log('ok (sprint 10 FE V1/V2/V3)')
 }
 
+// ---- Sprint 11 FE: task verification badges, test change warning, evidence panel, chain cost incomplete ----
+async function rendererS11Checks() {
+  const ui = fs.readFileSync(path.join(__dirname, 'renderer.js'), 'utf8'), vm = require('vm')
+  const html = fs.readFileSync(path.join(__dirname, 'index.html'), 'utf8')
+
+  // 1. Static HTML & CSS contract assertions
+  assert.ok(html.includes('.tree-task-badge'), 'CSS: thiếu .tree-task-badge')
+  assert.ok(html.includes('.tree-task-badge-ready') && html.includes('.tree-task-badge-approved'), 'CSS: thiếu badge ready/approved')
+  assert.ok(html.includes('.tree-task-badge-failed') && html.includes('.tree-task-badge-stale'), 'CSS: thiếu badge failed/stale')
+  assert.ok(html.includes('.tree-task-badge-pending') && html.includes('.tree-task-badge-manual'), 'CSS: thiếu badge pending/manual')
+  assert.ok(html.includes('.tree-task-badge-legacy') && html.includes('.tree-task-badge-unavailable'), 'CSS: thiếu badge legacy/unavailable')
+  assert.ok(html.includes('.tree-task-warn-badge'), 'CSS: thiếu .tree-task-warn-badge')
+  assert.ok(html.includes('.tree-task-evidence-btn'), 'CSS: thiếu .tree-task-evidence-btn')
+  assert.ok(html.includes('.tree-task-evidence-panel'), 'CSS: thiếu .tree-task-evidence-panel')
+  assert.ok(html.includes('.check-excerpt'), 'CSS: thiếu .check-excerpt')
+  assert.ok(html.includes('.tree-task-spec-link'), 'CSS: thiếu .tree-task-spec-link')
+  assert.ok(html.includes('.chain-cost-notice'), 'CSS: thiếu .chain-cost-notice')
+
+  // UI strings in renderer.js
+  assert.ok(ui.includes('taskEvidence'), 'renderer: thiếu gọi api.taskEvidence')
+  assert.ok(ui.includes('getTaskVerificationBadge'), 'renderer: thiếu getTaskVerificationBadge')
+  assert.ok(ui.includes('renderTaskEvidencePanel'), 'renderer: thiếu renderTaskEvidencePanel')
+  assert.ok(ui.includes('renderEvidenceContent'), 'renderer: thiếu renderEvidenceContent')
+  assert.ok(ui.includes('Chi phí chuỗi chưa đủ dữ liệu'), 'renderer: thiếu thông báo Chi phí chuỗi chưa đủ dữ liệu')
+
+  // 2. VM DOM & functional tests
+  const part = (from, to) => ui.slice(ui.indexOf(from), ui.indexOf(to, ui.indexOf(from)))
+  const nodes = new Map()
+  const el = (tag, className = '', initialText = '') => {
+    let _text = initialText
+    return {
+      tag, className, style: { setProperty() {} }, children: [], attrs: {}, dataset: {},
+      get textContent() {
+        if (this.children.length > 0) {
+          return this.children.map(c => typeof c === 'string' ? c : (c.textContent || '')).join(' ')
+        }
+        return _text
+      },
+      set textContent(v) {
+        _text = String(v)
+        this.children = []
+      },
+      append(...c) { this.children.push(...c) },
+      appendChild(c) { this.children.push(c) },
+      replaceChildren(...c) { this.children = c; _text = '' },
+      setAttribute(k, v) { this.attrs[k] = String(v) },
+    getAttribute(k) { return this.attrs[k] },
+    remove() {
+      if (this.parent) {
+        this.parent.children = this.parent.children.filter(c => c !== this)
+      }
+    },
+    classList: {
+      _classes: new Set(className ? className.split(' ').filter(Boolean) : []),
+      add(c) { this._classes.add(c) },
+      remove(c) { this._classes.delete(c) },
+      contains(c) { return this._classes.has(c) }
+    },
+    querySelector(sel) {
+      const match = node => {
+        if (!node) return null
+        if (sel.startsWith('.')) {
+          const cls = sel.slice(1)
+          if ((node.className || '').split(' ').includes(cls)) return node
+        }
+        if (sel.startsWith('#')) {
+          const id = sel.slice(1)
+          if (node.id === id) return node
+        }
+        for (const child of node.children || []) {
+          const found = match(child)
+          if (found) return found
+        }
+        return null
+      }
+      for (const child of this.children || []) {
+        const found = match(child)
+        if (found) return found
+      }
+      return null
+    },
+    querySelectorAll(sel) {
+      const results = []
+      const search = node => {
+        if (!node) return
+        if (sel.startsWith('.')) {
+          const cls = sel.slice(1)
+          if ((node.className || '').split(' ').includes(cls)) results.push(node)
+        }
+        for (const child of node.children || []) search(child)
+      }
+      for (const child of this.children || []) search(child)
+      return results
+    },
+    closest(sel) {
+      if (sel.startsWith('.')) {
+        const cls = sel.slice(1)
+        if ((this.className || '').split(' ').includes(cls)) return this
+      }
+      return null
+    },
+    focus() { ctx.document.activeElement = this }
+  }
+}
+
+  const patchAppend = node => {
+    const oldAppend = node.append
+    node.append = function (...c) {
+      for (const child of c) { if (child && typeof child === 'object') child.parent = this }
+      oldAppend.apply(this, c)
+    }
+  }
+
+  const $ = id => {
+    const key = id.replace(/^#/, '')
+    if (!nodes.has(key)) {
+      const node = el('div', '', '')
+      node.id = key
+      node.parentElement = el('div')
+      nodes.set(key, node)
+    }
+    return nodes.get(key)
+  }
+
+  let evidenceCalls = [], viewerCalls = [], copiedTexts = []
+  const ctx = vm.createContext({
+    $, el: (tag, cls = '', txt = '') => {
+      const node = el(tag, cls, txt)
+      patchAppend(node)
+      return node
+    },
+    dir: '/test-dir', box: '.chat', openSeq: 1,
+    document: { activeElement: null },
+    navigator: { clipboard: { writeText: async txt => copiedTexts.push(txt) } },
+    showToast: () => {},
+    openFileViewer: (href, from) => viewerCalls.push({ href, from }),
+    getAgentAvatar: () => ({ color: '#3b82f6' }),
+    hhmm: () => '12:00',
+    STATUS_MAP: { doing: 'Đang chạy', review: 'Chờ duyệt', todo: 'Cần làm', done: 'Xong' },
+    api: {
+      tasks: async () => ({ tasks: [] }),
+      taskEvidence: async (d, opts) => {
+        evidenceCalls.push({ d, opts })
+        return {
+          ok: true,
+          taskId: opts.taskId,
+          revision: opts.expectedRevision,
+          verification: {
+            state: 'ready',
+            reason: null,
+            warnings: { files: [{ path: 'check.js', reason: 'test' }], total: 1, truncated: false },
+            approval: null
+          },
+          review: {
+            workspaceId: 'ws-dev',
+            at: '2026-10-14T09:00:00Z',
+            sourceSha: '0123456789abcdef0123456789abcdef01234567',
+            baseSha: 'fedcba9876543210fedcba9876543210fedcba98'
+          },
+          checks: [
+            {
+              origin: 'merge',
+              outcome: 'passed',
+              finishedAt: '2026-10-14T09:05:00Z',
+              candidateSha: 'abcdef0123456789abcdef0123456789abcdef01',
+              sourceSha: '0123456789abcdef0123456789abcdef01234567',
+              commands: [
+                {
+                  command: 'npm run check',
+                  exitCode: 0,
+                  durationMs: 1200,
+                  excerpt: 'All 42 checks passed',
+                  truncated: false
+                }
+              ]
+            }
+          ],
+          total: 1,
+          truncated: false
+        }
+      }
+    }
+  })
+
+  vm.runInContext(part('let currentTasks', '// ---- "Cần bạn"'), ctx)
+  vm.runInContext(part('function getRunDetailText', 'const QUIET_MS'), ctx)
+
+  // Test 1: getTaskVerificationBadge mapping
+  assert.strictEqual(ctx.getTaskVerificationBadge({ status: 'todo' }).label, 'Chưa có dữ liệu kiểm')
+  assert.strictEqual(ctx.getTaskVerificationBadge({ status: 'todo' }).state, 'none')
+  assert.strictEqual(ctx.getTaskVerificationBadge({ status: 'doing', verification: { state: 'pending' } }).label, 'Chờ kiểm')
+  assert.strictEqual(ctx.getTaskVerificationBadge({ status: 'review', verification: { state: 'ready' } }).label, 'Đã kiểm · chờ PM duyệt')
+  assert.strictEqual(ctx.getTaskVerificationBadge({ status: 'review', verification: { state: 'stale', reason: 'code đổi' } }).label, 'Cần kiểm lại')
+  assert.strictEqual(ctx.getTaskVerificationBadge({ status: 'review', verification: { state: 'stale', reason: 'code đổi' } }).reason, 'code đổi')
+  assert.strictEqual(ctx.getTaskVerificationBadge({ status: 'review', verification: { state: 'failed' } }).label, 'Kiểm tra lỗi')
+  assert.strictEqual(ctx.getTaskVerificationBadge({ status: 'review', verification: { state: 'manual' } }).label, 'Cần nghiệm thu')
+  assert.strictEqual(ctx.getTaskVerificationBadge({ status: 'review', verification: { state: 'legacy' } }).label, 'Lịch sử cũ')
+  assert.strictEqual(ctx.getTaskVerificationBadge({ status: 'review', verification: { state: 'unavailable' } }).label, 'Chưa xác minh được')
+  assert.strictEqual(ctx.getTaskVerificationBadge({ status: 'review', verification: { state: 'none' } }).label, 'Chưa có bằng chứng')
+  assert.strictEqual(ctx.getTaskVerificationBadge({ status: 'done', verification: { approval: { reviewer: 'pm', kind: 'checks' } } }).label, 'Đã duyệt')
+  assert.strictEqual(ctx.getTaskVerificationBadge({ status: 'done', verification: { approval: { reviewer: 'pm', kind: 'checks' } } }).state, 'approved')
+  assert.strictEqual(ctx.getTaskVerificationBadge({ status: 'done', verification: { state: 'legacy' } }).label, 'Lịch sử cũ')
+  assert.strictEqual(ctx.getTaskVerificationBadge({ status: 'done' }).label, 'Lịch sử cũ')
+
+  // Test 2: renderTreeTaskRow separation of controls & spec link
+  const taskWithSpec = { id: 'T48', title: 'Task FE', assignee: 'dev-fe', status: 'doing', spec: 'reports/sprint-11.md', revision: 'rev1' }
+  const itemEl = ctx.renderTreeTaskRow(taskWithSpec)
+  const rowEl = itemEl.children[0]
+  assert.strictEqual(rowEl.attrs['role'], undefined, 'row must NOT have role="button"')
+  assert.strictEqual(rowEl.attrs['tabindex'], undefined, 'row must NOT have tabindex')
+  const titleEl = rowEl.children.find(c => (c.className || '').includes('tree-task-title'))
+  assert.ok(titleEl.attrs['role'] === 'button', 'titleEl must have role="button" when spec is present')
+  assert.strictEqual(titleEl.attrs['tabindex'], '0')
+  titleEl.onclick({ stopPropagation() {} })
+  assert.strictEqual(viewerCalls.length, 1)
+  assert.strictEqual(viewerCalls[0].href, 'reports/sprint-11.md')
+
+  // Test 3: Test warning badge on row
+  const taskWithWarn = {
+    id: 'T47', title: 'Task BE', assignee: 'dev-be', status: 'review', revision: 'rev2',
+    verification: { state: 'ready', warnings: { total: 1, files: [{ path: 'check.js', reason: 'test' }] } }
+  }
+  const warnItem = ctx.renderTreeTaskRow(taskWithWarn)
+  const warnBadge = warnItem.children[0].children.find(c => (c.className || '').includes('tree-task-warn-badge'))
+  assert.ok(warnBadge, 'row must render warning badge when warnings.total > 0')
+  assert.strictEqual(warnBadge.textContent, '⚠️ Đổi test')
+  assert.ok(warnBadge.title.includes('check.js'), 'warn tooltip must include modified check/test file')
+
+  // Test 4: Evidence button toggle & api.taskEvidence panel
+  const evBtn = itemEl.querySelector('.tree-task-evidence-btn')
+  assert.ok(evBtn, 'task row must have evidence button')
+  assert.strictEqual(evBtn.attrs['aria-expanded'], 'false')
+  evBtn.onclick({ stopPropagation() {} })
+  assert.strictEqual(evBtn.attrs['aria-expanded'], 'true')
+  assert.strictEqual(evidenceCalls.length, 1)
+  assert.strictEqual(evidenceCalls[0].opts.taskId, 'T48')
+
+  // Wait for taskEvidence resolution
+  await new Promise(r => setImmediate(r))
+  const panel = itemEl.querySelector('.tree-task-evidence-panel')
+  assert.ok(panel, 'evidence panel must be rendered')
+  assert.ok(panel.textContent.includes('Hàng chờ merge'), 'panel must render check origin')
+  assert.ok(panel.textContent.includes('npm run check'), 'panel must render command')
+  const excerptPre = panel.querySelector('.check-excerpt')
+  assert.ok(excerptPre, 'panel must have .check-excerpt')
+  assert.strictEqual(excerptPre.textContent, 'All 42 checks passed', 'excerpt must be inert textContent')
+
+  // Escape closes panel and returns focus to button
+  let escPrevented = false
+  panel.onkeydown({ key: 'Escape', preventDefault() { escPrevented = true }, stopPropagation() {} })
+  assert.ok(escPrevented, 'Escape must be handled')
+  assert.strictEqual(evBtn.attrs['aria-expanded'], 'false')
+  assert.strictEqual(ctx.document.activeElement, evBtn, 'Escape must restore focus to evidence button')
+  assert.strictEqual(itemEl.querySelector('.tree-task-evidence-panel'), null, 'panel must be removed after close')
+
+  // Test 5: Conflict error triggers loadTasks refresh
+  let loadTasksCalled = false
+  ctx.api.tasks = async () => { loadTasksCalled = true; return { tasks: [] } }
+  ctx.api.taskEvidence = async () => ({ ok: false, error: { code: 'CONFLICT', message: 'Task revision changed' } })
+  evBtn.onclick({ stopPropagation() {} })
+  await new Promise(r => setImmediate(r))
+  assert.strictEqual(loadTasksCalled, true, 'CONFLICT must trigger loadTasks()')
+
+  // Test 6: Cost incomplete in getRunDetailText
+  const run1 = { label: 'Task run', chain: { turns: 3, limit: 12, costIncomplete: true } }
+  assert.ok(ctx.getRunDetailText(run1).includes('Chi phí chuỗi chưa đủ dữ liệu'), 'getRunDetailText must include cost incomplete warning')
+  const run2 = { label: 'Task run', chain: { turns: 3, limit: 12, costIncomplete: false } }
+  assert.ok(!ctx.getRunDetailText(run2).includes('Chi phí chuỗi chưa đủ dữ liệu'), 'getRunDetailText must not include warning when cost is complete')
+
+  console.log('ok (sprint 11 FE task verification & evidence)')
+}
+
 // ---- T45 (QA): V1/V2/V3 on the real Electron, real main.js + renderer.js. Opt-in, opens a window: `node check.js --electron` ----
 // Not in `npm run check` (the merge queue has no display). Fixture project + a loopback server that counts every request.
 function electronChecks() {
@@ -2312,7 +2584,7 @@ function appSettingsChecks() {
   console.log('ok (app settings search)')
 }
 
-logChecks().then(needsChecks).then(timelineChecks).then(taskChecks).then(auditChecks).then(viewerChecks).then(runChecks).then(cliPathChecks).then(appSettingsChecks).then(sprint7Checks).then(sprint8Checks).then(sprint9Checks).then(sprint6Checks).then(rendererChecks).then(rendererFileChecks).then(rendererS9Checks).then(rendererS10Checks).then(mainChecks).then(() => console.log('ok'), e => { console.error(e); process.exit(1) })
+logChecks().then(needsChecks).then(timelineChecks).then(taskChecks).then(auditChecks).then(viewerChecks).then(runChecks).then(cliPathChecks).then(appSettingsChecks).then(sprint7Checks).then(sprint8Checks).then(sprint9Checks).then(sprint6Checks).then(rendererChecks).then(rendererFileChecks).then(rendererS9Checks).then(rendererS10Checks).then(rendererS11Checks).then(mainChecks).then(() => console.log('ok'), e => { console.error(e); process.exit(1) })
 
 // PM creates a task and moves it in the same turn (no revision yet): "" is accepted only for PM on a todo task
 {

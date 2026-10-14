@@ -328,6 +328,7 @@ async function openProject(d, c = d === dir ? box : null) {
   closeSearchResults()
   currentTasks = []
   groupOpenStates.clear()
+  taskEvidenceOpenStates.clear()
   renderBoard()
   needs = []
   turnTimes.clear()
@@ -1610,6 +1611,9 @@ function createMsgElement(m) {
     if (m.at) sys.append(el('time', 'sys-time', hhmm(m.at)))
     // only main's own chain-stop record: its text is agent-influenced, and main refuses a second continue of the same chain
     if (m.kind === 'chain-stop') {
+      if (m.chain?.costIncomplete || m.costIncomplete) {
+        sys.append(el('div', 'chain-cost-notice muted', 'Chi phí chuỗi chưa đủ dữ liệu'))
+      }
       const btnWrap = el('div')
       const contBtn = el('button', 'box press btn sm primary', 'Tiếp tục')
       contBtn.type = 'button'
@@ -2800,7 +2804,13 @@ function getRunDetailText(run) {
     parts.push('Đang chờ các khóa:\n' + run.blockedBy.map(b => `  @${b.name}: ${b.path}`).join('\n'))
   }
   if (run.chain) {
-    parts.push(`Chuỗi agent: lượt ${run.chain.turns} (tối đa ${run.chain.limit})`)
+    let chainTxt = `Chuỗi agent: lượt ${run.chain.turns} (tối đa ${run.chain.limit})`
+    if (run.chain.costIncomplete || run.costIncomplete) {
+      chainTxt += ' · Chi phí chuỗi chưa đủ dữ liệu'
+    }
+    parts.push(chainTxt)
+  } else if (run.costIncomplete) {
+    parts.push('Chi phí chuỗi chưa đủ dữ liệu')
   }
   return parts.join('\n\n')
 }
@@ -3016,6 +3026,37 @@ const STATUS_MAP = {
 let currentTasks = []
 let taskGen = 0
 const groupOpenStates = new Map()
+const taskEvidenceOpenStates = new Set()
+
+const VERIFICATION_BADGES = {
+  none: 'Chưa có bằng chứng',
+  pending: 'Chờ kiểm',
+  failed: 'Kiểm tra lỗi',
+  stale: 'Cần kiểm lại',
+  ready: 'Đã kiểm · chờ PM duyệt',
+  manual: 'Cần nghiệm thu',
+  legacy: 'Lịch sử cũ',
+  unavailable: 'Chưa xác minh được'
+}
+
+function getTaskVerificationBadge(task) {
+  if (task.status === 'done') {
+    if (task.verification?.approval) {
+      return { state: 'approved', label: 'Đã duyệt', reason: task.verification?.reason || null }
+    }
+    return { state: 'legacy', label: 'Lịch sử cũ', reason: task.verification?.reason || null }
+  }
+  if (!task.verification) {
+    return { state: 'none', label: 'Chưa có dữ liệu kiểm', reason: null }
+  }
+  const state = task.verification.state
+  const label = VERIFICATION_BADGES[state] || 'Chưa xác minh được'
+  return {
+    state: state || 'unavailable',
+    label,
+    reason: task.verification.reason || null
+  }
+}
 
 async function loadTasks() {
   if (!dir) {
@@ -3023,15 +3064,15 @@ async function loadTasks() {
     renderBoard()
     return
   }
-  const reqDir = dir
+  const reqDir = dir, reqBox = box, reqSeq = openSeq
   const thisGen = ++taskGen
   try {
     const board = await api.tasks(reqDir)
-    if (thisGen !== taskGen || dir !== reqDir) return
+    if (thisGen !== taskGen || dir !== reqDir || box !== reqBox || openSeq !== reqSeq) return
     currentTasks = board.tasks || []
     renderBoard(board.error)
   } catch (e) {
-    if (thisGen !== taskGen || dir !== reqDir) return
+    if (thisGen !== taskGen || dir !== reqDir || box !== reqBox || openSeq !== reqSeq) return
     renderBoard({ code: 'IO_ERROR', message: e.message.replace(/^.*?Error: /, '') })
   }
 }
@@ -3061,6 +3102,10 @@ function renderBoard(error = null) {
 
   emptyEl.hidden = true
 
+  const activeEl = document.activeElement
+  const activeTaskId = activeEl && typeof activeEl.closest === 'function' ? activeEl.closest('.tree-task-item')?.dataset?.taskId : null
+  const activeIsBtn = activeEl?.classList?.contains?.('tree-task-evidence-btn')
+
   // grouped by status, in the order that needs attention; "Xong" starts collapsed
   const numId = id => parseInt(id.replace(/\D/g, ''), 10) || 0
   treeEl.replaceChildren(...Object.entries(STATUS_MAP).flatMap(([status, label]) => {
@@ -3074,11 +3119,19 @@ function renderBoard(error = null) {
     details.append(el('summary', 'task-group-sum', `${label} · ${tasks.length}`), itemsDiv)
     return [details]
   }))
+
+  if (activeTaskId && activeIsBtn && typeof treeEl.querySelector === 'function') {
+    const row = treeEl.querySelector(`.tree-task-item[data-task-id="${activeTaskId}"]`)
+    row?.querySelector?.('.tree-task-evidence-btn')?.focus?.()
+  }
 }
 
 function renderTreeTaskRow(task) {
   const isDone = task.status === 'done'
   const hasSpec = !!task.spec
+  const item = el('div', 'tree-task-item' + (isDone ? ' done' : ''))
+  item.dataset.taskId = task.id
+
   const row = el('div', 'tree-task-row' + (isDone ? ' done' : '') + (hasSpec ? ' has-spec' : ''))
   row.dataset.taskId = task.id
 
@@ -3091,31 +3144,318 @@ function renderTreeTaskRow(task) {
   const idEl = el('span', 'tree-task-id', task.id)
   row.append(idEl)
 
-  const titleEl = el('span', 'tree-task-title', task.title)
-  titleEl.title = task.title
-  row.append(titleEl)
-
-  const assigneeEl = el('span', 'tree-task-assignee', '@' + task.assignee)
-  row.append(assigneeEl)
-
+  const titleEl = el('span', 'tree-task-title' + (hasSpec ? ' tree-task-spec-link' : ''), task.title)
   if (hasSpec) {
-    row.tabIndex = 0
-    row.role = 'button'
-    row.title = `Mở spec: ${task.spec}`
-    row.onclick = (e) => {
+    titleEl.tabIndex = 0
+    titleEl.role = 'button'
+    titleEl.setAttribute('tabindex', '0')
+    titleEl.setAttribute('role', 'button')
+    titleEl.title = `Mở spec: ${task.spec} · ${task.title}`
+    titleEl.onclick = (e) => {
       e.stopPropagation()
       openFileViewer(task.spec, null)
     }
-    row.onkeydown = (e) => {
+    titleEl.onkeydown = (e) => {
       if (e.key === 'Enter' || e.key === ' ') {
         e.preventDefault()
         e.stopPropagation()
         openFileViewer(task.spec, null)
       }
     }
+  } else {
+    titleEl.title = task.title
+  }
+  row.append(titleEl)
+
+  // Cảnh báo sửa test/check (G3)
+  const warnings = task.verification?.warnings
+  if (warnings && (warnings.total > 0 || (warnings.files && warnings.files.length > 0))) {
+    const total = warnings.total || warnings.files.length
+    const warnEl = el('span', 'tree-task-warn-badge', '⚠️ Đổi test')
+    const fileList = (warnings.files || []).map(f => `${f.path} (${f.reason === 'test' ? 'file test' : f.reason === 'test-config' ? 'cấu hình test' : 'script kiểm tra'})`).join(', ')
+    warnEl.title = `Cảnh báo sửa test/check (${total} file)${fileList ? ': ' + fileList : ''}${warnings.truncated ? ' (còn nữa)' : ''}`
+    row.append(warnEl)
   }
 
-  return row
+  // Verification badge (G1/G2)
+  const badgeInfo = getTaskVerificationBadge(task)
+  const badgeEl = el('span', `tree-task-badge tree-task-badge-${badgeInfo.state}`, badgeInfo.label)
+  badgeEl.title = badgeInfo.reason ? `${badgeInfo.label} · ${badgeInfo.reason}` : badgeInfo.label
+  row.append(badgeEl)
+
+  const assigneeEl = el('span', 'tree-task-assignee', '@' + task.assignee)
+  row.append(assigneeEl)
+
+  // Nút mở Bằng chứng
+  const isOpen = taskEvidenceOpenStates.has(task.id)
+  const evidenceBtn = el('button', 'tree-task-evidence-btn btn sm box press', 'Bằng chứng')
+  evidenceBtn.type = 'button'
+  evidenceBtn.setAttribute('aria-expanded', isOpen ? 'true' : 'false')
+  evidenceBtn.setAttribute('aria-controls', `task-evidence-${task.id}`)
+  evidenceBtn.title = 'Bằng chứng kiểm tra'
+  row.append(evidenceBtn)
+
+  item.append(row)
+
+  let evidencePanel = null
+  if (isOpen) {
+    evidencePanel = renderTaskEvidencePanel(task, item, evidenceBtn)
+    item.append(evidencePanel)
+  }
+
+  evidenceBtn.onclick = (e) => {
+    e.stopPropagation()
+    const currentlyOpen = taskEvidenceOpenStates.has(task.id)
+    if (currentlyOpen) {
+      taskEvidenceOpenStates.delete(task.id)
+      evidenceBtn.setAttribute('aria-expanded', 'false')
+      if (evidencePanel) {
+        evidencePanel.remove()
+        evidencePanel = null
+      }
+    } else {
+      taskEvidenceOpenStates.add(task.id)
+      evidenceBtn.setAttribute('aria-expanded', 'true')
+      evidencePanel = renderTaskEvidencePanel(task, item, evidenceBtn)
+      item.append(evidencePanel)
+    }
+  }
+
+  return item
+}
+
+function renderTaskEvidencePanel(task, item, triggerBtn) {
+  const panel = el('div', 'tree-task-evidence-panel')
+  panel.id = `task-evidence-${task.id}`
+  panel.tabIndex = -1
+
+  panel.onkeydown = (e) => {
+    if (e.key === 'Escape') {
+      e.preventDefault()
+      e.stopPropagation()
+      taskEvidenceOpenStates.delete(task.id)
+      triggerBtn.setAttribute('aria-expanded', 'false')
+      panel.remove()
+      triggerBtn.focus()
+    }
+  }
+
+  const loadingEl = el('div', 'tree-task-evidence-loading muted', 'Đang tải bằng chứng…')
+  panel.append(loadingEl)
+
+  const reqDir = dir, reqBox = box, reqSeq = openSeq, reqGen = taskGen
+
+  if (typeof api.taskEvidence !== 'function') {
+    // Fallback if backend API is not yet available or in test mock
+    renderEvidenceContent(panel, task, {
+      ok: true,
+      taskId: task.id,
+      revision: task.revision,
+      verification: task.verification,
+      review: null,
+      checks: []
+    }, triggerBtn)
+    return panel
+  }
+
+  api.taskEvidence(reqDir, { taskId: task.id, expectedRevision: task.revision })
+    .then(res => {
+      if (dir !== reqDir || box !== reqBox || openSeq !== reqSeq || taskGen !== reqGen) return
+      if (!res?.ok) {
+        if (res?.error?.code === 'CONFLICT') {
+          loadTasks()
+        }
+        panel.replaceChildren(el('div', 'tree-task-evidence-error', `Lỗi: ${res?.error?.message || res?.error?.code || 'Không thể tải bằng chứng'}`))
+        return
+      }
+      renderEvidenceContent(panel, task, res, triggerBtn)
+    })
+    .catch(err => {
+      if (dir !== reqDir || box !== reqBox || openSeq !== reqSeq || taskGen !== reqGen) return
+      panel.replaceChildren(el('div', 'tree-task-evidence-error', `Lỗi kết nối: ${err.message.replace(/^.*?Error: /, '')}`))
+    })
+
+  return panel
+}
+
+function renderEvidenceContent(panel, task, data, triggerBtn) {
+  panel.replaceChildren()
+
+  const verification = data.verification || task.verification || null
+  const badgeInfo = getTaskVerificationBadge({ ...task, verification })
+
+  // 1. Header
+  const hdr = el('div', 'evidence-header')
+  const hdrLeft = el('div', 'evidence-header-left')
+  const badgeEl = el('span', `tree-task-badge tree-task-badge-${badgeInfo.state}`, badgeInfo.label)
+  hdrLeft.append(badgeEl)
+  if (verification?.reason) {
+    const reasonEl = el('span', 'evidence-reason muted', verification.reason)
+    hdrLeft.append(reasonEl)
+  }
+  if (data.truncated) {
+    hdrLeft.append(el('span', 'evidence-truncated muted', '(hồ sơ đã rút gọn)'))
+  }
+  const closeBtn = el('button', 'tree-task-evidence-close btn sm box press', '✕')
+  closeBtn.type = 'button'
+  closeBtn.title = 'Đóng (Esc)'
+  closeBtn.onclick = (e) => {
+    e.stopPropagation()
+    taskEvidenceOpenStates.delete(task.id)
+    triggerBtn.setAttribute('aria-expanded', 'false')
+    panel.remove()
+    triggerBtn.focus()
+  }
+  hdr.append(hdrLeft, closeBtn)
+  panel.append(hdr)
+
+  // 2. PM approval info
+  if (verification?.approval) {
+    const appSec = el('div', 'evidence-section evidence-approval')
+    appSec.append(el('h4', '', 'Thông tin PM duyệt'))
+    const kindLabel = verification.approval.kind === 'checks' ? 'Kiểm tra tự động' : 'Nghiệm thu thủ công'
+    const appMeta = el('div', 'evidence-row', `@${verification.approval.reviewer} · ${kindLabel}${verification.approval.at ? ' · ' + hhmm(verification.approval.at) : ''}`)
+    appSec.append(appMeta)
+    const noteText = verification.approval.note || verification.approval.reason
+    if (noteText) {
+      const noteLabel = verification.approval.note ? 'Ghi chú: ' : 'Lý do: '
+      appSec.append(el('div', 'evidence-row muted', noteLabel + noteText))
+    }
+    if (verification.approval.report) {
+      const repRow = el('div', 'evidence-row')
+      repRow.append(el('span', 'muted', 'Báo cáo: '))
+      const repLink = el('a', 'evidence-report-link', verification.approval.report)
+      repLink.href = '#'
+      repLink.onclick = (e) => {
+        e.preventDefault()
+        e.stopPropagation()
+        openFileViewer(verification.approval.report, null)
+      }
+      repRow.append(repLink)
+      appSec.append(repRow)
+    }
+    panel.append(appSec)
+  }
+
+  // 3. Test warnings
+  const warnings = verification?.warnings
+  if (warnings && (warnings.total > 0 || (warnings.files && warnings.files.length > 0))) {
+    const warnSec = el('div', 'evidence-section evidence-warnings')
+    const total = warnings.total || warnings.files.length
+    warnSec.append(el('h4', 'warn-heading', `⚠️ Cảnh báo sửa test/check (${total} file)`))
+    const filesList = el('div', 'evidence-warnings-list')
+    for (const f of warnings.files || []) {
+      const reasonLabel = f.reason === 'test' ? 'file test' : f.reason === 'test-config' ? 'cấu hình test' : 'script kiểm tra'
+      const fRow = el('div', 'evidence-row')
+      fRow.append(el('span', 'evidence-warn-path', f.path), el('span', 'muted', ` (${reasonLabel})`))
+      filesList.append(fRow)
+    }
+    if (warnings.truncated) {
+      filesList.append(el('div', 'muted', '(danh sách cảnh báo bị cắt)'))
+    }
+    warnSec.append(filesList)
+    panel.append(warnSec)
+  }
+
+  // 4. Review / Bàn giao
+  if (data.review) {
+    const revSec = el('div', 'evidence-section evidence-review')
+    revSec.append(el('h4', '', 'Bàn giao'))
+    const revMeta = el('div', 'evidence-row')
+    if (data.review.workspaceId) revMeta.append(el('span', '', `Workspace: ${data.review.workspaceId} · `))
+    if (data.review.at) revMeta.append(el('span', 'muted', hhmm(data.review.at) + ' · '))
+    if (data.review.sourceSha) {
+      revMeta.append(el('span', 'muted', 'SHA nguồn: '))
+      const shaSpan = el('span', 'evidence-sha', data.review.sourceSha.slice(0, 7))
+      shaSpan.title = data.review.sourceSha
+      revMeta.append(shaSpan)
+      const copyBtn = el('button', 'evidence-copy-sha-btn btn sm box press', 'Sao chép SHA')
+      copyBtn.type = 'button'
+      copyBtn.title = 'Sao chép SHA đầy đủ'
+      copyBtn.onclick = async (e) => {
+        e.stopPropagation()
+        try {
+          await navigator.clipboard.writeText(data.review.sourceSha)
+          showToast('Đã sao chép SHA')
+        } catch (_) {}
+      }
+      revMeta.append(copyBtn)
+    }
+    revSec.append(revMeta)
+    panel.append(revSec)
+  }
+
+  // 5. Checks
+  const checks = data.checks || []
+  const chkSec = el('div', 'evidence-section evidence-checks')
+  chkSec.append(el('h4', '', `Hồ sơ kiểm tra (${checks.length})`))
+  if (!checks.length) {
+    chkSec.append(el('div', 'none', 'Chưa có hồ sơ kiểm tra.'))
+  } else {
+    for (const chk of checks) {
+      const chkItem = el('div', 'evidence-check-item')
+      const chkHdr = el('div', 'evidence-check-hdr')
+      const originLabel = chk.origin === 'merge' ? 'Hàng chờ merge' : 'Lệnh run-command'
+      const outcomeMap = { passed: 'Đạt', failed: 'Thất bại', stopped: 'Bị dừng', timeout: 'Quá giờ', unverified: 'Chưa xác minh' }
+      const outcomeText = outcomeMap[chk.outcome] || chk.outcome || 'Chưa rõ'
+      chkHdr.append(el('b', '', `${originLabel} · ${outcomeText}`))
+      if (chk.finishedAt) chkHdr.append(el('span', 'muted', hhmm(chk.finishedAt)))
+      chkItem.append(chkHdr)
+
+      if (chk.candidateSha || chk.sourceSha) {
+        const shaRow = el('div', 'evidence-row')
+        if (chk.candidateSha) {
+          shaRow.append(el('span', 'muted', 'SHA kiểm: '))
+          const cSha = el('span', 'evidence-sha', chk.candidateSha.slice(0, 7))
+          cSha.title = chk.candidateSha
+          shaRow.append(cSha)
+          const copySha = el('button', 'evidence-copy-sha-btn btn sm box press', 'Sao chép')
+          copySha.type = 'button'
+          copySha.title = 'Sao chép SHA đầy đủ'
+          copySha.onclick = async (e) => {
+            e.stopPropagation()
+            try {
+              await navigator.clipboard.writeText(chk.candidateSha)
+              showToast('Đã sao chép SHA')
+            } catch (_) {}
+          }
+          shaRow.append(copySha)
+        }
+        if (chk.sourceSha && chk.sourceSha !== chk.candidateSha) {
+          shaRow.append(el('span', 'muted', ' · SHA nguồn: '))
+          const sSha = el('span', 'evidence-sha', chk.sourceSha.slice(0, 7))
+          sSha.title = chk.sourceSha
+          shaRow.append(sSha)
+        }
+        chkItem.append(shaRow)
+      }
+
+      for (const cmd of chk.commands || []) {
+        const cmdItem = el('div', 'evidence-command-item')
+        const cmdMeta = el('div', 'evidence-command-meta')
+        cmdMeta.append(el('code', '', cmd.command))
+        const exitText = cmd.exitCode != null ? `mã thoát: ${cmd.exitCode}` : (cmd.signal ? `tín hiệu: ${cmd.signal}` : '')
+        if (exitText) cmdMeta.append(el('span', 'muted', exitText))
+        if (cmd.durationMs != null) cmdMeta.append(el('span', 'muted', `${cmd.durationMs}ms`))
+        cmdItem.append(cmdMeta)
+
+        if (cmd.error) {
+          cmdItem.append(el('div', 'evidence-cmd-error danger', `Lỗi: ${cmd.error}`))
+        }
+        if (cmd.excerpt) {
+          const pre = el('pre', 'check-excerpt')
+          pre.textContent = cmd.excerpt // INERT TEXT
+          cmdItem.append(pre)
+          if (cmd.truncated) {
+            cmdItem.append(el('div', 'muted', '(đoạn trích đã rút gọn)'))
+          }
+        }
+        chkItem.append(cmdItem)
+      }
+      chkSec.append(chkItem)
+    }
+  }
+  panel.append(chkSec)
 }
 
 
