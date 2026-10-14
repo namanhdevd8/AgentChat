@@ -3226,6 +3226,17 @@ function renderTreeTaskRow(task) {
     }
   }
 
+  item.onkeydown = (e) => {
+    if (e.key !== 'Escape' || !taskEvidenceOpenStates.has(task.id)) return
+    e.preventDefault()
+    e.stopPropagation()
+    taskEvidenceOpenStates.delete(task.id)
+    evidenceBtn.setAttribute('aria-expanded', 'false')
+    evidencePanel?.remove()
+    evidencePanel = null
+    evidenceBtn.focus()
+  }
+
   return item
 }
 
@@ -3233,17 +3244,6 @@ function renderTaskEvidencePanel(task, item, triggerBtn) {
   const panel = el('div', 'tree-task-evidence-panel')
   panel.id = `task-evidence-${task.id}`
   panel.tabIndex = -1
-
-  panel.onkeydown = (e) => {
-    if (e.key === 'Escape') {
-      e.preventDefault()
-      e.stopPropagation()
-      taskEvidenceOpenStates.delete(task.id)
-      triggerBtn.setAttribute('aria-expanded', 'false')
-      panel.remove()
-      triggerBtn.focus()
-    }
-  }
 
   const loadingEl = el('div', 'tree-task-evidence-loading muted', 'Đang tải bằng chứng…')
   panel.append(loadingEl)

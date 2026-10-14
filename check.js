@@ -1727,11 +1727,28 @@ async function rendererS11Checks() {
 
   // Escape closes panel and returns focus to button
   let escPrevented = false
-  panel.onkeydown({ key: 'Escape', preventDefault() { escPrevented = true }, stopPropagation() {} })
+  itemEl.onkeydown({ key: 'Escape', target: panel, preventDefault() { escPrevented = true }, stopPropagation() {} })
   assert.ok(escPrevented, 'Escape must be handled')
   assert.strictEqual(evBtn.attrs['aria-expanded'], 'false')
   assert.strictEqual(ctx.document.activeElement, evBtn, 'Escape must restore focus to evidence button')
   assert.strictEqual(itemEl.querySelector('.tree-task-evidence-panel'), null, 'panel must be removed after close')
+
+  // Escape from the trigger also closes while IPC is pending, without closing another task.
+  const otherBtn = warnItem.querySelector('.tree-task-evidence-btn')
+  otherBtn.onclick({ stopPropagation() {} })
+  evBtn.onclick({ stopPropagation() {} })
+  evBtn.focus()
+  let triggerEscPrevented = false, triggerEscStopped = false
+  itemEl.onkeydown({ key: 'Escape', target: evBtn, preventDefault() { triggerEscPrevented = true }, stopPropagation() { triggerEscStopped = true } })
+  assert.ok(triggerEscPrevented && triggerEscStopped, 'trigger Escape must be consumed when its panel is open')
+  assert.strictEqual(evBtn.attrs['aria-expanded'], 'false')
+  assert.strictEqual(ctx.document.activeElement, evBtn)
+  assert.strictEqual(itemEl.querySelector('.tree-task-evidence-panel'), null)
+  assert.strictEqual(otherBtn.attrs['aria-expanded'], 'true', 'Escape must not close another task')
+  assert.ok(warnItem.querySelector('.tree-task-evidence-panel'))
+  await new Promise(r => setImmediate(r))
+  assert.strictEqual(itemEl.querySelector('.tree-task-evidence-panel'), null, 'late IPC must not reopen a panel closed by Escape')
+  itemEl.onkeydown({ key: 'Escape', preventDefault() { assert.fail('closed task must not consume Escape') }, stopPropagation() {} })
 
   // Test 5: Conflict error triggers loadTasks refresh
   let loadTasksCalled = false
@@ -1891,14 +1908,20 @@ function qaElectronEntry() { // runs inside Electron, serialized by electronChec
     await js(`${btn('T1')}.focus()`); await press('Enter')
     const kb1 = await js(`[${btn('T1')}.getAttribute('aria-expanded'), !!document.querySelector('#task-evidence-T1'), document.querySelector('#task-evidence-T1')?.textContent.slice(0, 80), ${btn('T1')}.getAttribute('aria-label'), document.querySelector('#viewer').open]`)
     await press('Escape') // focus is still on the button
-    const kbEscOnBtn = await js(`[${btn('T1')}.getAttribute('aria-expanded'), !!document.querySelector('#task-evidence-T1')]`)
-    if (kbEscOnBtn[1]) { await js(`document.querySelector('#task-evidence-T1 .tree-task-evidence-close')?.focus()`); await press('Escape') }
-    const kb2 = await js(`[${btn('T1')}.getAttribute('aria-expanded'), !!document.querySelector('#task-evidence-T1'), document.activeElement === ${btn('T1')}]`)
+    const kbEscOnBtn = await js(`[${btn('T1')}.getAttribute('aria-expanded'), !!document.querySelector('#task-evidence-T1'), document.activeElement === ${btn('T1')}]`)
     await js(`${btn('T2')}.focus()`); await press('Space')
     const kb3 = await js(`[${btn('T2')}.getAttribute('aria-expanded'), document.querySelector('#task-evidence-T2')?.textContent.slice(0, 60), ${btn('T2')}.textContent]`)
-    check('T56 Enter mở bằng chứng (IPC thật, aria-expanded, tên truy cập), Esc trong panel đóng + trả focus, Space mở', kb1[0] === 'true' && kb1[1] && !/Lỗi/.test(kb1[2]) && kb1[3] === 'Bằng chứng T1: Chưa có bằng chứng' && !kb1[4]
-      && kb2[0] === 'false' && !kb2[1] && kb2[2] && kb3[0] === 'true' && kb3[2] === 'Cần nghiệm thu', JSON.stringify([kb1, kb2, kb3]))
-    check('T56 Esc khi focus còn ở nút trạng thái cũng đóng bằng chứng', kbEscOnBtn[0] === 'false' && !kbEscOnBtn[1], JSON.stringify(kbEscOnBtn))
+    await press('Escape') // no Tab into the panel after Space either
+    const kbEscAfterSpace = await js(`[${btn('T2')}.getAttribute('aria-expanded'), !!document.querySelector('#task-evidence-T2'), document.activeElement === ${btn('T2')}]`)
+    check('T56 Enter/Space mở bằng chứng (IPC thật, aria-expanded, tên truy cập)', kb1[0] === 'true' && kb1[1] && !/Lỗi/.test(kb1[2]) && kb1[3] === 'Bằng chứng T1: Chưa có bằng chứng' && !kb1[4]
+      && kb3[0] === 'true' && !/Lỗi/.test(kb3[1]) && kb3[2] === 'Cần nghiệm thu', JSON.stringify([kb1, kb3]))
+    check('T55 Enter → Esc ngay: đóng panel, aria=false, giữ focus nút', kbEscOnBtn[0] === 'false' && !kbEscOnBtn[1] && kbEscOnBtn[2], JSON.stringify(kbEscOnBtn))
+    check('T55 Space → Esc ngay: đóng panel, aria=false, giữ focus nút', kbEscAfterSpace[0] === 'false' && !kbEscAfterSpace[1] && kbEscAfterSpace[2], JSON.stringify(kbEscAfterSpace))
+    await js(`${btn('T1')}.focus()`); await press('Enter')
+    await js(`${btn('T2')}.focus()`); await press('Space')
+    await js(`document.querySelector('#task-evidence-T2 .tree-task-evidence-close').focus()`); await press('Escape')
+    const kbInside = await js(`[${btn('T2')}.getAttribute('aria-expanded'), !!document.querySelector('#task-evidence-T2'), document.activeElement === ${btn('T2')}, ${btn('T1')}.getAttribute('aria-expanded'), !!document.querySelector('#task-evidence-T1')]`)
+    check('T55 Esc trong panel: đóng đúng task, trả focus, giữ panel khác', kbInside[0] === 'false' && !kbInside[1] && kbInside[2] && kbInside[3] === 'true' && kbInside[4], JSON.stringify(kbInside))
     // layout: fixtures for all 8 states + done/approved, very long title/assignee/error, test-change warning; panels open
     const longWord = 'x'.repeat(260)
     const fx = await js(`(() => {
