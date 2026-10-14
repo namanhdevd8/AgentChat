@@ -40,3 +40,7 @@ Hướng sửa tối thiểu: dùng handler có thể gỡ, kiểm cửa sổ t�
 - BE đang làm T51/T54: nhận thêm T57 trong cùng phạm vi main/check; hoàn tất sửa và kiểm trước khi báo đạt. Giữ các sửa Sprint 12 đang làm.
 - QA vẫn đang dừng theo End-User; lượt này không gọi QA chạy lại. Kết quả T55/T56 giữ nguyên cho tới khi có bàn giao tiếp.
 - PM chỉ xác minh callback bằng đọc code/probe trong bộ nhớ và tạo task/spec; chưa sửa sản phẩm hoặc chạy Electron. Hotfix chưa được nghiệm thu.
+
+## Cập nhật khi nhận T53
+
+FE đã bàn giao T53, gộp vào main `f451483`, báo Electron 17/17 ca exit 0. PM đọc main xác nhận callback nativeTheme gây lỗi vẫn chưa đổi. Vì vậy kết quả suite hiện có không phủ nhận exception End-User gặp; T57 vẫn Đang làm, và kiểm vòng đời cửa sổ phải được bổ sung trước khi xác nhận đã sửa. FE không cần chạy lặp suite trên cùng bản để tìm một lần xanh khác; kiểm tiếp sau khi hotfix BE được tích hợp.

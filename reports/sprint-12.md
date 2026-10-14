@@ -124,3 +124,11 @@ T51/T54 vẫn đang do BE làm. PM chỉ gọi QA T52 khi đã nhận đủ các
 T51/T54 gửi task-status sai vị trí nên app chưa chuyển review; PM đọc diff còn thiếu hai trường worktreeState và nguồn system của repair theo contract. FE vẫn kẹt merge ở bước startWorkspace, nên gọi lại chưa cho agent cơ hội giải quyết conflict. Chi tiết bằng chứng, việc trả BE và phương án sao lưu/hủy merge FE cần End-User cho phép nằm tại [sprint-12-integration-recovery.md](sprint-12-integration-recovery.md). T51/T53/T54 giữ Đang làm; chưa đủ điều kiện gọi T52.
 
 End-User đã duyệt phục hồi FE; PM sao lưu và hủy merge dở thành công ngày 2026-10-14. Worktree FE sạch, giữ nguyên HEAD `6318ecc` và code T53; chi tiết bản sao/kiểm chứng tại mục 4 của báo cáo phục hồi. Giao lại FE tiếp tục tích hợp main và bàn giao; trạng thái T53 vẫn Đang làm.
+
+## 11. Nhận T53 lần 2 — đã gộp, chờ nghiệm thu tích hợp (2026-10-14)
+
+- T53 đã vào main **`f451483e4e817a873e17ec07d3baf659652ac446`**. App xác nhận Chờ duyệt, bằng chứng trạng thái ready với checkId `b21f270b-bfc0-4c51-bb2c-f04052a1ca67`. Đây là hồ sơ cho T53, không dùng để đóng task khác.
+- PM đọc bản đã gộp: giữ bố cục task hai tầng và xử lý Esc từ nút trạng thái; vùng Chi tiết merge đọc `candidateSha`/`sourceSha`, có fallback `headSha` cho dữ liệu cũ. Fixture SHA đã đổi đúng payload; cuối check.js giữ cả rendererT56Checks và rendererS12Checks.
+- FE báo `npm run check` và Electron 17/17 ca exit 0. PM không chạy lặp các bộ kiểm trong lượt nhận bàn giao này. Kết quả đó chưa chứng minh lỗi sự kiện theme sau khi hủy cửa sổ đã hết: main vẫn có callback không kiểm destroyed, đúng lỗi End-User vừa báo. Hotfix riêng **T57** đang giao BE theo [hotfix-native-theme-lifecycle.md](hotfix-native-theme-lifecycle.md).
+- Giữ T53 Chờ duyệt; T51/T54/T57 còn Đang làm. Chờ đủ các bản BE gộp và kiểm đạt rồi mới nghiệm thu Sprint 12 qua T52, đồng thời kiểm Electron trên bản đã có T57. Chưa gọi QA trong lượt này, chưa đóng task code chỉ vì check FE xanh.
+- T55 hiện bị app đánh dấu stale vì main/code hoặc test đã đổi; hồ sơ `be47798b-ad13-45e4-96fd-44c59f43da16` không còn đủ để đóng T55. Khi bản tích hợp ổn định, cần bằng chứng mới liên kết đúng T55 và hoàn tất T56; không lấy checkId của T53 thay thế.
