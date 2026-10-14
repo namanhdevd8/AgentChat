@@ -132,3 +132,23 @@ End-User đã duyệt phục hồi FE; PM sao lưu và hủy merge dở thành c
 - FE báo `npm run check` và Electron 17/17 ca exit 0. PM không chạy lặp các bộ kiểm trong lượt nhận bàn giao này. Kết quả đó chưa chứng minh lỗi sự kiện theme sau khi hủy cửa sổ đã hết: main vẫn có callback không kiểm destroyed, đúng lỗi End-User vừa báo. Hotfix riêng **T57** đang giao BE theo [hotfix-native-theme-lifecycle.md](hotfix-native-theme-lifecycle.md).
 - Giữ T53 Chờ duyệt; T51/T54/T57 còn Đang làm. Chờ đủ các bản BE gộp và kiểm đạt rồi mới nghiệm thu Sprint 12 qua T52, đồng thời kiểm Electron trên bản đã có T57. Chưa gọi QA trong lượt này, chưa đóng task code chỉ vì check FE xanh.
 - T55 hiện bị app đánh dấu stale vì main/code hoặc test đã đổi; hồ sơ `be47798b-ad13-45e4-96fd-44c59f43da16` không còn đủ để đóng T55. Khi bản tích hợp ổn định, cần bằng chứng mới liên kết đúng T55 và hoàn tất T56; không lấy checkId của T53 thay thế.
+
+## 12. Nhận BE lần tiếp — check đạt nhưng chưa gộp/liên kết được (2026-10-14)
+
+PM đối chiếu log app, hồ sơ kiểm, registry và code worktree; chưa chạy lại bộ kiểm sản phẩm.
+
+- Check `8c0807c9-3e77-44fc-8442-e99ca87ec928` là hồ sơ thật do app tạo: `npm run check`, exit 0, 18.111 ms, treeStable=true, sourceSha **`d566de2d4d355d67ab6237f7e53863eecfd67554`**. Tuy nhiên `taskRefs: []`, `reviewIds: []`, nên không phải bằng chứng duyệt T51/T54/T57.
+- Ba review nhận lúc 22:58 đều có workspaceId BE nhưng **sourceSha/baseSha=null, artifactPaths=[]**. Không có queue entry mới cho SHA trên; main vẫn ở `087fff3`. Các trạng thái review được ghi nhận nhưng code BE chưa vào main.
+- Cảnh báo metadata chung `.chat/tasks.json` khiến `commitWorkspace` không nhận worktree ở lượt này: khi source đã commit sạch nhưng audit có path ngoài phạm vi, hàm trả null; bước tạo ReviewRecord sau đó vẫn chạy nên thiếu SHA. Chưa xác minh tác nhân sửa metadata; không quy kết BE và không rollback dữ liệu chung.
+- PM đọc diff thấy đã khôi phục catch của processMerge, thêm kiểm draining/claim đồng bộ trong continueChain, nối check record vào phép đo và thêm treeSha, export validator manual, thêm guard/dọn listener nativeTheme cùng ca kiểm. Đây là ghi nhận thay đổi, chưa phải nghiệm thu toàn contract.
+- **T57 còn hồi quy:** diff đã xóa `if (maximized) win.maximize()` mà không chuyển lời gọi đi nơi khác; savedBounds vẫn đọc maximized nhưng không áp dụng. Trả riêng T57 về Đang làm theo [hotfix-native-theme-lifecycle.md](hotfix-native-theme-lifecycle.md). T51/T54 giữ Chờ duyệt, chờ bàn giao được liên kết đúng sau sửa.
+
+### Việc BE cần làm tiếp
+
+1. Giữ các sửa T51/T54; sửa hồi quy khôi phục maximized trong T57 và thêm ca chứng minh mở lại giữ trạng thái này. Không sửa code ngoài phạm vi BE.
+2. Kiểm sau thay đổi trên nhánh sạch. Nếu dùng app runner, block `run-command` phải liên kết **cả T51/T54/T57** qua `tasks:[{id,expectedRevision},…]`, lấy revision mới nhất trong prompt. Không dùng checkId cũ không có taskRefs để xin đóng task.
+3. Bàn giao lại **cả ba task** bằng review cuối câu trả lời, kể cả T51/T54 đã là review. Main hỗ trợ review lại và cấp reviewId mới; cần lần này có sourceSha thật. Không tự ghi ReviewRecord, check record, registry, hoặc sửa metadata chung để vượt audit.
+4. Để queue của app kiểm bản tích hợp và gắn taskRefs/reviewIds đúng lần bàn giao. Nếu nhánh sạch vẫn không có queue hoặc sourceSha vẫn null, báo đúng lỗi và SHA; không lặp check vì việc đó không tự sửa liên kết.
+5. PM nhận đủ code đã gộp và hồ sơ trước khi gọi T52/kiểm Electron sau T57. T53/T55 hiện stale cần cập nhật bằng chứng trên bản tích hợp ổn định; chưa gọi FE/QA chạy thêm trong lượt này.
+
+Lượt PM này chỉ cập nhật báo cáo và chuyển T57 về Đang làm; không sửa tasks.json/memory.md để tránh thay metadata chung trong lượt BE tiếp theo. Kiểm sản phẩm đã đọc là kết quả của BE, không phải một lượt PM chạy lại.

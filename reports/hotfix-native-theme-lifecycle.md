@@ -44,3 +44,11 @@ Hướng sửa tối thiểu: dùng handler có thể gỡ, kiểm cửa sổ t�
 ## Cập nhật khi nhận T53
 
 FE đã bàn giao T53, gộp vào main `f451483`, báo Electron 17/17 ca exit 0. PM đọc main xác nhận callback nativeTheme gây lỗi vẫn chưa đổi. Vì vậy kết quả suite hiện có không phủ nhận exception End-User gặp; T57 vẫn Đang làm, và kiểm vòng đời cửa sổ phải được bổ sung trước khi xác nhận đã sửa. FE không cần chạy lặp suite trên cùng bản để tìm một lần xanh khác; kiểm tiếp sau khi hotfix BE được tích hợp.
+
+## Nhận bản BE d566de2 — cần giữ hành vi phóng to cửa sổ
+
+BE đã thêm handler kiểm `!win || win.isDestroyed()`, gỡ listener khi closed và đặt win=null; thêm các ca trong main harness. App runner trên SHA này đạt nhưng chưa liên kết task, review thiếu SHA và code chưa gộp; chi tiết tại mục 12 của [sprint-12.md](sprint-12.md).
+
+Trong cùng diff (`main.js` quanh dòng 3824), dòng cũ `if (maximized) win.maximize()` bị xóa. Toàn file vẫn đọc `maximized` từ savedBounds và lưu lúc đóng, nhưng không còn lời gọi maximize khi mở. Vì vậy người dùng đóng app lúc phóng to rồi mở lại sẽ mất trạng thái này.
+
+Trả T57 về Đang làm: khôi phục áp dụng maximized, giữ guard/dọn listener mới; thêm ca mở lại cửa sổ với maximized=true và kiểm không phóng to sai khi false. Đây là giữ hành vi hiện có trong hotfix, không thêm tính năng. Sau sửa kiểm lại có liên kết task và gửi review mới cùng T51/T54; không dùng kết quả trên d566de2 để khẳng định bản sửa tiếp đã đạt.
