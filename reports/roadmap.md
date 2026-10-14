@@ -106,5 +106,6 @@ Làm **#1, #3, #4** trước. Ba mục này nhỏ, cùng nằm ở luồng gọi
 - Tin `needs-deps` cần ghi rõ End-User phải tự gộp rồi chạy `npm install`, vì hiện bấm Thử lại sẽ kẹt mãi (góp ý QA T37).
 - R7 cho codex/agy: chưa có nguồn số đo ngữ cảnh, đang trả null.
 - V4: vẽ sơ đồ Mermaid trong chat và `.md` (cần dependency `mermaid`, End-User duyệt khi làm).
+- `T49-nhan-queue-bi-chan`: khi bàn giao bị chặn vì thư mục chính bẩn, badge hiện "Chưa có bằng chứng" thay vì "Chờ kiểm" kèm lý do (contract Sprint 11 mục 5).
 - Tự tạo link file: "Node.js", "Vue.js" bị biến thành link chết (QA T41); chỉ tạo link khi file có thật hoặc chuỗi có dạng đường dẫn.
 - Mục cũ vẫn còn: E (diff + hoàn tác), L (lượt rỗng có commit), lỗi `team-changed` ghi đè draft.

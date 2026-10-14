@@ -44,3 +44,13 @@ QA kiểm trên main `969ff10` bằng repo tạm và main.js thật. Check của
 - Sửa xong thì đổi các xfail/`BUG T49-…` thành assert thường. Ca `T49-bo-qua` phải chạy thật sau khi sửa lỗi 1.
 - **End-User chưa khởi động lại app** cho tới khi T47 sửa xong, nếu không lỗi 1 sẽ chặn bàn giao của mọi dev.
 - Trạng thái: T47 → Đang làm. T48 và T49 giữ Chờ duyệt; QA chạy lại các ca này sau khi sửa.
+
+## Nghiệm thu T49 lần 2 và đóng Sprint 11 (PM, 2026-10-14)
+- QA kiểm lại trên main `03c069e` bằng code thật, không vá tạm, và báo **đạt**. `npm run check` xanh; harness main.js chạy lần hai vẫn ổn định.
+  - Khi bật worktree, dev gửi `review` thì đi qua queue và check, rồi chuyển sang "Đã kiểm".
+  - PM chỉ đóng được task bằng check của đúng task đó và đúng lần bàn giao. Agent tự khai `reviewId` hoặc tự chuyển `done` đều bị chặn. Ca manual và ca stale đạt.
+  - G6: lượt lỗi vẫn giữ chi phí 0,5 USD và chuỗi dừng đúng ở trần.
+- T47, T48, T49 → Xong. PM đóng **trước khi End-User khởi động lại app sang bản mới**, vì ba task này được review khi app còn chạy code cũ nên không có hồ sơ kiểm. Nếu đợi sang bản mới mới đóng, cổng G2 sẽ chặn.
+- Phần UI của T48 (badge, panel Bằng chứng, phím, theme) End-User thử sau khi khởi động lại app. Nếu có lỗi thì mở task mới.
+- Backlog: `T49-nhan-queue-bi-chan`. Khi bàn giao bị chặn vì thư mục chính có thay đổi chưa commit, badge hiện "Chưa có bằng chứng", trong khi theo contract mục 5 phải hiện "Chờ kiểm" kèm lý do.
+- Quy tắc mới từ bản này: PM đóng task bằng block `done` kèm `approval`, dạng `{"kind":"checks","checkIds":[…],"note":…}` hoặc `{"kind":"manual","reason":…,"report":…}` (contract mục 3.2).
