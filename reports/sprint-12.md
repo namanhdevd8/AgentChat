@@ -118,3 +118,7 @@ Trả T53 về Đang làm, dev-fe thực hiện trong worktree của mình:
 4. Chạy `npm run check` và `node check.js --electron` để bảo đảm phần tích hợp giữ hotfix; gửi review T53 lại sau khi sạch xung đột, báo kết quả và phần BE còn chờ. Check đạt trên bản cũ không được trình bày như đã kiểm bản sau giải quyết xung đột.
 
 T51/T54 vẫn đang do BE làm. PM chỉ gọi QA T52 khi đã nhận đủ các phần và code gộp đạt. QA T56 kiểm lại hotfix riêng trên main d1543f3 theo [báo cáo hotfix](hotfix-task-layout-acceptance.md). Lượt PM này chỉ đọc diff/worktree và cập nhật báo cáo, không sửa code hay tự giải xung đột thay FE.
+
+## 10. Bàn giao BE và FE bị chặn trước CLI (2026-10-14)
+
+T51/T54 gửi task-status sai vị trí nên app chưa chuyển review; PM đọc diff còn thiếu hai trường worktreeState và nguồn system của repair theo contract. FE vẫn kẹt merge ở bước startWorkspace, nên gọi lại chưa cho agent cơ hội giải quyết conflict. Chi tiết bằng chứng, việc trả BE và phương án sao lưu/hủy merge FE cần End-User cho phép nằm tại [sprint-12-integration-recovery.md](sprint-12-integration-recovery.md). T51/T53/T54 giữ Đang làm; chưa đủ điều kiện gọi T52.
