@@ -256,6 +256,7 @@ const runKey = (d, name) => d + '\0' + name
 const chainViewsByMsg = new Map()
 const chainStopUpdateCallbacks = new Map()
 const continuingChains = new Set()
+const chainErrors = new Map()
 let activeChainUnbinds = []
 
 // Sprint 6 state: paging, search, worktree, totals
@@ -348,6 +349,7 @@ async function openProject(d, c = d === dir ? box : null) {
   turnTimes.clear()
   chainViewsByMsg.clear()
   continuingChains.clear()
+  chainErrors.clear()
   chainStopUpdateCallbacks.clear()
   $('#title').textContent = base(d)
   $('#path').textContent = tilde(c && c !== '.chat' ? `${d} · ${c}` : d)
@@ -1562,8 +1564,64 @@ function registerChainStopCallback(key, cb) {
   chainStopUpdateCallbacks.get(strKey).add(cb)
 }
 
+function validChainView(state) {
+  return state && state.box === box && typeof state.stopId === 'string' && state.stopId
+    && /^\d+$/.test(String(state.revision)) && typeof state.canContinue === 'boolean'
+    && ['ready', 'draining', 'continued', 'interrupted', 'unavailable'].includes(state.phase)
+}
+
+function chainViewFor(messageId, fallback) {
+  const candidates = [chainViewsByMsg.get(String(messageId)), fallback?.stopId && chainViewsByMsg.get(String(fallback.stopId)), fallback].filter(Boolean)
+  return candidates.sort((a, b) => Number(b.revision || 0) - Number(a.revision || 0))[0] || null
+}
+
+function refreshChainControls(messageId) {
+  const key = String(messageId), state = chainViewsByMsg.get(key)
+  for (const cb of chainStopUpdateCallbacks.get(key) || []) cb(state)
+  renderNeeds()
+}
+
+function rememberChainError(messageId, state, message) {
+  const key = String(messageId), latest = chainViewFor(key, state)
+  chainErrors.set(key, { stopId: latest?.stopId, revision: Number(latest?.revision || 0), message })
+  refreshChainControls(key)
+}
+
+async function verifyChainState(messageId, fallback) {
+  const key = String(messageId), reqDir = dir, reqSeq = openSeq, reqBox = box
+  const error = chainErrors.get(key), previous = chainViewFor(key, fallback)
+  try {
+    const res = await api.chainState(reqDir, { messageId })
+    if (!sameOpen(reqDir, reqSeq) || box !== reqBox || chainErrors.get(key) !== error) return
+    if (!res?.ok || !validChainView(res.state) || (previous?.stopId && res.state.stopId !== previous.stopId))
+      throw new Error(res?.error?.message || 'Không xác minh được trạng thái chuỗi')
+    const latest = chainViewFor(key, fallback)
+    if (Number(res.state.revision) < Number(latest?.revision || 0)) return
+    // Only this fresh IPC (started after the error), or a newer event for this stop, may clear it.
+    chainErrors.delete(key)
+    chainViewsByMsg.set(key, res.state)
+    applyChainViewUpdate(res.state)
+    refreshChainControls(key)
+  } catch (err) {
+    if (!sameOpen(reqDir, reqSeq) || box !== reqBox || chainErrors.get(key) !== error || chainViewFor(key, fallback) !== previous) return
+    rememberChainError(key, previous, err.message)
+  }
+}
+
+function chainVerifyButton(messageId, fallback) {
+  const reqDir = dir, reqSeq = openSeq, reqBox = box
+  const button = needButton('Kiểm tra lại', async () => {
+    if (button.disabled || !sameOpen(reqDir, reqSeq) || box !== reqBox) return
+    button.disabled = true
+    await verifyChainState(messageId, fallback)
+    if (sameOpen(reqDir, reqSeq) && box === reqBox) button.disabled = false
+  })
+  button.title = 'Đọc lại trạng thái từ app, chưa chạy agent'
+  return button
+}
+
 function applyChainViewUpdate(state) {
-  if (!state || !state.stopId) return
+  if (!validChainView(state)) return
   const stopKey = String(state.stopId)
   const existing = chainViewsByMsg.get(stopKey) || (state.chainId ? chainViewsByMsg.get(String(state.chainId)) : null)
   if (existing) {
@@ -1576,6 +1634,11 @@ function applyChainViewUpdate(state) {
 
   chainViewsByMsg.set(stopKey, state)
   if (state.chainId) chainViewsByMsg.set(String(state.chainId), state)
+  for (const [key, value] of chainViewsByMsg) if (value.stopId === state.stopId) chainViewsByMsg.set(key, state)
+  for (const [key, error] of chainErrors) if (error.stopId === state.stopId && Number(state.revision) > error.revision) {
+    chainErrors.delete(key)
+    chainViewsByMsg.set(key, state)
+  }
 
   const cbs = chainStopUpdateCallbacks.get(stopKey)
   if (cbs) {
@@ -1600,10 +1663,10 @@ function canContinueChain(state) {
 
 function renderChainStopCard(m, sys) {
   const msgKey = m.seq != null ? String(m.seq) : String(m.runId || m.stopId || '')
-  let currentState = (m.stopId ? chainViewsByMsg.get(String(m.stopId)) : null) || chainViewsByMsg.get(msgKey) || m.state || null
+  let currentState = chainViewFor(msgKey, m.state || (m.stopId ? chainViewsByMsg.get(String(m.stopId)) : null))
   const actionKey = `${openSeq}:${msgKey}`
   const thisDir = dir, thisSeq = openSeq, thisBox = box
-  let statePending = !currentState && typeof api.chainState === 'function', stateFailed = false
+  let statePending = !currentState && typeof api.chainState === 'function'
   if (currentState) {
     chainViewsByMsg.set(msgKey, currentState)
     if (currentState.stopId) chainViewsByMsg.set(String(currentState.stopId), currentState)
@@ -1622,7 +1685,8 @@ function renderChainStopCard(m, sys) {
 
   const contBtn = el('button', 'box press btn sm primary', 'Tiếp tục')
   contBtn.type = 'button'
-  actions.append(contBtn)
+  const verifySlot = el('span')
+  actions.append(contBtn, verifySlot)
 
   const renderCardContent = (state) => {
     const phase = state?.phase || 'ready'
@@ -1703,7 +1767,7 @@ function renderChainStopCard(m, sys) {
       contBtn.disabled = true
       contBtn.textContent = 'Tiếp tục'
       contBtn.title = 'Chờ các nhánh đang chạy hoàn tất trước khi tiếp tục'
-    } else if (!canContinueChain(state || m) || stateFailed || statePending) {
+    } else if (!canContinueChain(state || m) || chainErrors.has(msgKey) || statePending) {
       contBtn.disabled = true
       contBtn.textContent = 'Tiếp tục'
       contBtn.title = state?.reason?.text || 'Không đủ điều kiện tiếp tục'
@@ -1713,18 +1777,23 @@ function renderChainStopCard(m, sys) {
       contBtn.title = 'Chạy tiếp chuỗi với bộ đếm mới'
     }
     if (continuingChains.has(actionKey)) contBtn.disabled = true
+    const error = chainErrors.get(msgKey)
+    if (error) contBtn.title = error.message
+    verifySlot.replaceChildren(...(error ? [chainVerifyButton(m.seq ?? m.runId, state)] : []))
   }
 
   const updateCard = (newState) => {
+    if (!newState) { renderCardContent(currentState); return }
     if (currentState) {
       const curRev = parseInt(currentState.revision || '0', 10)
       const nextRev = parseInt(newState.revision || '0', 10)
-      if (!isNaN(curRev) && !isNaN(nextRev) && nextRev <= curRev) {
+      if (!isNaN(curRev) && !isNaN(nextRev) && nextRev < curRev) {
+        renderCardContent(currentState)
         return
       }
     }
     currentState = newState
-    statePending = false; stateFailed = false
+    statePending = false
     chainViewsByMsg.set(msgKey, newState)
     if (newState.stopId) {
       chainViewsByMsg.set(String(newState.stopId), newState)
@@ -1758,8 +1827,7 @@ function renderChainStopCard(m, sys) {
     } catch (err) {
       if (thisDir !== dir || thisSeq !== openSeq || thisBox !== box) return
       showToast(err.message.replace(/^.*?Error: /, ''))
-      stateFailed = true
-      renderCardContent(currentState)
+      rememberChainError(msgKey, currentState, err.message)
     } finally { continuingChains.delete(actionKey) }
   }
 
@@ -1770,20 +1838,11 @@ function renderChainStopCard(m, sys) {
   renderCardContent(currentState)
 
   if (typeof api !== 'undefined' && typeof api.chainState === 'function') {
-    const reqDir = dir, reqSeq = openSeq, reqBox = box
-    const requestedState = currentState
-    const failState = () => {
-      if (!sameOpen(reqDir, reqSeq) || box !== reqBox || currentState !== requestedState) return
-      statePending = false; stateFailed = true
+    verifyChainState(m.seq ?? m.runId, currentState).finally(() => {
+      if (!sameOpen(thisDir, thisSeq) || box !== thisBox) return
+      statePending = false
       renderCardContent(currentState)
-    }
-    api.chainState(reqDir, { messageId: m.seq != null ? m.seq : m.runId }).then(res => {
-      if (!sameOpen(reqDir, reqSeq) || box !== reqBox) return
-      if (res && res.ok && res.state) {
-        applyChainViewUpdate(res.state)
-        updateCard(res.state)
-      } else failState()
-    }).catch(failState)
+    })
   }
 }
 
@@ -3903,7 +3962,7 @@ function renderNeeds() {
         needButton('Từ chối', () => prefill(`@${item.from} Từ chối ${replyAbout(item)}: `)))
     } else if (item.kind === 'chain') {
       const msgKey = String(item.seq)
-      let cView = chainViewsByMsg.get(msgKey) || (item.stopId ? chainViewsByMsg.get(String(item.stopId)) : null) || item.chainView || null
+      const cView = chainViewFor(msgKey, item.chainView || item)
       const thisDir = dir, thisSeq = openSeq, thisBox = box, actionKey = `${openSeq}:${msgKey}`
       const resume = needButton('Tiếp tục', async () => {
         if (resume.disabled || continuingChains.has(actionKey) || !sameOpen(thisDir, thisSeq) || box !== thisBox) return
@@ -3915,37 +3974,33 @@ function renderNeeds() {
           if (res.state) applyChainViewUpdate(res.state)
           resume.textContent = 'Đã tiếp tục'
         } catch (err) {
-          if (sameOpen(thisDir, thisSeq) && box === thisBox) showToast(err.message.replace(/^.*?Error: /, ''))
+          if (sameOpen(thisDir, thisSeq) && box === thisBox) {
+            showToast(err.message.replace(/^.*?Error: /, ''))
+            rememberChainError(msgKey, cView, err.message)
+          }
         } finally { continuingChains.delete(actionKey) }
       }, 'btn sm primary')
-      if (cView) {
-        if (cView.phase === 'continued') {
-          resume.disabled = true
-          resume.textContent = 'Đã tiếp tục'
-          resume.title = 'Chuỗi đã được tiếp tục'
-        } else if (cView.phase === 'draining') {
-          resume.disabled = true
-          resume.textContent = 'Tiếp tục'
-          resume.title = 'Chờ các nhánh đang chạy hoàn tất trước khi tiếp tục'
-        } else if (!canContinueChain(cView)) {
-          resume.disabled = true
-          resume.textContent = 'Tiếp tục'
-          resume.title = cView.reason?.text || 'Không thể tiếp tục'
-        } else {
-          resume.disabled = false
-          resume.textContent = 'Tiếp tục'
-          resume.title = 'Chạy tiếp chuỗi với bộ đếm mới'
-        }
+      if (cView.phase === 'continued') {
+        resume.disabled = true
+        resume.textContent = 'Đã tiếp tục'
+        resume.title = 'Chuỗi đã được tiếp tục'
+      } else if (cView.phase === 'draining') {
+        resume.disabled = true
+        resume.title = 'Chờ các nhánh đang chạy hoàn tất trước khi tiếp tục'
+      } else if (!canContinueChain(cView)) {
+        resume.disabled = true
+        resume.title = cView.reason?.text || 'Không thể tiếp tục'
       } else {
-        if (!canContinueChain(item)) {
-          resume.disabled = true
-          if (item.phase === 'continued') resume.textContent = 'Đã tiếp tục'
-          else if (item.phase === 'draining') resume.title = 'Chờ các nhánh đang chạy hoàn tất trước khi tiếp tục'
-          else resume.title = item.reason?.text || 'Không thể tiếp tục'
-        }
+        resume.disabled = false
+        resume.title = 'Chạy tiếp chuỗi với bộ đếm mới'
       }
       if (continuingChains.has(actionKey)) resume.disabled = true
       actions.append(resume)
+      const error = chainErrors.get(msgKey)
+      if (error) {
+        resume.disabled = true; resume.title = error.message
+        actions.append(chainVerifyButton(item.seq, cView))
+      }
     } else actions.append(needButton('Mở mục Quyền', () => openSettingsForAgent(item.from)))
     card.append(head, text, actions)
     return card

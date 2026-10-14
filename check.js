@@ -2147,6 +2147,7 @@ async function rendererS12Checks(recovered = null) {
   // Recovery can leave an interrupted chain with safe pending work; use the actual IPC payload.
   if (recovered) {
     const { message, state } = recovered
+    assert.ok(Number.isInteger(message.seq), 'payload logPage cho renderer phải có seq thật')
     assert.ok(state.pending.some(p => !p.uncertain) && state.canContinue, 'fixture phải còn phần chắc chắn chưa chạy')
     chainStateResponses.set(String(message.seq), { ok: true, state })
     const recoveredNode = el('div', 'sys')
@@ -2164,17 +2165,22 @@ async function rendererS12Checks(recovered = null) {
     avatar: () => el('span'), hhmm: x => x, imageLabels: x => x, markActiveBadge: () => {} })
   vm.runInContext(part('function needButton(', '// ---- timeline:'), ctx)
   const recovery = recovered?.state || { ...readyState, phase: 'interrupted', reason: { code: 'restart-interrupted', text: 'Kiểm tra phần chưa rõ kết quả' } }
+  const enabledAfterError = []
   let seq = 10000
   const build = async (mode, overrides = {}, responseError = false) => {
-    vm.runInContext('chainViewsByMsg.clear(); chainStopUpdateCallbacks.clear()', ctx)
+    vm.runInContext('chainViewsByMsg.clear(); chainStopUpdateCallbacks.clear(); chainErrors.clear()', ctx)
     const messageId = recovered && !Object.keys(overrides).length ? recovered.message.seq : seq++
     const state = { ...recovery, ...overrides, stopId: 'test-' + seq++, chainId: 'test-chain-' + seq++, revision: '1' }
     ctx.fixtureState = state
     if (mode === 'chat') {
       const node = el('div'), message = { ...(recovered?.message || stopMsg), seq: messageId, stopId: state.stopId, chainId: state.chainId, state: responseError ? undefined : state }
       chainStateResponses.set(String(messageId), responseError ? { ok: false, error: { message: 'UNAVAILABLE' } } : { ok: true, state })
+      // A legacy bridge has no chainState; a modern bridge returns a full ChainView even for legacy log entries.
+      const readState = ctx.api.chainState
+      if (state.phase === undefined) delete ctx.api.chainState
       ctx.renderChainStopCard(message, node)
       await new Promise(r => setImmediate(r))
+      ctx.api.chainState = readState
       return { button: node.querySelector('button'), node, state, messageId }
     }
     ctx.needs = [{ kind: 'chain', seq: messageId, text: 'Chuỗi đã ngắt', stopId: state.stopId,
@@ -2227,6 +2233,34 @@ async function rendererS12Checks(recovered = null) {
     ctx.api.continueChain = async () => ({ ok: false, error: { message: 'Không đủ điều kiện' } })
     await failed.button.onclick()
     assert.ok(failed.button.disabled, `${mode}: lỗi API không tự bật nút`)
+    if (mode !== 'chat') {
+      // An unrelated chain event rebuilds Needs without providing new authority for the failed stop.
+      ctx.applyChainViewUpdate({ ...failed.state, stopId: 'unrelated-stop', chainId: 'unrelated-chain', revision: String(seq++) })
+      if (!$('#needs').querySelector('.need-actions').querySelector('button').disabled) enabledAfterError.push(mode)
+    }
+    const currentButton = () => mode === 'chat' ? failed.button : $('#needs').querySelector('.need-actions').querySelector('button')
+    for (const stale of [failed.state, { ...failed.state, revision: '0' }, { ...failed.state, revision: '99', box: '.other' }, { ...failed.state, revision: 'bad' }]) {
+      ctx.applyChainViewUpdate(stale)
+      assert.ok(currentButton().disabled, `${mode}: state cũ/sai box/sai revision không xóa lỗi`)
+    }
+    // A fresh event for this exact stop confirms state; it does not itself grant permission.
+    ctx.applyChainViewUpdate({ ...failed.state, revision: '2', canContinue: false })
+    assert.ok(currentButton().disabled, `${mode}: xác nhận mới nhưng chưa được phép vẫn khóa`)
+    ctx.applyChainViewUpdate({ ...failed.state, revision: '3', canContinue: true })
+    assert.ok(!currentButton().disabled, `${mode}: xác nhận mới đúng stop cho phép phục hồi`)
+    await currentButton().onclick() // error again; this time revalidate through the explicit read action
+    const verifyButton = () => (mode === 'chat' ? failed.node : $('#needs')).querySelectorAll('button').find(b => b.textContent === 'Kiểm tra lại')
+    assert.ok(verifyButton(), `${mode}: có đường kiểm tra lại sau lỗi`)
+    const countBeforeVerify = continueChainCalls.length
+    for (const answer of [{ ok: false }, { ok: true, state: { ...failed.state, revision: '3', stopId: 'wrong-stop' } }, { ok: true, state: { ...failed.state, revision: '2' } }]) {
+      chainStateResponses.set(String(failed.messageId), answer)
+      await verifyButton().onclick()
+      assert.ok(currentButton().disabled, `${mode}: IPC lỗi/sai stop/state cũ không mở lại nút`)
+    }
+    chainStateResponses.set(String(failed.messageId), { ok: true, state: { ...failed.state, revision: '3', canContinue: true } })
+    await verifyButton().onclick()
+    assert.ok(!currentButton().disabled, `${mode}: IPC mới xác nhận cùng revision vẫn phục hồi được`)
+    assert.strictEqual(continueChainCalls.length, countBeforeVerify, `${mode}: Kiểm tra lại chỉ đọc, chưa chạy agent`)
     ctx.api.continueChain = originalContinue
 
     const oldBox = await build(mode), callCount = continueChainCalls.length
@@ -2244,6 +2278,25 @@ async function rendererS12Checks(recovered = null) {
   assert.ok((await build('chat', {}, true)).button.disabled, 'chainState lỗi/thiếu không mặc định cho phép tiếp tục')
   const mixed = await build('chat', { pending: [...recovery.pending, { agent: 'uncertain-agent', uncertain: true, sourceSeqs: [] }] })
   assert.ok(!mixed.button.disabled && mixed.node.textContent.includes('chưa rõ kết quả'), 'giữ cảnh báo uncertain dù có phần được phép tiếp tục')
+  // The two controls share the error, including after either one is recreated.
+  ctx.needs = [{ kind: 'chain', seq: mixed.messageId, text: 'same stop', chainView: mixed.state }]
+  ctx.renderNeeds()
+  ctx.api.continueChain = async () => ({ ok: false, error: { message: 'failed' } })
+  const beforeRead = ctx.api.chainState
+  let finishOldRead
+  ctx.api.chainState = () => new Promise(resolve => { finishOldRead = resolve })
+  const oldRead = ctx.verifyChainState(mixed.messageId, mixed.state)
+  await $('#needs').querySelector('.need-actions').querySelector('button').onclick()
+  assert.ok(mixed.button.disabled, 'lỗi trong Cần bạn khóa cả nút chat')
+  finishOldRead({ ok: true, state: mixed.state }); await oldRead
+  assert.ok(mixed.button.disabled, 'request đọc bắt đầu trước lỗi không được xóa lỗi mới')
+  ctx.api.chainState = beforeRead
+  ctx.applyChainViewUpdate({ ...mixed.state, revision: '2' })
+  assert.ok(!mixed.button.disabled && !$('#needs').querySelector('.need-actions').querySelector('button').disabled, 'event mới mở lại cả hai vị trí')
+  await mixed.button.onclick()
+  ctx.renderNeeds()
+  assert.ok($('#needs').querySelector('.need-actions').querySelector('button').disabled, 'lỗi trong chat giữ khóa Cần bạn qua render lại')
+  assert.deepStrictEqual(enabledAfterError, [], 'T52-api-error-rerender: event của stop khác bật lại Tiếp tục sau lỗi API bằng state cũ')
 
   console.log('ok (sprint 12 FE chain-stop & merge details)')
 }
@@ -2260,12 +2313,13 @@ function electronChecks() {
     env: { ...process.env, QA_MAIN: path.join(appDir, 'main.js'), SHELL: '/nonexistent' } })
   fs.rmSync(tmp, { recursive: true, force: true })
   const line = String(r.stdout + r.stderr).split('\n').find(l => l.startsWith('E2E '))
-  if (!line) { console.error(String(r.stdout + r.stderr).slice(-3000)); process.exit(1) }
+  if (!line) { console.error(JSON.stringify({ status: r.status, signal: r.signal, error: r.error?.message }), String(r.stdout + r.stderr).slice(-3000)); process.exit(1) }
   const out = JSON.parse(line.slice(4))
   console.log(`Electron ${out.electron || '?'}${out.timeout ? ' — HẾT GIỜ' : ''}`)
   for (const x of out.results) console.log(`${x.ok ? 'ok  ' : 'FAIL'} ${x.name}${x.ok && !process.env.QA_VERBOSE ? '' : ' — ' + x.info}`)
   process.exit(!out.timeout && out.results.length && out.results.every(x => x.ok) ? 0 : 1)
 }
+
 function qaElectronEntry() { // runs inside Electron, serialized by electronChecks
   const { app, BrowserWindow, session } = require('electron')
   const fs = require('fs'), path = require('path'), os = require('os'), http = require('http')
@@ -2639,7 +2693,7 @@ async function mainHarness() {
   const loadMain = () => {
     const file = require.resolve('./main'), m = new Module(file, module)
     m.filename = file; m.paths = module.paths; require.cache[file] = m
-    m._compile(fs.readFileSync(file, 'utf8') + '\nmodule.exports = { newChain, ask, jobs, orphans, activeChains, recordChainTurn, route, getChainView, saveStopRecord, sourceRef, checkPolicyHash, appendVerificationRecord };', file)
+    m._compile(fs.readFileSync(file, 'utf8') + '\nmodule.exports = { newChain, ask, jobs, orphans, activeChains, recordChainTurn, route, getChainView, saveStopRecord, sourceRef, checkPolicyHash, appendVerificationRecord, withGitLock, mergeWorkers };', file)
     return m.exports
   }
 
@@ -3690,12 +3744,30 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
     let on3; for (let i = 0; i < 200 && (!on3 || on3.error?.code === 'BUSY'); i++) { if (on3) await sleep(50); on3 = await call('saveProjectSettings', root, { settings: { ...cfg.settings, worktreesEnabled: true }, expectedRevision: cfg.revision }) }
     assert.ok(on3.ok, JSON.stringify(on3.error))
     fs.writeFileSync(at('d12.txt'), 'x\n'); git('add', 'd12.txt'); git('commit', '-qm', 'seed D'); const qD = queue().length
-    process.env.CHECK_SLOW_MS = '3000'; process.env.FAKE_EDITS = JSON.stringify({ 'qa-c': [['d12.txt', 0, 'D']] }) // qa-c: workspace without unmerged commits
-    mark = log().length; await call('send', root, '@qa-c sửa d12')
-    await waitFor('D: đang kiểm', () => queue().slice(qD).some(e => e.state === 'checking'))
-    git('checkout', '-q', '-b', 'qa-detour'); delete process.env.CHECK_SLOW_MS; delete process.env.FAKE_EDITS
+    process.env.FAKE_EDITS = JSON.stringify({ 'qa-c': [['d12.txt', 0, 'D']] }) // qa-c: workspace without unmerged commits
+    const runCheck = core.runCommand
+    let releaseCheck, checkAtBarrier = false
+    const checkGate = new Promise(resolve => { releaseCheck = resolve })
+    core.runCommand = async (...args) => {
+      const result = await runCheck(...args) // the real check completes; hold only its return to the publisher
+      if (path.basename(path.dirname(args[0])) !== 'integration') return result
+      checkAtBarrier = true
+      let timer
+      try { await Promise.race([checkGate, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('D: publish barrier timeout')), 15000) })]) }
+      finally { clearTimeout(timer) }
+      return result
+    }
+    mark = log().length
+    try {
+      await call('send', root, '@qa-c sửa d12')
+      await waitFor('D: check đã tới barrier', () => checkAtBarrier)
+      await waitFor('D: terminal/facts đã xong, không còn Git nền của agent', () => internals.jobs.length === 0)
+      assert.ok(queue().slice(qD).some(e => e.state === 'checking'))
+      await internals.withGitLock(root, async () => git('checkout', '-q', '-b', 'qa-detour'))
+    } finally { releaseCheck(); core.runCommand = runCheck; delete process.env.FAKE_EDITS }
     const failedD = await waitFor('D: lỗi publish', () => queue().slice(qD).find(e => e.mergeEvent))
-    git('checkout', '-q', 'main'); git('branch', '-q', '-D', 'qa-detour')
+    await waitFor('D: publish/cleanup/emit hoàn tất trước khi checkout về main', () => !internals.mergeWorkers.has(root))
+    await internals.withGitLock(root, async () => { git('checkout', '-q', 'main'); git('branch', '-q', '-D', 'qa-detour') })
     const evD = failedD.mergeEvent
     assert.ok(evD.phase === 'publish' && evD.candidateSha && evD.checkIds.length === 1 && evD.commandResult === null && evD.code === 'TARGET_CHANGED',
       'D: lỗi publish sau check đạt: ' + JSON.stringify({ phase: evD.phase, code: evD.code, candidate: !!evD.candidateSha, checkIds: evD.checkIds, cmd: evD.commandResult }))
@@ -3764,7 +3836,7 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
   await new Promise(r => setTimeout(r, 1500))
   assert.ok(!log().slice(beforeRestart).some(m => m.from === waitingAgent), 'E: không tự cấp lại lượt sau crash')
   const eView = (await call('chainState', root, { messageId: s12.stopB.seq })).state
-  const eStop = log().slice(beforeRestart).find(m => m.kind === 'chain-stop' && m.chainId === crashedChild)
+  const eStop = (await call('logPage', root)).page.messages.find(m => m.seq >= beforeRestart && m.kind === 'chain-stop' && m.chainId === crashedChild)
   assert.ok(eAgain.ok && eAgain.chainId === crashedChild && eAgain.alreadyContinued && eStop, JSON.stringify(eAgain))
   assert.deepStrictEqual(eAgain.state, eView, 'response Tiếp tục và chainState phải cùng trạng thái cha')
   assert.ok(eView.phase === 'continued' && !eView.canContinue)
