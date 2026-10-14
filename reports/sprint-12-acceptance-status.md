@@ -44,3 +44,28 @@ Các ca của `2c6ae36` đã được techlead nhận và mở rộng trong bả
 ## Trạng thái và bước tiếp
 
 T52 chuyển Đang làm cho phần chẩn đoán/kiểm Electron còn lại. T51/T53 chờ owner review mới; T55 chờ bằng chứng mới và phản hồi bố cục trên box thật. Sau khi nhận đủ bằng chứng, PM chốt những phần đã đạt và đưa danh sách thử tay cụ thể cho End-User. Lượt PM này không sửa code, không tự chạy lại sản phẩm hay thay hồ sơ userData.
+
+## Cập nhật sau bàn giao BE, techlead và chẩn đoán QA — 2026-10-15
+
+Main `1b01c64` chỉ khác nền đã nghiệm thu `7b30ac8` ở hai báo cáo, không đổi code/test. PM đối chiếu hồ sơ kiểm và review trong userData, không sửa các hồ sơ này:
+
+| Task | Bằng chứng mới | Quyết định PM |
+| --- | --- | --- |
+| T51 | Check `1b6a9f3d-49dc-498f-b4e1-e28e1f86e1fa`, exit 0, treeStable; review `6a15fb96-67d3-461f-8aa5-33f17d67fce5`. Đúng task/definitionRevision, cùng nguồn `e9982ab` và worktree dev-be. | Duyệt riêng phần BE đã được QA nghiệm thu tự động; gửi approval checks cho T51. Không dùng quyết định này để đóng T52 hoặc nghiệm thu UI. |
+| T55 | Check `3f402d3a-0e77-4d8e-ae47-412dfebd98d1`, exit 0, treeStable; review `a9f2c83d-0e5f-4e48-8180-cfc237a8dad4`. Đúng task/definitionRevision, cùng nguồn `e9982ab` và worktree techlead. | Đã đủ hồ sơ kiểm mới; giữ Chờ duyệt vì chưa có phản hồi bố cục trên box thật. |
+| T53 | Chưa nhận bàn giao/bằng chứng mới từ chủ task. | Giữ trạng thái hiện tại, chờ lượt FE đã giao; không gọi thêm lượt kiểm trùng. |
+
+### T52: đối chứng Electron bằng môi trường đã có quyền
+
+QA xác nhận ba crash log đều dừng ở `_RegisterApplication`/`NSApplication` trước JavaScript; Electron 44.4.5 và phiên Aqua có sẵn. Lệnh đồng bộ Git bị từ chối tạo `ORIG_HEAD.lock` (`Operation not permitted`); QA báo worktree vẫn sạch tại `2c6ae36`. Đó là bằng chứng thiếu quyền ghi Git trong lượt QA, **không chứng minh nguyên nhân SIGABRT**.
+
+PM đọc cấu hình hiện tại: QA dùng codex2 ở chế độ `edit`, techlead dùng codex2 ở chế độ `full`. Chưa cần thay quyền QA: techlead hỗ trợ phần thực thi của T52 trong worktree của chính mình bằng quyền hiện có, QA tiếp tục chịu trách nhiệm đánh giá kết quả. Không sửa worktree QA, không đổi agents.json, không mở lại lượt triển khai của hai dev.
+
+Đầu ra techlead cần bàn giao: `reports/sprint-12-electron-comparison.md`, gồm SHA, trạng thái worktree, phiên bản/binary Electron, cách khởi chạy, mức quyền, stdout/stderr, exit code hoặc signal, thời điểm đã vào JavaScript/fixture và từng ca thực sự chạy. Giữ tách kết luận “Electron khởi tạo được” với “UI đã nghiệm thu”.
+
+1. Xác nhận nguồn code/test trùng main hiện tại; mọi thay đổi riêng phải được ghi rõ trước phép đối chứng. Chỉ làm trong worktree techlead, không sửa trạng thái/hồ sơ kiểm của task khác.
+2. Thử Electron **một lần có timeout**, bằng quyền hiện có, không lặp bộ Node đã đạt. Khi vào được fixture, kiểm phần Tiếp tục/Kiểm tra lại liên quan: recovery `interrupted/canContinue:true`, chat/Cần bạn đồng bộ, lỗi API vẫn khóa sau render, kiểm tra lại đúng stop/box mới mở, bấm trùng và đổi box. Không lặp bộ bố cục T56 đã đạt. Nếu fixture hiện tại chưa bao phủ một ca thì ghi chưa kiểm, không suy ra từ kết quả khởi tạo hoặc tổng số ca cũ.
+3. Nếu vẫn SIGABRT trước fixture: giữ output/crash log rồi dừng, báo PM; không đổi dependency, quyền máy hay thử lại đến khi xanh. Nếu chạy được: chỉ kết luận có khác biệt giữa hai bối cảnh thực thi, chưa quy nguyên nhân cho sandbox khi còn biến khác chưa kiểm soát.
+4. Techlead gửi báo cáo cho PM; PM chuyển QA đọc bằng chứng và chốt phần còn thiếu. QA có thể đọc main/báo cáo mà không cần ghi Git. Xung đột nhánh QA cũ chưa được xử lý; việc đó không phải điều kiện để đọc kết quả vì các assertion QA đã có trong main. Không retry queue cũ để tìm lần gộp thành công.
+
+T52 vẫn Đang làm; Sprint 12 chưa đóng. Phép đối chứng này không thay thế nghiệm thu trên box thật. Lượt PM chỉ cập nhật báo cáo và gửi trạng thái duyệt T51, không chạy lại kiểm sản phẩm.
