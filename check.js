@@ -927,6 +927,63 @@ async function sprint11CoreChecks() {
   console.log('ok (sprint 11 core G1-G6)')
 }
 
+// ---- Sprint 12 S1-S3: progress tracking, eventId deduplication, selective continuation, and validTaskSpec ----
+async function sprint12CoreChecks() {
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-chat-s12-')); core.init(d)
+
+  // 1. T54: validTaskSpec validator
+  assert.strictEqual(core.validTaskSpec(null, d), true)
+  assert.strictEqual(core.validTaskSpec('reports/sprint-12.md', d), true)
+  assert.strictEqual(core.validTaskSpec('README.md', d), true)
+  assert.strictEqual(core.validTaskSpec('../outside.md', d), false)
+  assert.strictEqual(core.validTaskSpec('/etc/passwd', d), false)
+  assert.strictEqual(core.validTaskSpec('', d), false)
+  assert.strictEqual(core.validTaskSpec('bad\0spec', d), false)
+
+  // 2. eventId deduplication in appendLogIndexed
+  const at = new Date().toISOString()
+  const r1 = await core.appendLogIndexed(d, { from: 'system', text: 'ev1', eventId: 'merge-fail:1', at })
+  assert.strictEqual(r1.duplicate, undefined)
+  const idx1 = await core.getLogIndex(d)
+  assert.ok(idx1.eventIds.has('merge-fail:1'))
+  const r2 = await core.appendLogIndexed(d, { from: 'system', text: 'ev1-dup', eventId: 'merge-fail:1', at })
+  assert.strictEqual(r2.duplicate, true)
+  assert.strictEqual(r2.total, r1.total)
+  // reload from disk: eventIds reconstructed
+  core.invalidateLogIndex(d)
+  const idx2 = await core.getLogIndex(d)
+  assert.ok(idx2.eventIds.has('merge-fail:1'))
+  assert.strictEqual(idx2.records.length, 1)
+
+  // 3. needsYou selective continuation: each continue only clears its target stop
+  await core.appendLogIndexed(d, { from: 'system', text: 'dừng chuỗi 1', kind: 'chain-stop', targets: ['dev-a'], at: new Date().toISOString() })
+  await core.appendLogIndexed(d, { from: 'system', text: 'dừng chuỗi 2', kind: 'chain-stop', targets: ['dev-b'], at: new Date().toISOString() })
+  let ny = await core.needsYou(d)
+  assert.strictEqual(ny.length, 2)
+  // continue only chain 2 (seq 2)
+  await core.appendLogIndexed(d, { from: 'system', text: 'tiếp tục 2', kind: 'chain-continue', continuedFrom: 2, at: new Date().toISOString() })
+  ny = await core.needsYou(d)
+  assert.strictEqual(ny.length, 1)
+  assert.strictEqual(ny[0].seq, 1)
+  // continue chain 1 (seq 1)
+  await core.appendLogIndexed(d, { from: 'system', text: 'tiếp tục 1', kind: 'chain-continue', continuedFrom: 1, at: new Date().toISOString() })
+  ny = await core.needsYou(d)
+  assert.strictEqual(ny.length, 0)
+
+  // 4. validateTaskChanges with manual approval report
+  const b = await core.taskBoardIndexed(d)
+  fs.writeFileSync(path.join(d, '.chat', 'tasks.json'), JSON.stringify({
+    version: 1,
+    tasks: [{ id: 'T100', title: 'Task manual test', assignee: 'qa', acceptance: 'manual', spec: 'reports/test.md', createdAt: at, updatedAt: at }]
+  }))
+  const bMan = await core.taskBoardIndexed(d)
+  assert.throws(() => core.validateTaskChanges(bMan, [{ id: 'T100', status: 'done', expectedRevision: bMan.tasks[0].revision, approval: { kind: 'manual', reason: 'ok', report: '../bad.md' } }], 'pm'), /report/)
+  const okMan = core.validateTaskChanges(bMan, [{ id: 'T100', status: 'done', expectedRevision: bMan.tasks[0].revision, approval: { kind: 'manual', reason: 'ok', report: 'reports/test.md' } }], 'pm')
+  assert.strictEqual(okMan[0].approval.report, 'reports/test.md')
+
+  console.log('ok (sprint 12 core S1-S3 & T54)')
+}
+
 // ---- Sprint 6 F: indexed log, accent-insensitive search, 10k messages, J settings, summary checkpoint ----
 async function sprint6Checks() {
   const d = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-chat-s6-')); core.init(d)
@@ -2364,10 +2421,43 @@ async function mainHarness() {
       on: () => {}
     }
   }
+  let themeListeners = []
+  let createdWin = null
+  let windowBgColor = null
+  let windowDestroyed = false
+  let isWinMaximized = false
+  let maximizeCallCount = 0
+  const mockNativeTheme = {
+    themeSource: 'system',
+    shouldUseDarkColors: false,
+    on(e, fn) { if (e === 'updated') themeListeners.push(fn) },
+    removeListener(e, fn) {
+      if (e === 'updated') {
+        const i = themeListeners.indexOf(fn)
+        if (i >= 0) themeListeners.splice(i, 1)
+      }
+    },
+    emitUpdated() { for (const fn of [...themeListeners]) fn() }
+  }
   const electron = { app: { getPath: () => userData, requestSingleInstanceLock: () => true, whenReady: () => Promise.resolve(), on() {}, quit() {} },
-    BrowserWindow: function () { return { webContents, loadFile: () => Promise.resolve(), isMinimized: () => false, on(e, fn) { webContents.on(e, fn) }, isDestroyed: () => false } },
+    BrowserWindow: function () {
+      createdWin = {
+        webContents, loadFile: () => Promise.resolve(), isMinimized: () => false,
+        isMaximized: () => isWinMaximized,
+        maximize() { maximizeCallCount++; isWinMaximized = true },
+        getNormalBounds: () => ({ x: 50, y: 50, width: 800, height: 600 }),
+        on(e, fn) { webContents.on(e, fn) },
+        isDestroyed: () => windowDestroyed,
+        setBackgroundColor(c) {
+          if (windowDestroyed) throw new TypeError('Object has been destroyed')
+          windowBgColor = c
+        }
+      }
+      return createdWin
+    },
     ipcMain: { handle: (name, fn) => { handlers[name] = fn } }, shell: { openPath: async p => { openedPaths.push(p); return '' } },
-    Menu: { setApplicationMenu() {}, buildFromTemplate: t => t }, nativeTheme: { themeSource: 'system', on() {} }, screen: { getAllDisplays: () => [] },
+    Menu: { setApplicationMenu() {}, buildFromTemplate: t => t }, nativeTheme: mockNativeTheme,
+    screen: { getAllDisplays: () => [{ workArea: { x: 0, y: 0, width: 1920, height: 1080 } }] },
     dialog: { showMessageBox: async () => { dialogs++; await onDialog?.(); return { response: dialogAnswer, checkboxChecked: true } },
       showMessageBoxSync: () => 0,
       showOpenDialog: async () => ({ canceled: !pickPath, filePaths: [pickPath] }) },
@@ -2435,6 +2525,7 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
   const git = (...args) => execFileSync('git', ['-C', root, '-c', 'user.name=QA', '-c', 'user.email=qa@local', ...args], { encoding: 'utf8' })
   git('init', '-q', '-b', 'main'); git('add', 'a.txt', 'package.json', 'chk.js', '.gitignore'); git('commit', '-q', '-m', 'init')
   fs.writeFileSync(path.join(userData, 'projects.json'), JSON.stringify([root]))
+  fs.writeFileSync(path.join(userData, 'window.json'), JSON.stringify({ x: 50, y: 50, width: 800, height: 600, maximized: true }))
 
   require('./main'); await new Promise(r => setImmediate(r))
   core.trustConfig(root, core.configTrust(root).texts) // the fixture team is the user's own: pin it as accepted
@@ -2545,10 +2636,19 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
   process.env.FAKE_REPLY = pingPong
   mark = log().length; await call('send', root, '@dev-a bắt đầu')
   let stop = await waitFor('phanh chat qua lại', () => stops()[0])
-  assert.ok(stop.canContinue && stop.text.includes('qua lại'), stop.text); assert.strictEqual(turns(mark), 6)
-  mark = log().length; assert.ok((await call('continueChain', root, { messageId: stop.seq })).ok)
-  stop = await waitFor('phanh lần 2 sau Tiếp tục', () => stops()[1]); assert.strictEqual(turns(mark), 6)
-  assert.strictEqual((await call('continueChain', root, { messageId: stops()[0].seq })).ok, false) // one continue per stop
+  mark = log().length
+  const [c1, c2] = await Promise.all([
+    call('continueChain', root, { messageId: stop.seq }),
+    call('continueChain', root, { messageId: stop.seq })
+  ])
+  assert.ok(c1.ok && c2.ok, 'both concurrent continueChain calls must return ok')
+  assert.strictEqual(c1.chainId, c2.chainId, 'both concurrent calls share the same childChainId')
+  assert.ok((c1.alreadyContinued && !c2.alreadyContinued) || (!c1.alreadyContinued && c2.alreadyContinued), 'exactly one call claims continuation')
+  stop = await waitFor('phanh lần 2 sau Tiếp tục', () => stops()[1]); assert.strictEqual(turns(mark), 3)
+  const rep = await call('continueChain', root, { messageId: stops()[0].seq }); assert.ok(rep.alreadyContinued || !rep.ok) // one continue per stop
+  const st = await call('chainState', root, { messageId: stops()[0].seq }); assert.strictEqual(st.state.threshold, 3)
+  assert.strictEqual(st.state.phase, 'continued')
+  assert.strictEqual(st.state.canContinue, false)
 
   // J1/J2: a chain that makes progress runs all 12 (default) turns — 8 valid turns are never cut
   process.env.FAKE_PROGRESS = '1'; mark = log().length; await call('send', root, '@dev-a làm')
@@ -2895,8 +2995,25 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
   assert.deepStrictEqual(entries.map(e => [e.agent, e.state]), [['dev-c', 'check-failed']])
   assert.ok(entries[0].error.log.includes('check đỏ')); assert.strictEqual(lines()[5], 'l5'); clean()
   visible = (await call('worktreeState', root)).state.queue
-  assert.ok(visible.find(e => e.id === entries[0].id).canRepair, 'unmerged check failure must remain actionable')
+  const qItem = visible.find(e => e.id === entries[0].id)
+  assert.ok(qItem.canRepair, 'unmerged check failure must remain actionable')
+  assert.ok(qItem.mergeEvent, 'worktreeState queue item must include mergeEvent')
+  assert.strictEqual(qItem.mergeEvent.category, 'check')
+  assert.strictEqual(qItem.mergeEvent.phase, 'checks')
+  assert.strictEqual(qItem.mergeEvent.code, 'CHECK_FAILED')
   await waitFor('tin báo chưa gộp', () => log().some(m => m.from === 'system' && m.text.startsWith('@dev-c chưa gộp được nhánh')))
+  const rep1 = await call('requestMergeRepair', root, { queueId: entries[0].id })
+  assert.ok(rep1.ok && rep1.runId && rep1.chainId)
+  const rep2 = await call('requestMergeRepair', root, { queueId: entries[0].id })
+  assert.strictEqual(rep2.runId, rep1.runId, 'repeat repair request returns same runId')
+  assert.strictEqual(rep2.chainId, rep1.chainId, 'repeat repair request returns same chainId')
+  const visibleAfter = (await call('worktreeState', root)).state.queue
+  assert.strictEqual(visibleAfter.find(e => e.id === entries[0].id).canRepair, false, 'claimed repair must set canRepair=false')
+  await waitFor('dev-c trả lời repair', () => log().some(m => m.from === 'dev-c' && m.runId === rep1.runId))
+  const repairMsg = log().find(m => m.kind === 'merge-repair' && m.queueId === entries[0].id)
+  assert.ok(repairMsg, 'repair system message must be logged')
+  assert.strictEqual(repairMsg.from, 'system')
+  assert.strictEqual(repairMsg.initiatedBy, 'user')
 
   // two devs edit different lines of the same file in parallel → both merged automatically
   await edit({ 'dev-a': [['a.txt', 2, 'A2']], 'dev-b': [['a.txt', 8, 'B8']] }, '@dev-a @dev-b sửa a.txt')
@@ -3213,10 +3330,12 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
 
     // manual task: a green merge never closes it; only the PM with a reason
     const r3 = await review('qa-c', 'T903', 9, 'S11-C')
-    assert.deepStrictEqual([r3.status, r3.verification.state], ['review', 'manual'])
-    await approve('T903', { kind: 'manual', reason: 'Đã nghiệm thu tay theo spec' })
+    // T54: PM manual approval with report outside scope fails; with valid report succeeds in real main harness
+    await approve('T903', { kind: 'manual', reason: 'Đã nghiệm thu tay theo spec', report: '../outside.md' })
+    assert.strictEqual((await tasks()).T903.status, 'review', 'PM không được đóng task manual với report ngoài phạm vi')
+    await approve('T903', { kind: 'manual', reason: 'Đã nghiệm thu tay theo spec', report: 'reports/sprint-11.md' })
     const d3 = (await tasks()).T903
-    assert.deepStrictEqual([d3.status, d3.verification.approval?.kind, d3.verification.approval?.reviewer], ['done', 'manual', 'pm'])
+    assert.deepStrictEqual([d3.status, d3.verification.approval?.kind, d3.verification.approval?.reviewer, d3.verification.approval?.report], ['done', 'manual', 'pm', 'reports/sprint-11.md'])
 
     // freshness: main changes the hand-off's file after the check → stale, PM refused
     const r4 = await review('qa-a', 'T904', 3, 'S11-D')
@@ -3231,6 +3350,40 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
     assert.ok((await call('logPage', root)).page.messages.length > 0)
     console.log('ok (T49 sprint 11 end to end)')
   }
+
+  // T57: window maximized restoration and persistence
+  assert.strictEqual(maximizeCallCount, 1, 'win.maximize() was called on startup when savedBounds had maximized: true')
+  isWinMaximized = false
+  const cancelCloseEv = { defaultPrevented: false, preventDefault() { this.defaultPrevented = true } }
+  webContents.emit('close', cancelCloseEv)
+  let savedWindow = JSON.parse(fs.readFileSync(path.join(userData, 'window.json'), 'utf8'))
+  assert.strictEqual(savedWindow.maximized, false, 'close persists maximized: false')
+  isWinMaximized = true
+  webContents.emit('close', cancelCloseEv)
+  savedWindow = JSON.parse(fs.readFileSync(path.join(userData, 'window.json'), 'utf8'))
+  assert.strictEqual(savedWindow.maximized, true, 'close persists maximized: true')
+
+  // T57: nativeTheme updated does not call destroyed window, cleans up listener on closed
+  assert.strictEqual(themeListeners.length, 1, 'nativeTheme updated listener registered')
+  mockNativeTheme.shouldUseDarkColors = true
+  mockNativeTheme.emitUpdated()
+  assert.strictEqual(windowBgColor, '#151517', 'window background updated for dark theme')
+  mockNativeTheme.shouldUseDarkColors = false
+  mockNativeTheme.emitUpdated()
+  assert.strictEqual(windowBgColor, '#f7f7f8', 'window background updated for light theme')
+
+  // simulate canceled close: theme updates still work
+  webContents.emit('close', cancelCloseEv)
+  mockNativeTheme.emitUpdated()
+  assert.strictEqual(windowBgColor, '#f7f7f8')
+
+  // simulate window destruction / closed
+  windowDestroyed = true
+  assert.throws(() => createdWin.setBackgroundColor('#000'), /destroyed/)
+  webContents.emit('closed')
+  assert.strictEqual(themeListeners.length, 0, 'nativeTheme listener cleaned up on closed')
+  assert.doesNotThrow(() => mockNativeTheme.emitUpdated(), 'emit updated after closed must not throw')
+  console.log('ok (T57 nativeTheme lifecycle & maximized)')
 }
 // Cài đặt › CLI Agent: a scan lists each real file once, PATH first and executables only; a check reads the version and
 // each account's login through the picked file; a turn whose file is gone points to the setting
@@ -3296,7 +3449,7 @@ function appSettingsChecks() {
   console.log('ok (app settings search)')
 }
 
-logChecks().then(needsChecks).then(timelineChecks).then(taskChecks).then(auditChecks).then(viewerChecks).then(runChecks).then(cliPathChecks).then(appSettingsChecks).then(sprint7Checks).then(sprint8Checks).then(sprint9Checks).then(sprint11CoreChecks).then(sprint6Checks).then(rendererChecks).then(rendererFileChecks).then(rendererS9Checks).then(rendererS10Checks).then(rendererS11Checks).then(rendererT56Checks).then(rendererS12Checks).then(mainChecks).then(() => console.log('ok'), e => { console.error(e); process.exit(1) })
+logChecks().then(needsChecks).then(timelineChecks).then(taskChecks).then(auditChecks).then(viewerChecks).then(runChecks).then(cliPathChecks).then(appSettingsChecks).then(sprint7Checks).then(sprint8Checks).then(sprint9Checks).then(sprint11CoreChecks).then(sprint12CoreChecks).then(sprint6Checks).then(rendererChecks).then(rendererFileChecks).then(rendererS9Checks).then(rendererS10Checks).then(rendererS11Checks).then(rendererT56Checks).then(rendererS12Checks).then(mainChecks).then(() => console.log('ok'), e => { console.error(e); process.exit(1) })
 
 // PM creates a task and moves it in the same turn (no revision yet): "" is accepted only for PM on a todo task
 {

@@ -973,8 +973,12 @@ function addIndexedRecord(index, raw, record, start, end) {
   const seq = index.records.length
   const agent = record.agent || (record.from !== 'user' && record.from !== 'system' ? record.from : null)
   index.records.push({ start, end, from: String(record.from ?? ''), at: record.at, search: searchText(record.text),
-    kind: record.kind, summary: record.summary, // a turn's result (an agent's answer or its error) carries usage: the timeline's bars
+    kind: record.kind, summary: record.summary, continuedFrom: record.continuedFrom, eventId: record.eventId,
     run: agent && record.usage ? { agent: String(agent), ms: value(record.usage.durationMs) || 0, outcome: String(record.outcome || 'success') } : undefined })
+  if (record.eventId) {
+    if (!index.eventIds) index.eventIds = new Set()
+    index.eventIds.add(String(record.eventId))
+  }
   index.prefixHashes.push(prefixDigest(index.recordHash))
   index.senders.add(String(record.from ?? ''))
   const turn = (record.from !== 'user' && record.from !== 'system') || (record.from === 'system' && (record.runId || record.usage))
@@ -1009,7 +1013,7 @@ const O_NOFOLLOW = rawFs.constants.O_NOFOLLOW || 0 // undefined on Windows
 // full re-hash keeps prefixHashes (seenHash / summary checks) honest about edits to earlier records.
 async function buildLogIndex(root, old) {
   const file = chat(root, 'log.jsonl'), index = { root, file, generation: randomUUID(), records: [],
-    prefixHashes: [createHash('sha256').digest('hex')], recordHash: createHash('sha256'), senders: new Set(), taskEvents: new Map(), taskError: null, retracted: new Set(),
+    prefixHashes: [createHash('sha256').digest('hex')], recordHash: createHash('sha256'), senders: new Set(), taskEvents: new Map(), taskError: null, retracted: new Set(), eventIds: new Set(),
     summaries: [], totals: { turns: 0, tokens: 0, costUsd: 0, hasTokens: false, hasCost: false, tokensIncomplete: false, costIncomplete: false },
     error: null, fileSize: 0, endsWithNewline: true, dirty: false, stat: null }
   let stat = null
@@ -1161,7 +1165,8 @@ async function searchLog(dir, options = {}) {
 async function needsYou(dir, dismissed = new Set(), limit = 50) {
   const index = await getLogIndex(dir); logFailure(index)
   const answered = new Set(), found = []
-  let userSince = false, resumed = false
+  const continuedStops = new Set()
+  let userSince = false
   for (let seq = index.records.length - 1; seq >= 0 && found.length < limit; seq--) {
     const record = index.records[seq], from = record.from.toLowerCase(), key = `${seq}:${record.at}`
     if (from === 'user') {
@@ -1169,8 +1174,12 @@ async function needsYou(dir, dismissed = new Set(), limit = 50) {
       const named = [...record.search.matchAll(/@([\w-]+)/g)].map(match => match[1])
       for (const name of named.length ? named : ['pm']) answered.add(name)
     } else if (from === 'system') {
-      if (record.kind === 'chain-continue') resumed = true
-      else if (record.kind === 'chain-stop' && !userSince && !resumed && !dismissed.has(key)) found.push({ seq, kind: 'chain' })
+      if (record.kind === 'chain-continue' && record.continuedFrom != null) {
+        continuedStops.add(record.continuedFrom)
+      } else if (record.kind === 'chain-stop') {
+        const isContinued = continuedStops.has(seq) || continuedStops.has(String(seq))
+        if (!userSince && !isContinued && !dismissed.has(key)) found.push({ seq, kind: 'chain' })
+      }
     } else if (/(?:^|[^\w@])@user(?![\w-])/.test(record.search) && !answered.has(from) && !dismissed.has(key)) found.push({ seq, kind: 'ask' })
   }
   const items = []
@@ -1224,6 +1233,10 @@ async function appendLogIndexed(dir, msg, { taskChanges, actor } = {}) {
     let index = await getLogIndex(root)
     if (index.error?.code === 'LOG_INCOMPLETE') { await repairTail(index); index = await getLogIndex(root, { force: true }) }
     logFailure(index)
+    if (msg.eventId && index.eventIds?.has(String(msg.eventId))) {
+      const existingSeq = index.records.findIndex(r => r.eventId === msg.eventId)
+      return { message: { ...msg, seq: existingSeq >= 0 ? existingSeq : index.records.length - 1 }, generation: index.generation, total: index.records.length, totals: logTotals(index), duplicate: true }
+    }
     let taskError = null
     if (taskChanges) {
       try {
@@ -2626,5 +2639,5 @@ module.exports = { CHAT_DIR, chat, chatName, useBox, boxes, createBox, CLI, CLI_
   team, normalizeTeam, saveTeam, teamRevision, normalizePermissions, permissionRules, normalizePermissionDenials,
   timeoutMinutes, sessionTokenLimit, sessions, setSession, sessionRotationPending, readHandoff, writeHandoff,
   mentions, files, normalizeScope, ownsList, winArg, spawnCli, shimTarget, normalizeAllowedCommands, scopeAllows, scopeLocks, lockConflict, snapshot, changedPaths, promptIndexed, run, runCommand, groupAlive,
-  migrateTaskScope, parseTaskDefinitions, taskBoardIndexed, parseTaskStatusBlock, parseRunCommandBlock, parseHandoffBlock, validateTaskChanges,
+  migrateTaskScope, parseTaskDefinitions, taskBoardIndexed, parseTaskStatusBlock, parseRunCommandBlock, parseHandoffBlock, validateTaskChanges, validTaskSpec,
   decodedPath, resolveProjectFile, readProjectFile, readBoundedFile, isSvgBytes, imageType, IMAGE_MIME, IMAGE_EXTENSIONS, saveImage, readImage, modelLabel }

@@ -22,6 +22,12 @@ if (process.isMainFrame !== false) {
     projectTree: (dir, source = null) => ipcRenderer.invoke('projectTree', dir, source),
     fileDiff: (dir, source, file) => ipcRenderer.invoke('fileDiff', dir, source, file),
     continueChain: (dir, request) => ipcRenderer.invoke('continueChain', dir, request),
+    chainState: (dir, request) => ipcRenderer.invoke('chainState', dir, request),
+    onChainChanged: fn => {
+      const handler = (_, dir, state) => fn(dir, state)
+      ipcRenderer.on('chain-changed', handler)
+      return () => ipcRenderer.removeListener('chain-changed', handler)
+    },
     send: (dir, text) => ipcRenderer.invoke('send', dir, text),
     retract: (dir, seq) => ipcRenderer.invoke('retract', dir, seq),
     tasks: dir => ipcRenderer.invoke('tasks', dir),

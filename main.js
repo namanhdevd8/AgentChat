@@ -126,6 +126,137 @@ function appendVerificationRecord(root, record) {
   }
 }
 
+const controlFile = root => path.join(worktreeBase(root), `control${core.chatName(root)}.json`)
+
+function readControlStore(root) {
+  const file = controlFile(root)
+  try {
+    const text = fs.readFileSync(file, 'utf8')
+    const data = JSON.parse(text)
+    if (data?.version === 1 && typeof data.stops === 'object' && typeof data.claims === 'object') {
+      return { ...data, corrupted: false }
+    }
+    return { version: 1, stops: {}, claims: {}, corrupted: true }
+  } catch (e) {
+    if (e.code === 'ENOENT') return { version: 1, stops: {}, claims: {}, corrupted: false }
+    return { version: 1, stops: {}, claims: {}, corrupted: true }
+  }
+}
+
+function writeControlStore(root, data) {
+  fs.mkdirSync(worktreeBase(root), { recursive: true })
+  core.atomicWrite(controlFile(root), JSON.stringify({ version: 1, stops: data.stops || {}, claims: data.claims || {} }, null, 2))
+}
+
+function updateControlStore(root, updater) {
+  const store = readControlStore(root)
+  if (store.corrupted) {
+    throw gitError('CONFIG_ERROR', 'File điều phối hỏng hoặc không đọc được')
+  }
+  const res = updater(store)
+  writeControlStore(root, store)
+  return res !== undefined ? res : store
+}
+
+function computeContentKey(snapshotMap, scope, root) {
+  if (!snapshotMap) return null
+  const entries = []
+  for (const [rel, val] of snapshotMap.entries()) {
+    if (isChatPath(rel)) continue
+    if (rel === '.git' || rel.startsWith('.git/') || rel === 'node_modules' || rel.startsWith('node_modules/') || rel === 'dist' || rel.startsWith('dist/')) continue
+    if (typeof val === 'string' && val.startsWith('changing:')) return null
+    if (scope && !core.scopeAllows(scope, rel)) continue
+    const type = typeof val === 'string' && val.startsWith('link:') ? 'link' : typeof val === 'string' && val.startsWith('other:') ? 'other' : 'file'
+    const digest = type === 'link' ? val.slice(5) : val
+    entries.push(`${rel}\0${type}\0${digest}`)
+  }
+  entries.sort()
+  return createHash('sha256').update(entries.join('\n')).digest('hex')
+}
+
+const TASK_MILESTONES = { todo: 0, doing: 1, review: 2, done: 3 }
+
+function taskSemanticKey(task) {
+  if (!task) return ''
+  const content = `${task.title || ''}\0${task.spec || ''}\0${task.acceptance || ''}`
+  return createHash('sha256').update(content).digest('hex')
+}
+
+function checkProofKey(record) {
+  if (!record || !record.treeStable || !['passed', 'failed'].includes(record.outcome)) return null
+  const cmdResults = (record.commands || []).map(c => `${c.command}:${c.exitCode}:${c.signal}`).join(';')
+  const tree = record.treeSha || record.candidateSha || record.sourceSha || ''
+  const taskKey = (record.taskRefs || []).map(t => `${t.id}:${t.definitionRevision}`).join(';')
+  return `check\0${taskKey}\0${tree}\0${record.checkPolicyHash || ''}\0${record.outcome}\0${cmdResults}`
+}
+
+function buildMergeFailure(root, entry, phase, error, commandResult = null, checkRecord = null) {
+  const code = error?.code || 'GIT_ERROR'
+  let category = 'internal'
+  if (code === 'CONFLICT') category = 'conflict'
+  else if (code === 'CHECK_FAILED' || code === 'CHECK_MUTATED_TREE') category = 'check'
+  else if (code === 'NEEDS_DEPS') category = 'dependency'
+  else if (code === 'DIRTY_ROOT') category = 'workspace'
+  else if (['CHECK_NOT_ALLOWED', 'TARGET_CHANGED', 'SCOPE_AUDIT', 'CONFIG_UNTRUSTED'].includes(code)) category = 'configuration'
+  else if (code === 'PAUSED') category = 'stopped'
+
+  let rawFiles = Array.isArray(error?.files) ? error.files : []
+  const files = []
+  for (const f of rawFiles) {
+    if (typeof f === 'string' && !path.isAbsolute(f) && !f.startsWith('../')) {
+      files.push(f)
+    }
+    if (files.length >= 50) break
+  }
+  const filesTruncated = rawFiles.length > 50
+
+  const rawMsg = String(error?.message || 'Lỗi gộp nhánh')
+  const message = redactManagedPath(rawMsg).slice(0, 2000)
+
+  const rawExcerpt = String(error?.log || '')
+  const excerpt = redactManagedPath(rawExcerpt).slice(0, 8192)
+  const truncated = rawExcerpt.length > 8192
+
+  let cmdRes = null
+  if (commandResult && category === 'check' && code !== 'CHECK_MUTATED_TREE') {
+    cmdRes = {
+      command: commandResult.command,
+      exitCode: commandResult.exitCode ?? null,
+      signal: commandResult.signal ?? null,
+      error: commandResult.error ? redactManagedPath(commandResult.error) : null
+    }
+  }
+
+  const checkIds = checkRecord ? [checkRecord.id] : []
+  const eventId = 'merge-failure:' + entry.attemptId
+
+  return {
+    version: 1,
+    eventId,
+    attemptId: entry.attemptId,
+    attemptNo: entry.attemptNo || 1,
+    queueId: entry.id,
+    retryOf: entry.retryOf || null,
+    agent: entry.agent,
+    workspaceId: entry.workspaceId || null,
+    branch: entry.branch || null,
+    sourceSha: entry.headSha,
+    candidateSha: entry.candidateSha || null,
+    phase,
+    state: entry.state,
+    category,
+    code,
+    message,
+    files,
+    filesTruncated,
+    commandResult: cmdRes,
+    checkIds,
+    excerpt,
+    truncated,
+    at: new Date().toISOString()
+  }
+}
+
 function detectTestWarnings(changedFiles) {
   const testPatterns = [
     /^check\.js$/i,
@@ -420,7 +551,7 @@ async function captureAppFacts(root, agentName, workspaceId, runId) {
     const agentRecord = registry.agents.find(a => a.id === workspaceId)
     if (agentRecord) {
       branch = agentRecord.branch
-      cwd = managedPath(root, 'agent', workspaceId)
+      cwd = managedPath(root, 'agents', workspaceId)
       source = 'worktree'
     }
   }
@@ -560,6 +691,8 @@ async function runCommandWithVerification(job, { command, tasks, signal, onProgr
   const outcome = signal?.aborted ? (signal.reason === 'timeout' ? 'timeout' : 'stopped')
     : (result?.error || result?.exitCode !== 0 || !treeStable) ? 'failed' : 'passed'
 
+  const treeSha = headAfter ? (await git(cwd, ['rev-parse', `${headAfter}^{tree}`]).catch(() => null))?.stdout?.trim() : null
+
   const settings = core.projectSettings(root).settings
   const checkRecord = {
     version: 1,
@@ -567,6 +700,7 @@ async function runCommandWithVerification(job, { command, tasks, signal, onProgr
     id: randomUUID(),
     origin: 'run-command',
     runId: job.runId,
+    chainId: job.chain?.id || null,
     queueId: null,
     workspaceId: job.workspaceId || null,
     taskRefs,
@@ -574,6 +708,7 @@ async function runCommandWithVerification(job, { command, tasks, signal, onProgr
     sourceSha: headAfter || null,
     baseSha: job.baseSha || null,
     candidateSha: null,
+    treeSha,
     checkPolicyHash: checkPolicyHash(settings.mergeChecks || []),
     startedAt,
     finishedAt,
@@ -583,6 +718,8 @@ async function runCommandWithVerification(job, { command, tasks, signal, onProgr
   }
 
   appendVerificationRecord(root, checkRecord)
+  job.checkRecords ||= []
+  job.checkRecords.push(checkRecord)
   notifyProjectChanged(root, { tasks: true })
 
   return {
@@ -763,14 +900,18 @@ async function worktreeState(root) {
     agents.push({ name: record.agent, workspaceId: record.id, branch: record.branch, ahead,
       busy: jobs.some(job => job.root === root && job.workspaceId === record.id && !job.finished) })
   }
+  const store = readControlStore(root)
   const queue = await Promise.all(registry.queue.filter(entry => !entry.supersededBy).map(async entry => {
     // Old registries keep failed attempts even after a retry (or a later commit) was merged.
     if (probe?.branch === registry.targetRef && RETRYABLE_MERGE_STATES.includes(entry.state)
       && await contained(root, entry.headSha, registry.agents.find(item => item.id === entry.workspaceId), probe.sha))
       entry = { ...entry, state: 'merged', error: null }
+    const actionKey = 'repair:' + (entry.mergeEvent?.eventId || entry.id)
+    const hasClaim = !!(store.claims?.[actionKey] || jobs.some(j => j.root === root && j.repairQueueId === entry.id && !j.finished))
+    const canRepair = ['conflict', 'check-failed'].includes(entry.state) && !hasClaim
     return { id: entry.id, agent: entry.agent, headSha: entry.headSha, state: entry.state, label: queueLabel(entry),
-      error: entry.error || null, canRetry: RETRYABLE_MERGE_STATES.includes(entry.state),
-      canRepair: ['conflict', 'check-failed'].includes(entry.state), canStop: ['queued', 'checking'].includes(entry.state) }
+      error: entry.error || null, mergeEvent: entry.mergeEvent || null, canRetry: RETRYABLE_MERGE_STATES.includes(entry.state),
+      canRepair, canStop: ['queued', 'checking'].includes(entry.state) }
   }))
   return { revision: worktreeRevisions.get(root) || 0, enabled: settings.worktreesEnabled, available: !!probe, reason,
     targetBranch: registry.targetRef || probe?.branch || null, targetSha: probe?.sha || registry.targetSha || null, dirty: probe?.dirty || false, agents,
@@ -911,7 +1052,7 @@ async function commitWorkspace(job, result, changed, auditComplete, outside) {
       updateRegistry(job.root, latest => {
         if (!latest.queue.some(entry => entry.runId === job.runId && entry.headSha === headSha)) {
           latest.queue.push({ id: entryId, agent: job.name,
-            runId: job.runId, workspaceId: job.workspaceId, headSha, subject, checks: [...settings.mergeChecks], state: 'queued',
+            runId: job.runId, chainId: job.chain?.id || null, workspaceId: job.workspaceId, headSha, subject, checks: [...settings.mergeChecks], state: 'queued',
             baseSha: probe.sha, candidateSha: null, error: null,
             pgid: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
             bindingsPending: true })
@@ -972,21 +1113,39 @@ async function processMerge(root, id) {
   let entry = readWorktrees(root).queue.find(item => item.id === id)
   if (!entry || entry.state !== 'queued' || entry.supersededBy || !core.projectSettings(root).settings.worktreesEnabled) return
   const now = () => new Date().toISOString()
+  updateEntry(root, id, item => {
+    item.attemptId = randomUUID()
+    item.attemptNo = (item.attemptNo || 0) + 1
+  })
+  entry = readWorktrees(root).queue.find(item => item.id === id)
+  let currentPhase = 'prepare'
   // re-checked at every state change: the user may stop (paused) or retry the entry while we wait for the dialog or the lock
   const stillQueued = item => item.state === 'queued' && !item.supersededBy
   const refuse = async (code, message) => {
-    updateEntry(root, id, item => { if (stillQueued(item)) mergeError(item, code, message) })
+    updateEntry(root, id, item => {
+      if (stillQueued(item)) {
+        mergeError(item, code, message)
+        const mergeEvent = buildMergeFailure(root, item, 'prepare', { code, message }, null, null)
+        item.mergeEvent = mergeEvent
+      }
+    })
     await emitWorktreeState(root).catch(() => {})
     const cur = readWorktrees(root).queue.find(item => item.id === id)
-    if (cur?.error) await post(root, 'system', `@${cur.agent} chưa gộp được nhánh: ${message}`, { kind: 'merge', queueId: cur.id, owner: cur.agent, headSha: cur.headSha, error: cur.error })
+    if (cur?.mergeEvent) {
+      const mergeEvent = cur.mergeEvent
+      await postOnce(root, mergeEvent.eventId, 'system', `@${cur.agent} chưa gộp được nhánh: ${message}`, {
+        kind: 'merge', eventId: mergeEvent.eventId, queueId: cur.id, owner: cur.agent, headSha: cur.headSha, error: cur.error, mergeEvent
+      })
+    }
   }
   try { await ensureTrustedConfig(root) } catch (e) { return refuse('CONFIG_UNTRUSTED', e.message) }
   const owner = core.team(root).find(agent => agent.name === entry.agent)
   if (!owner) return refuse('CHECK_NOT_ALLOWED', 'Agent sở hữu nhánh không còn trong nhóm')
   for (const command of entry.checks) if (!owner.allowedCommands.includes(command)) return refuse('CHECK_NOT_ALLOWED', `Lệnh "${command}" không còn được phép`)
   const integration = managedPath(root, 'integration', id)
-  let probe, requeued = false
+  let probe, requeued = false, checkRecord = null, commandsRun = []
   try {
+    currentPhase = 'merge'
     // 1. under the git lock: merge the branch into a throwaway integration worktree
     const done = await withGitLock(root, async () => {
       let stopped = false
@@ -1017,6 +1176,7 @@ async function processMerge(root, id) {
       }
       // a branch whose changes main already has (squashed earlier, or the agent merged main and kept nothing new)
       if (!(await git(integration, ['diff', '--cached', '--name-only'])).stdout.trim()) { await removeIntegration(root, entry); return alreadyMerged() }
+      currentPhase = 'dependencies'
       if (!await bootstrapDependencies(root, integration)) throw gitError('NEEDS_DEPS', 'Integration worktree chưa có dependency phù hợp')
       await git(integration, ['-c', 'user.name=Agent Chat', '-c', 'user.email=agent-chat@local', 'commit', '-m', entry.subject || `${entry.agent} · Cập nhật`,
         '-m', `Agent-Chat-Queue: ${entry.id}`])
@@ -1026,11 +1186,11 @@ async function processMerge(root, id) {
     })
     if (done) return
     await emitWorktreeState(root)
+    currentPhase = 'checks'
     // 2. no lock: checks can take minutes, and agent turns need the lock to start (prepareWorkspace) and to commit
     const controller = new AbortController(); mergeControllers.set(root, { entry, controller })
     persistRegistry(root)
     const startedAt = new Date().toISOString()
-    const commandsRun = []
     let mergeFailed = null
     try {
       for (const command of entry.checks) {
@@ -1071,19 +1231,24 @@ async function processMerge(root, id) {
     const outcome = !mergeFailed && treeStable ? 'passed'
       : controller.signal.aborted ? (controller.signal.reason === 'timeout' ? 'timeout' : 'stopped') : 'failed'
 
-    const checkRecord = {
+    const treeSha = entry.candidateSha ? (await git(root, ['rev-parse', `${entry.candidateSha}^{tree}`]).catch(() => null))?.stdout?.trim() : null
+
+    checkRecord = {
       version: 1,
       kind: 'check',
       id: randomUUID(),
       origin: 'merge',
       runId: entry.runId,
+      chainId: entry.chainId || null,
       queueId: entry.id,
+      attemptId: entry.attemptId,
       workspaceId: entry.workspaceId || null,
       taskRefs: entry.taskRefs || [],
       reviewIds: entry.reviewIds || [],
       sourceSha: entry.headSha,
       baseSha: entry.baseSha,
       candidateSha: entry.candidateSha,
+      treeSha,
       checkPolicyHash: checkPolicyHash(entry.checks),
       startedAt,
       finishedAt,
@@ -1094,6 +1259,7 @@ async function processMerge(root, id) {
     appendVerificationRecord(root, checkRecord)
     notifyProjectChanged(root, { tasks: true })
     if (mergeFailed) throw mergeFailed
+    currentPhase = 'publish'
     // 3. under the lock again: publish only if the target branch hasn't moved since step 1
     await withGitLock(root, async () => {
       entry = updateEntry(root, id, item => { item.state = 'publishing'; item.updatedAt = now() }); await emitWorktreeState(root)
@@ -1117,10 +1283,18 @@ async function processMerge(root, id) {
     })
     if (!requeued) await post(root, 'system', `Đã gộp nhánh của ${entry.agent} sau khi kiểm tra đạt.`, { kind: 'merge', queueId: entry.id, owner: entry.agent, headSha: entry.headSha })
   } catch (e) {
-    entry = updateEntry(root, id, item => mergeError(item, e.code || 'GIT_ERROR', e.message, e.files || [], e.log || '')) // throws → pump stops, no endless retry
-    await removeIntegration(root, entry) // a retry gets a new id; don't leave this attempt's worktree (and node_modules) behind
-    await post(root, 'system', `@${entry.agent} chưa gộp được nhánh: ${e.message}`, { kind: 'merge', queueId: entry.id, owner: entry.agent,
-      headSha: entry.headSha, error: entry.error })
+    const lastCommandResult = commandsRun.find(c => c.error || (c.exitCode !== 0 && c.exitCode != null) || c.signal) || null
+    entry = updateEntry(root, id, item => {
+      mergeError(item, e.code || 'GIT_ERROR', e.message, e.files || [], e.log || '')
+      const mergeEvent = buildMergeFailure(root, item, currentPhase, e, lastCommandResult, checkRecord)
+      item.mergeEvent = mergeEvent
+    })
+    await removeIntegration(root, entry)
+    const mergeEvent = entry.mergeEvent
+    if (mergeEvent) {
+      await postOnce(root, mergeEvent.eventId, 'system', `@${entry.agent} chưa gộp được nhánh: ${e.message}`, { kind: 'merge', eventId: mergeEvent.eventId, queueId: entry.id, owner: entry.agent,
+        headSha: entry.headSha, error: entry.error, mergeEvent })
+    }
   } finally {
     mergeControllers.delete(root)
     try { persistRegistry(root) } catch {}
@@ -1147,9 +1321,16 @@ async function post(dir, from, text, extra = {}, appendOptions = {}) {
   let appended
   try { appended = await core.appendLogIndexed(dir, msg, appendOptions) }
   finally { appLogWrites.set(root, Date.now() + 500) }
+  if (appended.duplicate) {
+    return appended.message
+  }
   logGenerations.set(root, appended.generation)
   win?.webContents.send('message', dir, appended.message, { generation: appended.generation, total: appended.total, totals: appended.totals })
   return { ...appended.message, ...(appended.taskError ? { taskError: appended.taskError } : {}) }
+}
+
+async function postOnce(dir, eventId, from, text, extra = {}, appendOptions = {}) {
+  return post(dir, from, text, { eventId, ...extra }, appendOptions)
 }
 
 const runKey = (root, name) => root + '\0' + name
@@ -1253,6 +1434,13 @@ async function finishWaiting(job, outcome, text) {
   try { await terminal(job, result, outcome === 'stopped' || outcome === 'timeout') }
   finally {
     recordChainTurn(job, result, [], [], true)
+    if (job.chain) {
+      job.chain.runningJobs.delete(job.runId)
+      if (job.chain.runningJobs.size === 0 && job.chain.state === 'halting') {
+        job.chain.state = 'stopped'
+        saveStopRecord(job.root, job.chain)
+      }
+    }
     removeJob(job)
   }
 }
@@ -1271,16 +1459,127 @@ function stopJob(job, reason) {
   return true
 }
 
-const newChain = root => {
+const activeChains = new Map()
+
+const newChain = (root, options = {}) => {
   const { chainLimit, costCeiling } = core.projectSettings(root).settings
-  return { id: randomUUID(), turns: 0, costUsd: 0, costIncomplete: false, chainLimit, costCeiling, noProgress: [], pingPong: null, accountedRuns: new Set() }
+  const id = options.id || randomUUID()
+  const chain = {
+    id,
+    stopId: options.stopId || id,
+    turns: 0,
+    reservedTurns: 0,
+    costUsd: 0,
+    costIncomplete: false,
+    chainLimit: typeof options.chainLimit === 'number' ? options.chainLimit : chainLimit,
+    costCeiling: typeof options.costCeiling === 'number' ? options.costCeiling : costCeiling,
+    threshold: 3,
+    idleStreak: 0,
+    idleRunIds: [],
+    accountedRuns: new Set(),
+    completedRuns: new Set(),
+    seenProofs: new Set(),
+    seenContentKeys: new Set(),
+    milestones: new Map(),
+    dispatchedKeys: new Set(),
+    pending: [],
+    runningJobs: new Map(),
+    state: 'active',
+    haltReason: null,
+    stopPosted: false,
+    revision: 1
+  }
+  activeChains.set(chain.id, chain)
+  return chain
 }
+
+function getChainView(root, chain) {
+  const pending = (chain.pending || []).map(p => ({
+    agent: p.agent,
+    sourceSeqs: (p.sourceRefs || []).map(r => r.seq).filter(Number.isInteger),
+    taskIds: p.taskIds || [],
+    uncertain: !!p.uncertain
+  }))
+  const running = Array.from((chain.runningJobs || new Map()).values()).map(j => ({
+    agent: j.agent,
+    runId: j.runId,
+    phase: j.phase || 'running'
+  }))
+  const isDraining = running.length > 0 && chain.state === 'halting'
+  const isContinued = chain.state === 'continued'
+  let phase = 'ready'
+  if (isContinued) phase = 'continued'
+  else if (isDraining) phase = 'draining'
+  else if (chain.state === 'stopped' || chain.state === 'halting') phase = 'ready'
+  const canContinue = phase === 'ready' && pending.length > 0
+  return {
+    stopId: chain.stopId || chain.id,
+    chainId: chain.id,
+    box: core.chatName(root),
+    revision: String(chain.revision || 1),
+    phase,
+    reason: chain.haltReason || { code: 'no-progress', text: 'Dừng chuỗi' },
+    threshold: 3,
+    idleRunIds: chain.idleRunIds ? [...chain.idleRunIds] : [],
+    turns: chain.turns,
+    limit: chain.chainLimit,
+    costUsd: chain.costUsd,
+    costIncomplete: !!chain.costIncomplete,
+    pending,
+    running,
+    canContinue,
+    continuedTo: chain.continuedTo || null
+  }
+}
+
+function saveStopRecord(root, chain, lastMsg = null) {
+  chain.revision = (chain.revision || 1) + 1
+  const view = getChainView(root, chain)
+  updateControlStore(root, store => {
+    const stopId = chain.stopId || chain.id
+    store.stops[stopId] = {
+      stopId,
+      chainId: chain.id,
+      state: view,
+      sourceRefs: chain.pending.flatMap(p => p.sourceRefs || []),
+      logMessageRef: lastMsg ? { seq: lastMsg.seq, at: lastMsg.at, textHash: createHash('sha256').update(lastMsg.text || '').digest('hex') } : (store.stops[stopId]?.logMessageRef || null),
+      at: new Date().toISOString()
+    }
+  })
+  win?.webContents.send('chain-changed', root, view)
+}
+
 async function haltChain(dir, chain, reason, targets) {
+  const root = rootOf(dir)
+  chain.state = 'halting'
+  chain.stopPosted = true
+  chain.stopId = chain.id
+  if (!chain.haltReason) {
+    chain.haltReason = typeof reason === 'string' ? { code: 'no-progress', text: reason } : reason
+  }
+  for (const t of targets) {
+    let p = chain.pending.find(item => item.agent === t.name)
+    if (!p) {
+      p = { agent: t.name, sourceRefs: [], taskIds: [], uncertain: false }
+      chain.pending.push(p)
+    }
+  }
   const names = [...new Set(targets.map(agent => agent.name))]
-  return post(dir, 'system', reason, { kind: 'chain-stop', canContinue: true, runId: chain.id, targets: names,
+  const stopMsg = await post(dir, 'system', chain.haltReason.text, {
+    kind: 'chain-stop',
+    canContinue: true,
+    stopId: chain.stopId,
+    chainId: chain.id,
+    runId: chain.id,
+    targets: names,
     continuationTarget: names.map(name => `@${name}`).join(' '),
-    costUsd: chain.costUsd, costIncomplete: !!chain.costIncomplete })
+    costUsd: chain.costUsd,
+    costIncomplete: !!chain.costIncomplete
+  })
+  saveStopRecord(root, chain, stopMsg)
+  return stopMsg
 }
+
 // routes in flight per folder: a box switch waits for them, or their turns would read and post into the other box
 const routing = new Map()
 async function route(dir, msg, hops, chain = null) {
@@ -1289,24 +1588,93 @@ async function route(dir, msg, hops, chain = null) {
   try { return await routeTargets(dir, msg, hops, chain) }
   finally { if (routing.get(root) > 1) routing.set(root, routing.get(root) - 1); else routing.delete(root) }
 }
+
 async function routeTargets(dir, msg, hops, chain) {
+  const root = rootOf(dir)
   const members = core.team(dir)
   let targets = core.mentions(msg.text, members, msg.from)
-  if (msg.from === 'user' && !targets.length) // no @ → PM, whatever order the team is listed in
+  if (msg.from === 'user' && !targets.length)
     targets = [members.find(a => String(a.name).toLowerCase() === 'pm') || members[0]].filter(Boolean)
   if (!targets.length) return
-  chain ||= newChain(rootOf(dir))
-  if (chain.pingPong) return haltChain(dir, chain, `${chain.pingPong.join(' và ')} đã chat qua lại 3 vòng mà không có file hoặc task thay đổi.`, targets)
-  if (chain.costCeiling != null && chain.costUsd >= chain.costCeiling)
-    return haltChain(dir, chain, `Dừng chuỗi vì chi phí đã đạt USD ${chain.costCeiling.toFixed(4)}.`, targets)
-  for (let i = 0; i < targets.length; i++) {
-    if (chain.turns >= chain.chainLimit)
-      return haltChain(dir, chain, `Dừng sau ${chain.chainLimit} lượt agent liên tiếp.`, targets.slice(i))
-    chain.turns++
-    // one target failing (busy granting a permission, config not trusted…) must not drop the others or vanish silently
-    try { await ask(dir, targets[i], hops, null, chain, msg) }
-    catch (e) { chain.turns--; await post(dir, 'system', `Chưa gọi được @${targets[i].name}: ${e.message}`, { kind: 'route-error', agent: targets[i].name }) }
-    for (const job of jobs) if (job.chain === chain && job.headStarted && !job.finished) progress(job) // refresh "chuỗi x/y"
+  chain ||= newChain(root)
+
+  // 1. Check cost ceiling
+  if (chain.costCeiling != null && chain.costUsd >= chain.costCeiling && chain.state === 'active') {
+    chain.state = 'halting'
+    chain.haltReason = { code: 'cost-ceiling', text: `Dừng chuỗi vì chi phí đã đạt USD ${chain.costCeiling.toFixed(4)}.` }
+  }
+
+  // 2. If chain is halting or stopped, put all targets into pending and ensure stop posted
+  if (chain.state === 'halting' || chain.state === 'stopped') {
+    for (const target of targets) {
+      let p = chain.pending.find(item => item.agent === target.name)
+      if (!p) {
+        p = { agent: target.name, sourceRefs: [], taskIds: [], uncertain: false }
+        chain.pending.push(p)
+      }
+      p.sourceRefs.push({ seq: msg.seq, at: msg.at, textHash: createHash('sha256').update(msg.text || '').digest('hex') })
+    }
+    if (!chain.stopPosted) {
+      await haltChain(dir, chain, chain.haltReason || { code: 'no-progress', text: 'Dừng chuỗi sau 3 lượt không có tiến triển mới (chat qua lại).' }, chain.pending.map(p => ({ name: p.agent })))
+    } else {
+      saveStopRecord(root, chain)
+    }
+    return
+  }
+
+  // 3. S2 Deduplication for agent messages in active chains
+  let filteredTargets = targets
+  if (msg.from !== 'user') {
+    let cleanText = (msg.text || '').replace(/```task-status[\s\S]*?```/g, '').replace(/```run-command[\s\S]*?```/g, '').replace(/```handoff[\s\S]*?```/g, '')
+    cleanText = cleanText.replace(/\r\n/g, '\n').trim()
+    const sortedTargetNames = targets.map(t => t.name.toLowerCase()).sort().join(',')
+    const contextKey = `${chain.currentContentKey || ''}\0${chain.seenProofs.size}`
+    filteredTargets = []
+    for (const target of targets) {
+      const dedupeKey = createHash('sha256').update(
+        `${chain.id}\0${msg.from.toLowerCase()}\0${target.name.toLowerCase()}\0${sortedTargetNames}\0${cleanText}\0${contextKey}`
+      ).digest('hex')
+      if (chain.dispatchedKeys.has(dedupeKey)) {
+        continue
+      }
+      target._dedupeKey = dedupeKey
+      filteredTargets.push(target)
+    }
+  }
+  if (!filteredTargets.length) return
+
+  // 4. Admission loop with reservedTurns
+  for (let i = 0; i < filteredTargets.length; i++) {
+    const target = filteredTargets[i]
+    if (chain.turns + chain.reservedTurns >= chain.chainLimit) {
+      chain.state = 'halting'
+      chain.haltReason = { code: 'turn-limit', text: `Dừng sau ${chain.chainLimit} lượt agent liên tiếp.` }
+      const remaining = filteredTargets.slice(i)
+      for (const rem of remaining) {
+        if (rem._dedupeKey) chain.dispatchedKeys.add(rem._dedupeKey)
+        let p = chain.pending.find(item => item.agent === rem.name)
+        if (!p) {
+          p = { agent: rem.name, sourceRefs: [], taskIds: [], uncertain: false }
+          chain.pending.push(p)
+        }
+        p.sourceRefs.push({ seq: msg.seq, at: msg.at, textHash: createHash('sha256').update(msg.text || '').digest('hex') })
+      }
+      if (!chain.stopPosted) {
+        await haltChain(dir, chain, chain.haltReason, remaining)
+      } else {
+        saveStopRecord(root, chain)
+      }
+      return
+    }
+    chain.reservedTurns++
+    if (target._dedupeKey) chain.dispatchedKeys.add(target._dedupeKey)
+    try {
+      await ask(dir, target, hops, null, chain, msg)
+    } catch (e) {
+      chain.reservedTurns = Math.max(0, chain.reservedTurns - 1)
+      await post(dir, 'system', `Chưa gọi được @${target.name}: ${e.message}`, { kind: 'route-error', agent: target.name })
+    }
+    for (const job of jobs) if (job.chain === chain && job.headStarted && !job.finished) progress(job)
   }
 }
 
@@ -1325,27 +1693,29 @@ async function ask(dir, agent, hops, special = null, chain = null, trigger = nul
   // what asked for this turn: a user message's seq (so taking that message back can cancel it), anything else 'other'
   const reason = !special && !retryContext && !grantRequestId && trigger?.from === 'user' && Number.isInteger(trigger.seq) ? trigger.seq : 'other'
   const waitingTurn = () => {
-    if (special || retryContext || grantRequestId) return null
+    if (special?.kind === 'summary' || retryContext || grantRequestId) return null
     const waiting = jobs.find(job => job.key === runKey(root, agent.name) && !job.finished && job.phase === 'queued' && !job.kind)
-    if (waiting && chain && chain.turns > 0) chain.turns-- // merged, so not an extra turn
-    waiting?.reasons.add(reason)
+    if (waiting) waiting.reasons.add(reason)
     return waiting
   }
   let waiting = waitingTurn()
-  if (waiting) return waiting
+  if (waiting) {
+    if (chain) chain.reservedTurns = Math.max(0, chain.reservedTurns - 1)
+    return waiting
+  }
   const reserved = permissionReservations.get(permissionKey(root, agent.name))
   if (reserved && reserved.id !== grantRequestId) throw gitError('BUSY', `@${agent.name} đang cấp quyền`)
   if (!grantRequestId) clearPending(root, agent.name)
   let setupError
   try { await ensureTrustedConfig(root) } catch (e) { setupError = e.message }
-  try { if (!special && !setupError) migrateTaskScope(dir) } catch (e) { if (String(agent.name).toLowerCase() === 'pm') setupError ||= `Không nâng được quyền task cho PM: ${e.message}` }
+  try { if (special?.kind !== 'summary' && !setupError) migrateTaskScope(dir) } catch (e) { if (String(agent.name).toLowerCase() === 'pm') setupError ||= `Không nâng được quyền task cho PM: ${e.message}` }
   agent = core.team(dir).find(a => a.name === agent.name) || agent
   if (special?.kind === 'summary') agent = { ...agent, resume: false, allowedCommands: [], permissions: { mode: 'edit', allowTools: [], networkAccess: false }, owns: [], readOnly: true }
   const scope = core.normalizeScope(agent, root)
   let workspace = { cwd: root, workspaceId: null, branch: null, worktree: false }
-  if (!special && !setupError) try { workspace = await prepareWorkspace(root, agent) } catch (e) { setupError ||= e.message } // unconfirmed config creates no worktrees
+  if (special?.kind !== 'summary' && !setupError) try { workspace = await prepareWorkspace(root, agent) } catch (e) { setupError ||= e.message } // unconfirmed config creates no worktrees
   let taskIds = []
-  if (!special) try { taskIds = (await core.taskBoardIndexed(root)).tasks.filter(task => task.assignee === agent.name && task.status !== 'done').map(task => task.id) } catch {}
+  if (special?.kind !== 'summary') try { taskIds = (await core.taskBoardIndexed(root)).tasks.filter(task => task.assignee === agent.name && task.status !== 'done').map(task => task.id) } catch {}
   if (grantRequestId) {
     const grant = permissionReservations.get(permissionKey(root, agent.name))
     if (!grant || grant.id !== grantRequestId) throw gitError('CANCELLED', 'Thao tác cấp quyền đã bị huỷ')
@@ -1363,7 +1733,25 @@ async function ask(dir, agent, hops, special = null, chain = null, trigger = nul
     finished: false, headStarted: false, reserved: false, spawned: false, pgid: null, setupError,
     controller: new AbortController(), auditController: new AbortController(), timer: null, taskIds, chain, trigger: capturedTrigger, reasons: new Set([reason]),
     retryContext, ...workspace, ...(special || {}) }
-  if ((waiting = waitingTurn())) return waiting
+  if ((waiting = waitingTurn())) {
+    if (chain) chain.reservedTurns = Math.max(0, chain.reservedTurns - 1)
+    return waiting
+  }
+  if (chain) {
+    if (chain.state === 'halting' || chain.state === 'stopped') {
+      chain.reservedTurns = Math.max(0, chain.reservedTurns - 1)
+      let p = chain.pending.find(item => item.agent === agent.name)
+      if (!p) {
+        p = { agent: agent.name, sourceRefs: [], taskIds: [], uncertain: false }
+        chain.pending.push(p)
+      }
+      if (trigger) p.sourceRefs.push({ seq: trigger.seq, at: trigger.at, textHash: createHash('sha256').update(trigger.text || '').digest('hex') })
+      return null
+    }
+    chain.reservedTurns = Math.max(0, chain.reservedTurns - 1)
+    chain.turns++
+    chain.runningJobs.set(job.runId, { agent: job.name, runId: job.runId, phase: job.phase })
+  }
   jobs.push(job)
   if (heads().includes(job)) startHead(job)
   return job
@@ -1463,6 +1851,13 @@ async function failJob(job, error) {
   try { await terminal(job, result); if (job.spawned) await warning(job, [], false) }
   finally {
     recordChainTurn(job, result, [], [], false)
+    if (job.chain) {
+      job.chain.runningJobs.delete(job.runId)
+      if (job.chain.runningJobs.size === 0 && job.chain.state === 'halting') {
+        job.chain.state = 'stopped'
+        saveStopRecord(job.root, job.chain)
+      }
+    }
     const state = job.spawned ? orphanState(job.pgid) : 'dead'
     if (state === 'dead') releaseReservation(job); else keepOrphan(job, state)
     removeJob(job)
@@ -1478,7 +1873,7 @@ async function warning(job, paths, auditComplete) {
   await post(job.dir, 'system', text, { kind: 'scope-warning', relatedRunId: job.runId, paths, auditComplete, attribution: 'unverified' })
 }
 
-function recordChainTurn(job, result, changed, metadataChanged, auditComplete) {
+function recordChainTurn(job, result, changed, metadataChanged, auditComplete, beforeContentKey = null, afterContentKey = null) {
   const chain = job.chain
   if (!chain) return
   if (!chain.accountedRuns) chain.accountedRuns = new Set()
@@ -1492,15 +1887,78 @@ function recordChainTurn(job, result, changed, metadataChanged, auditComplete) {
       chain.costIncomplete = true
     }
   }
+  if (!chain.completedRuns) chain.completedRuns = new Set()
+  if (chain.completedRuns.has(job.runId)) return
   if (result.outcome !== 'success') return
-  if (!auditComplete || changed.length || metadataChanged.length || result.taskUpdates?.length) {
-    chain.noProgress = []; chain.pingPong = null; return
+  chain.completedRuns.add(job.runId)
+
+  let hasNewProof = false
+  // 1. Source changes
+  if (auditComplete && !job.scope.readOnly && changed.length > 0 && afterContentKey && afterContentKey !== beforeContentKey) {
+    if (!chain.seenContentKeys.has(afterContentKey)) {
+      chain.seenContentKeys.add(afterContentKey)
+      const proof = 'source:' + afterContentKey
+      if (!chain.seenProofs.has(proof)) {
+        chain.seenProofs.add(proof)
+        hasNewProof = true
+      }
+    }
   }
-  chain.noProgress.push(job.name)
-  chain.noProgress = chain.noProgress.slice(-6)
-  if (chain.noProgress.length === 6 && new Set(chain.noProgress.map(name => name.toLowerCase())).size === 2
-    && chain.noProgress.every((name, index, list) => index < 2 || name.toLowerCase() === list[index - 2].toLowerCase()))
-    chain.pingPong = [...new Set(chain.noProgress.map(name => name.toLowerCase()))]
+  // 2. Task changes
+  if (result.taskUpdates?.length) {
+    for (const update of result.taskUpdates) {
+      const ms = TASK_MILESTONES[update.status] ?? -1
+      const currentMs = chain.milestones.get(update.id) ?? -1
+      if (ms > currentMs) {
+        chain.milestones.set(update.id, ms)
+        const proof = `task:${update.id}:${ms}`
+        if (!chain.seenProofs.has(proof)) {
+          chain.seenProofs.add(proof)
+          hasNewProof = true
+        }
+      }
+    }
+  }
+  // 3. Check records
+  const allVerification = readVerificationRecords(job.root)
+  const candidateCheckRecords = [
+    ...(job.checkRecords || []),
+    ...(result.checkRecords || []),
+    ...allVerification.filter(r => r.kind === 'check' && (r.runId === job.runId || (chain.id && r.chainId === chain.id)))
+  ]
+  const seenRecordIds = new Set()
+  const checkRecords = []
+  for (const rec of candidateCheckRecords) {
+    if (rec && rec.id && !seenRecordIds.has(rec.id)) {
+      seenRecordIds.add(rec.id)
+      checkRecords.push(rec)
+    }
+  }
+  if (checkRecords.length) {
+    for (const rec of checkRecords) {
+      const proof = checkProofKey(rec)
+      if (proof && !chain.seenProofs.has(proof)) {
+        chain.seenProofs.add(proof)
+        hasNewProof = true
+      }
+    }
+  }
+
+  if (hasNewProof) {
+    chain.idleStreak = 0
+  } else {
+    chain.idleStreak = (chain.idleStreak || 0) + 1
+    if (!chain.idleRunIds) chain.idleRunIds = []
+    chain.idleRunIds.push(job.runId)
+  }
+
+  if (chain.seenProofs.size >= 8192 && chain.state === 'active') {
+    chain.state = 'halting'
+    chain.haltReason = { code: 'tracking-limit', text: 'Dừng chuỗi vì đã đạt giới hạn theo dõi (8192).' }
+  } else if (chain.idleStreak >= chain.threshold && chain.state === 'active') {
+    chain.state = 'halting'
+    chain.haltReason = { code: 'no-progress', text: 'Dừng chuỗi sau 3 lượt không có tiến triển mới (chat qua lại).' }
+  }
 }
 function permissionCandidate(job, result) {
   if (!job.trigger || job.kind || job.repairQueueId || result.orphanState || ['stopped', 'timeout'].includes(result.outcome)
@@ -1512,9 +1970,12 @@ function permissionCandidate(job, result) {
 
 async function executeJob(job) {
   let before, metadataBefore, result, paths = [], changed = [], metadataChanged = [], auditComplete = true, workspaceError, handoffError, pendingPermission
+  let beforeContentKey = null, afterContentKey = null
   if (job.worktree) try { await startWorkspace(job) } catch (e) { result = { outcome: 'error', text: e.message, usage: zeroUsage() } }
   if (!result) try {
     before = await core.snapshot(job.cwd || job.root, { signal: job.controller.signal, excludeChat: job.worktree })
+    beforeContentKey = computeContentKey(before, job.scope, job.root)
+    if (job.chain && beforeContentKey) job.chain.seenContentKeys.add(beforeContentKey)
     if (job.worktree) metadataBefore = await core.snapshot(job.root, { signal: job.controller.signal, onlyChat: true })
   }
   catch (e) {
@@ -1570,6 +2031,8 @@ async function executeJob(job) {
     try {
       if (!before) throw new Error('Không có snapshot ban đầu')
       const after = await core.snapshot(job.cwd || job.root, { signal: job.auditController.signal, excludeChat: job.worktree })
+      afterContentKey = computeContentKey(after, job.scope, job.root)
+      if (job.chain && afterContentKey) job.chain.currentContentKey = afterContentKey
       changed = core.changedPaths(before, after)
       paths = changed.filter(file => !core.scopeAllows(job.scope, file))
       // a file still being written (e.g. by a leftover child process) can't be audited, so it is never auto-committed
@@ -1765,7 +2228,7 @@ async function executeJob(job) {
       { kind: 'merge', owner: job.name, relatedRunId: job.runId, error: { code: workspaceError.code || 'GIT_ERROR', message: workspaceError.message,
         files: workspaceError.files || [], log: '' } })
     if (job.spawned) await warning(job, paths, auditComplete)
-    recordChainTurn(job, result, changed, metadataChanged, auditComplete)
+    recordChainTurn(job, result, changed, metadataChanged, auditComplete, beforeContentKey, afterContentKey)
     if (result.permissionDenials?.length) {
       pendingPermission = permissionCandidate(job, result)
       await post(job.dir, 'system', `${job.name} bị từ chối quyền: ${result.permissionDenials.map(denial => denial.label).join('; ')}`,
@@ -1780,6 +2243,13 @@ async function executeJob(job) {
   }
   // after releasing: routing may wait on the config dialog, and this finished turn must not hold its locks meanwhile
   if (routeNext) await route(job.dir, msg, job.hops + 1, job.chain).catch(e => console.error(e))
+  if (job.chain) {
+    job.chain.runningJobs.delete(job.runId)
+    if (job.chain.runningJobs.size === 0 && job.chain.state === 'halting') {
+      job.chain.state = 'stopped'
+      saveStopRecord(job.root, job.chain)
+    }
+  }
   if (pendingPermission && pendingValid(pendingPermission)) {
     pendingPermissions.set(permissionKey(job.root, job.name), pendingPermission)
     emitPermissions(job.root)
@@ -2492,17 +2962,63 @@ ipcMain.handle('stopMerge', (event, dir, request) => {
 ipcMain.handle('requestMergeRepair', (event, dir, request) => {
   validSender(event)
   return apiCall(async () => {
-    const root = knownProject(dir), registry = readWorktrees(root), entry = registry.queue.find(item => item.id === request?.queueId)
-    if (!entry || !(await worktreeState(root)).queue.some(item => item.id === entry.id && item.canRepair))
-      throw gitError('INVALID_ARGUMENT', 'Mục gộp không còn cần agent sửa')
-    const existing = jobs.find(job => job.root === root && job.repairQueueId === entry.id && !job.finished)
-    if (existing) return { runId: existing.runId }
-    const owner = core.team(root).find(agent => agent.name === entry.agent)
-    if (!owner) throw gitError('CONFIG_ERROR', 'Không tìm thấy agent sở hữu nhánh')
-    const detail = `${entry.error?.message || 'Lỗi gộp'}${entry.error?.files?.length ? `: ${entry.error.files.join(', ')}` : ''}`
-    await post(root, 'user', `@${owner.name} sửa lỗi trên nhánh của bạn rồi báo lại: ${detail}`, { kind: 'merge-repair', queueId: entry.id })
-    const job = await ask(root, owner, 0, { repairQueueId: entry.id })
-    return { runId: job.runId }
+    const root = knownProject(dir)
+    return withGitLock(root, async () => {
+      const registry = readWorktrees(root), entry = registry.queue.find(item => item.id === request?.queueId)
+      if (!entry) throw gitError('INVALID_ARGUMENT', 'Không tìm thấy mục gộp')
+      const actionKey = 'repair:' + (entry.mergeEvent?.eventId || entry.id)
+      const store = readControlStore(root)
+      if (store.claims[actionKey]) {
+        const claim = store.claims[actionKey]
+        return { runId: claim.runId, chainId: claim.chainId }
+      }
+      const existing = jobs.find(job => job.root === root && job.repairQueueId === entry.id && !job.finished)
+      if (existing) return { runId: existing.runId }
+      if (entry.supersededBy) throw gitError('INVALID_ARGUMENT', 'Mục gộp đã bị thay thế')
+      const probe = await repoProbe(root).catch(() => null)
+      if (probe?.branch === registry.targetRef && await contained(root, entry.headSha, registry.agents.find(item => item.id === entry.workspaceId), probe.sha)) {
+        throw gitError('INVALID_ARGUMENT', 'Mục gộp đã nằm trong main')
+      }
+      if (!['conflict', 'check-failed'].includes(entry.state))
+        throw gitError('INVALID_ARGUMENT', 'Mục gộp không còn cần agent sửa')
+      const owner = core.team(root).find(agent => agent.name === entry.agent)
+      if (!owner) throw gitError('CONFIG_ERROR', 'Không tìm thấy agent sở hữu nhánh')
+      const repairChainId = randomUUID()
+      const repairEventId = actionKey
+      updateControlStore(root, s => {
+        s.claims[actionKey] = {
+          kind: 'repair',
+          actionKey,
+          queueId: entry.id,
+          eventId: repairEventId,
+          targetEventId: entry.mergeEvent?.eventId || null,
+          chainId: repairChainId,
+          at: new Date().toISOString()
+        }
+      })
+      const detail = `${entry.error?.message || 'Lỗi gộp'}${entry.error?.files?.length ? `: ${entry.error.files.join(', ')}` : ''}`
+      await postOnce(root, repairEventId, 'system', `@${owner.name} sửa lỗi trên nhánh của bạn rồi báo lại: ${detail}`, {
+        kind: 'merge-repair', initiatedBy: 'user', queueId: entry.id, eventId: repairEventId, targetEventId: entry.mergeEvent?.eventId
+      })
+      const repairContext = entry.mergeEvent ? {
+        category: entry.mergeEvent.category,
+        phase: entry.mergeEvent.phase,
+        code: entry.mergeEvent.code,
+        message: entry.mergeEvent.message,
+        files: entry.mergeEvent.files,
+        commandResult: entry.mergeEvent.commandResult,
+        excerpt: entry.mergeEvent.excerpt,
+        checkIds: entry.mergeEvent.checkIds,
+        untrusted: true
+      } : null
+      const chain = newChain(root, { id: repairChainId })
+      const job = await ask(root, owner, 0, { repairQueueId: entry.id, repairContext }, chain)
+      updateControlStore(root, s => {
+        if (s.claims[actionKey]) s.claims[actionKey].runId = job.runId
+      })
+      emitWorktreeState(root).catch(() => {})
+      return { runId: job.runId, chainId: repairChainId }
+    })
   })
 })
 ipcMain.handle('files', (event, dir) => { validSender(event); return core.files(knownProject(dir)) })
@@ -2516,24 +3032,187 @@ ipcMain.handle('continueChain', (event, dir, request) => {
       let before
       do {
         const page = await core.logPage(root, { ...(before == null ? {} : { before }), limit: 100 })
-        stop = page.messages.find(message => message.runId === id)
+        stop = page.messages.find(message => message.stopId === id || message.chainId === id || message.runId === id)
         before = page.hasBefore ? page.start : null
       } while (!stop && before != null)
     }
-    if (!stop || stop.kind !== 'chain-stop' || !Array.isArray(stop.targets) || !stop.targets.length)
+    if (!stop || stop.kind !== 'chain-stop')
       throw gitError('INVALID_ARGUMENT', 'Không tìm thấy chuỗi có thể tiếp tục')
-    const key = `${stop.seq}:${stop.runId || ''}`
-    if (continuedChains.has(key)) throw gitError('CONFLICT', 'Chuỗi này đã được tiếp tục')
-    const members = core.team(root), targets = stop.targets.map(name => members.find(agent => agent.name.toLowerCase() === String(name).toLowerCase()))
+    const stopId = stop.stopId || stop.chainId || stop.runId || String(stop.seq)
+    const store = readControlStore(root)
+    if (store.corrupted) throw gitError('CONFIG_ERROR', 'File điều phối hỏng hoặc không đọc được')
+
+    const originChain = activeChains.get(stop.chainId || stopId)
+    const stopRecord = store.stops[stopId]
+    if (originChain) {
+      const view = getChainView(root, originChain)
+      if (view.phase === 'draining' || (view.running && view.running.length > 0)) {
+        throw gitError('INVALID_STATE', 'Chuỗi đang trong trạng thái chờ các tiến trình kết thúc (draining)')
+      }
+    } else if (stopRecord?.state?.phase === 'draining' || (stopRecord?.state?.running && stopRecord.state.running.length > 0)) {
+      throw gitError('INVALID_STATE', 'Chuỗi đang trong trạng thái chờ các tiến trình kết thúc (draining)')
+    }
+
+    const claimKey = 'continue:' + stopId
+    const legacyKey = `${stop.seq}:${stop.runId || ''}`
+    if (continuedChains.has(legacyKey)) {
+      return { chainId: stopId, alreadyContinued: true }
+    }
+    const logIndex = await core.getLogIndex(root)
+    if (logIndex.records.some(r => r.kind === 'chain-continue' && (r.continuedFrom === stop.seq || r.stopId === stopId))) {
+      return { chainId: stopId, alreadyContinued: true }
+    }
+
+    const pendingList = originChain?.pending?.length ? originChain.pending
+      : (stopRecord?.state?.pending?.length ? stopRecord.state.pending : null)
+    const targetNames = pendingList?.length ? [...new Set(pendingList.map(p => p.agent))] : (Array.isArray(stop.targets) ? stop.targets : [])
+    if (!targetNames.length) throw gitError('INVALID_ARGUMENT', 'Không tìm thấy người nhận để tiếp tục')
+    const members = core.team(root)
+    const targets = targetNames.map(name => members.find(agent => agent.name.toLowerCase() === String(name).toLowerCase()))
     if (targets.some(target => !target)) throw gitError('CONFIG_ERROR', 'Agent cần tiếp tục không còn trong nhóm')
-    continuedChains.add(key)
-    try {
-      const chain = newChain(root)
-      await post(root, 'system', `Tiếp tục chuỗi với ${targets.map(target => `@${target.name}`).join(' ')}.`,
-        { kind: 'chain-continue', continuedFrom: stop.seq, runId: chain.id })
-      await route(root, { from: 'user', text: targets.map(target => `@${target.name}`).join(' ') }, 0, chain)
-      return { chainId: chain.id }
-    } catch (e) { continuedChains.delete(key); throw e }
+
+    let childChainId = null, alreadyContinued = false, claim = null
+    updateControlStore(root, s => {
+      const existing = s.claims[claimKey]
+      if (existing) {
+        childChainId = existing.childChainId
+        alreadyContinued = true
+        claim = existing
+        return
+      }
+      childChainId = randomUUID()
+      claim = {
+        kind: 'continue',
+        stopId,
+        childChainId,
+        at: new Date().toISOString(),
+        dispatches: targets.map(t => ({ agent: t.name, state: 'reserved', runId: null }))
+      }
+      s.claims[claimKey] = claim
+      if (s.stops[stopId]) {
+        s.stops[stopId].state = {
+          ...s.stops[stopId].state,
+          phase: 'continued',
+          canContinue: false,
+          continuedTo: childChainId
+        }
+      }
+    })
+
+    if (alreadyContinued) {
+      const existingChain = activeChains.get(childChainId)
+      return {
+        chainId: childChainId,
+        alreadyContinued: true,
+        state: existingChain ? getChainView(root, existingChain) : (store.stops[stopId]?.state || null)
+      }
+    }
+
+    continuedChains.add(legacyKey)
+    if (originChain) {
+      originChain.state = 'continued'
+      originChain.continuedTo = childChainId
+      saveStopRecord(root, originChain)
+    }
+
+    const childChain = newChain(root, { id: childChainId, stopId: childChainId })
+    await postOnce(root, 'continue:' + stopId, 'system', `Tiếp tục chuỗi với ${targets.map(target => `@${target.name}`).join(' ')}.`,
+      { kind: 'chain-continue', continuedFrom: stop.seq, stopId, childChainId, runId: childChainId, targets: targets.map(t => t.name) })
+
+    for (const target of targets) {
+      updateControlStore(root, s => {
+        const c = s.claims[claimKey]
+        const d = c?.dispatches?.find(x => x.agent === target.name)
+        if (d) d.state = 'dispatching'
+      })
+      const triggerMsg = { from: 'system', text: `Tiếp tục chuỗi với @${target.name}.`, seq: stop.seq }
+      const job = await ask(root, target, 0, null, childChain, triggerMsg)
+      updateControlStore(root, s => {
+        const c = s.claims[claimKey]
+        const d = c?.dispatches?.find(x => x.agent === target.name)
+        if (d) {
+          d.state = 'admitted'
+          d.runId = job?.runId || null
+        }
+      })
+    }
+    return { chainId: childChain.id, alreadyContinued: false, state: getChainView(root, childChain) }
+  })
+})
+ipcMain.handle('chainState', (event, dir, request) => {
+  validSender(event)
+  return apiCall(async () => {
+    const root = knownProject(dir), id = request?.messageId
+    let stop = null
+    if (Number.isInteger(id) && id >= 0) stop = (await core.logPage(root, { around: id, limit: 1 })).messages[0]
+    else if (typeof id === 'string' && id) {
+      let before
+      do {
+        const page = await core.logPage(root, { ...(before == null ? {} : { before }), limit: 100 })
+        stop = page.messages.find(message => message.stopId === id || message.chainId === id || message.runId === id)
+        before = page.hasBefore ? page.start : null
+      } while (!stop && before != null)
+    }
+    if (!stop || stop.kind !== 'chain-stop') throw gitError('INVALID_ARGUMENT', 'Không tìm thấy thẻ dừng')
+    const stopId = stop.stopId || stop.chainId || stop.runId || String(stop.seq)
+    const store = readControlStore(root)
+    if (store.corrupted) {
+      return {
+        state: {
+          stopId,
+          chainId: stop.chainId || stopId,
+          box: core.chatName(root),
+          revision: '0',
+          phase: 'unavailable',
+          reason: { code: 'restart-interrupted', text: 'File điều phối hỏng' },
+          threshold: 3,
+          idleRunIds: [],
+          turns: 0,
+          limit: 12,
+          costUsd: 0,
+          costIncomplete: false,
+          pending: [],
+          running: [],
+          canContinue: false,
+          continuedTo: null
+        }
+      }
+    }
+    const chain = activeChains.get(stop.chainId || stopId)
+    if (chain) {
+      return { state: getChainView(root, chain) }
+    }
+    const saved = store.stops[stopId]
+    if (saved) {
+      const claim = store.claims['continue:' + stopId]
+      const view = { ...saved.state }
+      if (claim) {
+        view.phase = 'continued'
+        view.canContinue = false
+        view.continuedTo = claim.childChainId
+      }
+      return { state: view }
+    }
+    const continued = (await core.getLogIndex(root)).records.some(r => r.kind === 'chain-continue' && (r.continuedFrom === stop.seq || r.stopId === stopId))
+    const view = {
+      stopId,
+      chainId: stop.chainId || stopId,
+      box: core.chatName(root),
+      revision: '1',
+      phase: continued ? 'continued' : 'ready',
+      reason: { code: 'no-progress', text: stop.text || 'Dừng chuỗi' },
+      threshold: 3,
+      idleRunIds: [],
+      turns: 0,
+      limit: 12,
+      costUsd: stop.costUsd || 0,
+      costIncomplete: !!stop.costIncomplete,
+      pending: (stop.targets || []).map(agent => ({ agent, sourceSeqs: [stop.seq], taskIds: [], uncertain: false })),
+      running: [],
+      canContinue: !continued,
+      continuedTo: null
+    }
+    return { state: view }
   })
 })
 ipcMain.handle('send', async (event, dir, text) => {
@@ -3143,7 +3822,15 @@ else app.whenReady().then(() => {
     }
   })
   if (maximized) win.maximize()
-  nativeTheme.on('updated', () => win.setBackgroundColor(windowBg()))
+  const onThemeUpdated = () => {
+    if (!win || win.isDestroyed()) return
+    win.setBackgroundColor(windowBg())
+  }
+  nativeTheme.on('updated', onThemeUpdated)
+  win.on('closed', () => {
+    nativeTheme.removeListener('updated', onThemeUpdated)
+    win = null
+  })
   win.on('close', () => {
     closeCurrentPreview()
     try { core.atomicWrite(windowFile(), JSON.stringify({ ...win.getNormalBounds(), maximized: win.isMaximized() })) } catch {}
