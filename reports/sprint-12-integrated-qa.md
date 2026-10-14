@@ -45,3 +45,7 @@ Electron: techlead đã chạy 19/19; QA không cần lặp bộ bố cục T56 
 - Giao thức hiện tại chỉ tạo review record khi người gửi là assignee; run-command của PM liên kết được task bất kỳ nhưng vẫn phải khớp source SHA/workspace của review hiện hành. Vì vậy không thể dùng riêng lần check PM hoặc T55 để thay review đúng bản của T51/T53.
 - Sau QA, PM điều phối bàn giao bằng chứng trên bản cuối: chủ task hiện hữu chỉ đồng bộ bản đã nghiệm thu, gửi check có liên kết task và review đúng SHA; phần viết/sửa code tiếp tục do techlead phụ trách. Đây là bước ghi nhận bàn giao, không mở lại hai nhánh triển khai. Nếu app không thực hiện được, báo rõ giới hạn, giữ task mở; không tự sửa hồ sơ userData hay nới cổng done.
 - T55 có hồ sơ mới nêu trên nhưng còn chờ phản hồi bố cục trên box thật; nếu QA đổi code/test, kiểm lại tính hiệu lực của hồ sơ trước khi duyệt. Sprint 12 chưa đóng và chưa yêu cầu End-User thử bản mới trong lúc QA đang nghiệm thu.
+
+## Kết quả QA sau bản tích hợp
+
+QA báo toàn suite trên `51b3909` đạt và tới marker cuối; probe mới dùng payload BE thật phát hiện FE khóa Tiếp tục của stop con `interrupted/canContinue:true`. T52 chưa đạt; techlead sửa tiếp T53 theo [yêu cầu recovery UI](sprint-12-recovery-ui.md), có patch test QA đã tách khỏi lịch sử nhánh đang xung đột. QA chưa chạy lại Electron hoặc thử box thật trong lượt này.

@@ -1,0 +1,75 @@
+diff --git a/check.js b/check.js
+index d56857a..41dc6a4 100644
+--- a/check.js
++++ b/check.js
+@@ -1853,7 +1853,7 @@ async function rendererS11Checks() {
+   console.log('ok (sprint 11 FE task verification & evidence)')
+ }
+ 
+-async function rendererS12Checks() {
++async function rendererS12Checks(recovered = null) {
+   const ui = fs.readFileSync(path.join(__dirname, 'renderer.js'), 'utf8'), vm = require('vm')
+   const html = fs.readFileSync(path.join(__dirname, 'index.html'), 'utf8')
+ 
+@@ -2144,6 +2144,21 @@ async function rendererS12Checks() {
+   assert.strictEqual(btn.textContent, 'Đã tiếp tục')
+   assert.strictEqual(btn.disabled, true, 'button must be disabled when continued')
+ 
++  // Recovery can leave an interrupted chain with safe pending work; use the actual IPC payload.
++  if (recovered) {
++    const { message, state } = recovered
++    assert.ok(state.pending.some(p => !p.uncertain) && state.canContinue, 'fixture phải còn phần chắc chắn chưa chạy')
++    chainStateResponses.set(String(message.seq), { ok: true, state })
++    const recoveredNode = el('div', 'sys')
++    ctx.renderChainStopCard(message, recoveredNode)
++    await new Promise(r => setImmediate(r))
++    const resume = recoveredNode.querySelector('button')
++    assert.strictEqual(resume.disabled, false,
++      `T52-recovery-ui: BE cho phép Tiếp tục nhưng FE khóa nút: ${JSON.stringify({ phase: state.phase, canContinue: state.canContinue, pending: state.pending })}`)
++    await resume.onclick()
++    assert.strictEqual(continueChainCalls.at(-1).opts.messageId, message.seq, 'stop con gửi đúng seq, không cần runId')
++  }
++
+   console.log('ok (sprint 12 FE chain-stop & merge details)')
+ }
+ 
+@@ -2436,14 +2451,23 @@ async function rendererT56Checks() {
+ async function rendererT52Checks() {
+   const ui = fs.readFileSync(path.join(__dirname, 'renderer.js'), 'utf8'), vm = require('vm')
+   const from = ui.indexOf('function handleChainChanged'), to = ui.indexOf('\n// ----', from)
+-  const channel = new Set(), applied = []
+-  const preloadLike = { // same shape as preload.js: both register on the one ipc channel
+-    onChainChanged: fn => { const h = (...a) => fn(...a); channel.add(h); return () => channel.delete(h) },
+-    on: (name, fn) => { const h = (...a) => fn(...a); if (name === 'chain-changed') channel.add(h); return () => channel.delete(h) } }
+-  const ctx = vm.createContext({ api: preloadLike, dir: '/box', openingDir: null, pendingEvents: [], activeChainUnbinds: [], applyChainViewUpdate: st => applied.push(st) })
+-  vm.runInContext(ui.slice(from, to), ctx)
+-  for (const h of channel) h('/box', { stopId: 's1', revision: '2', phase: 'ready' }) // one event from main reaches every listener on the channel
+-  assert.strictEqual(applied.length, 1, `T53: một event chain-changed bị xử lý ${applied.length} lần (renderer đăng ký cả onChainChanged lẫn on('chain-changed'))`)
++  for (const mode of ['both', 'dedicated', 'generic']) {
++    const channel = new Set(), applied = [], unbinds = []
++    const subscribe = fn => { const h = (...a) => fn(...a); channel.add(h); return () => channel.delete(h) }
++    const preloadLike = { // Both preload APIs subscribe to the same channel.
++      ...(mode !== 'generic' && { onChainChanged: subscribe }),
++      ...(mode !== 'dedicated' && { on: (name, fn) => name === 'chain-changed' ? subscribe(fn) : () => {} }) }
++    const ctx = vm.createContext({ api: preloadLike, dir: '/box', openingDir: null, pendingEvents: [], activeChainUnbinds: unbinds, applyChainViewUpdate: st => applied.push(st) })
++    vm.runInContext(ui.slice(from, to), ctx)
++    assert.strictEqual(channel.size, 1, `${mode}: chỉ một listener chain-changed`)
++    for (const h of channel) h('/another-project', { stopId: 'other', revision: '1' })
++    assert.strictEqual(applied.length, 0, `${mode}: bỏ event của dự án khác`)
++    for (const h of channel) h('/box', { stopId: 's1', revision: '2', phase: 'ready' })
++    assert.strictEqual(applied.length, 1, `${mode}: một event chỉ xử lý một lần`)
++    assert.strictEqual(unbinds.length, 1)
++    unbinds[0]()
++    assert.strictEqual(channel.size, 0, `${mode}: callback unsubscribe gỡ đúng listener`)
++  }
+   console.log('ok (T52 chain-changed listener)')
+ }
+ 
+@@ -3660,6 +3684,7 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
+   assert.ok(eView.phase === 'continued' && !eView.canContinue)
+   const childView = (await call('chainState', root, { messageId: crashedChild })).state
+   assert.ok(childView.canContinue && childView.pending.some(p => p.agent === waitingAgent && !p.uncertain && p.sourceSeqs.length && p.taskIds.includes('T908')), JSON.stringify(childView))
++  await rendererS12Checks({ message: eStop, state: childView })
+   await call('chainState', root, { messageId: crashedChild }); await call('continueChain', root, { messageId: s12.stopB.seq })
+   assert.strictEqual(log().filter(m => m.kind === 'chain-stop' && m.chainId === crashedChild).length, 1, 'không đăng lặp stop con')
+   const childMark = log().length, childAction = await call('continueChain', root, { messageId: crashedChild })
