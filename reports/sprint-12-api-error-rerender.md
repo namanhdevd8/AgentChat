@@ -41,3 +41,23 @@ Không cần sửa nhánh PM hoặc metadata hàng chờ để gỡ lượt đ�
 QA báo Electron bị **SIGABRT trong khởi tạo macOS trước fixture**: chưa có kết quả nghiệm thu Electron của lượt này, cũng chưa có box thật. Đây là giới hạn kiểm tra riêng, không đủ để kết luận tính năng sai hoặc đạt. Giữ output exit/signal; không tự lặp Electron để tìm lần chạy được. Chẩn đoán khởi tạo có giới hạn nếu cần để kiểm UI sau sửa, không thay cấu hình máy hoặc dependency ngoài phạm vi.
 
 Sau sửa, kiểm ca hồi quy rồi chạy `npm run check` một lần, giữ marker cuối; báo SHA/lệnh/exit code và phạm vi còn thiếu. Techlead bàn giao PM, PM gọi QA kiểm độc lập trên bản gộp. T53 giữ Đang làm; T52 giữ Chờ duyệt với kết luận chưa đạt; T51/T55 chưa đóng; T54/T57/T56 giữ Xong. PM lượt này chỉ đọc code/log và ghi báo cáo/patch, không chạy lại sản phẩm.
+
+## Nhận bản sửa 5430367 và bàn giao QA
+
+Nguồn techlead **`5430367af930aa65fd12ca66414b0fe4bf1aa6c5`** chỉ đổi renderer.js, check.js và [báo cáo sửa](sprint-12-api-error-rerender-fix.md). PM đối chiếu diff: lỗi được giữ ngoài DOM và dùng chung hai vị trí; event mới đúng stop hoặc lần đọc trạng thái bắt đầu sau lỗi mới được xác nhận lại. Nút **Kiểm tra lại** chỉ gọi chainState, không chạy agent. Đây là đường phục hồi của lỗi đang sửa, không đổi phạm vi sản phẩm.
+
+Đã xác minh gộp vào main **`7b30ac89db815c2aaf4411d556924a6d826a44b6`**: queue `e35e01cb-0bdc-4ede-95a9-ded195574048` merged lúc 18:40:07 UTC ngày 2026-10-14. Hồ sơ `bda27514-a918-49b6-b048-bf59f58041e2` passed, npm run check exit 0, 99,126 giây, treeStable. TaskRefs/reviewIds rỗng nên chưa dùng đóng các task code. Mục queue thứ hai cùng source cũng đã kết thúc merged, không cần gộp lại bản sửa.
+
+Fixture publish dùng check thật, chặn kết quả trước publisher bằng barrier có timeout, chờ terminal/facts hoàn tất và dùng Git lock trong harness khi đổi nhánh; vẫn kiểm TARGET_CHANGED, candidate/checkId, retry và superseded. Không thêm test API vào main. Techlead báo check tổng sau điều chỉnh đạt; chưa kiểm lại Electron hoặc box thật.
+
+Techlead còn phát hiện fixture recovery trước lấy JSONL thô thiếu seq, nên phép so sánh undefined với undefined chưa chứng minh gửi đúng ID. Bản mới lấy stop qua IPC logPage và bắt buộc seq là số nguyên. QA phải kiểm điều này trên dữ liệu mới, không dùng kết luận “đúng seq” của fixture cũ làm bằng chứng thay thế.
+
+Sau khi bản sửa gộp đạt, QA nhận T52 kiểm độc lập:
+
+1. Lỗi Tiếp tục từ cả chat/Cần bạn giữ khóa ở cả hai vị trí sau render lại, event stop khác, revision cũ/không hợp lệ hoặc box khác; cache/embedded/fallback đều được bao phủ. Kiểm cả nút dựng lại, không chỉ biến giữ nút cũ.
+2. Event mới đúng stop chỉ mở nếu BE cho phép. “Kiểm tra lại” đọc mới sau lỗi có thể xác nhận cùng revision; request đọc bắt đầu trước lỗi, sai stop/box hoặc dữ liệu cũ không xóa lỗi mới. Nút này không gọi continueChain và không spawn agent; không làm mất nhãn uncertain.
+3. Đổi box/callback muộn, chống bấm trùng giữa hai vị trí, recovery interrupted true/false và seq số nguyên từ logPage thật vẫn đúng. Giữ các ca tích hợp đã đạt khi đồng bộ main; không đưa check.js từ lịch sử QA cũ trở lại.
+4. Soát barrier fixture publish: check thật chạy xong, không bịa pass, timeout/finally không treo, giữ mọi assertion lỗi publish/retry/superseded. Chạy npm run check một lần và xác nhận marker cuối. Không chạy thêm vòng chỉ để tìm lần xanh.
+5. Electron chỉ kiểm luồng Tiếp tục/“Kiểm tra lại” liên quan nếu khởi tạo được; lưu exit/signal nếu SIGABRT tái diễn trước fixture, không lặp bộ bố cục. Báo tách biệt DOM/module restart, Electron thật và box End-User chưa kiểm.
+
+Đầu ra: SHA, lệnh/exit code, ca đạt/lỗi/chưa kiểm và review T52. T52 chuyển Đang làm khi PM gọi; T51/T53/T55 tiếp tục mở, chỉ bổ sung bằng chứng đúng task trên bản cuối sau QA. PM chưa tự chạy lại sản phẩm trong lượt nhận bàn giao này.
