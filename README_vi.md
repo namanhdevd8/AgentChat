@@ -61,7 +61,8 @@ cần bạn quyết sẽ hiện ở một chỗ duy nhất là mục **Cần b�
 - Mỗi agent có phạm vi file riêng (`owns`). Khi các agent dùng chung folder, phạm vi trở thành khóa, nên hai agent không
   bao giờ sửa cùng file một lúc.
 - Tuỳ chọn worktree Git riêng cho từng agent. Mỗi lượt được commit vào nhánh riêng của agent, và hàng chờ merge chạy lệnh
-  kiểm tra của bạn (ví dụ `npm run check`) trước khi gộp vào nhánh chính.
+  kiểm tra của bạn (ví dụ `npm run check`) trước khi gộp vào nhánh chính. Mỗi lượt vào nhánh chính thành đúng một commit
+  (squash) mang tên agent và task, ví dụ `dev-be · T43 Xem diff mỗi lượt`, nên lịch sử là một đường thẳng.
 - Sau mỗi lượt, app so ảnh chụp file với phạm vi của agent và cảnh báo nếu agent sửa ngoài phạm vi.
 - Quyền công cụ riêng cho từng agent, và danh sách lệnh được phép mà app chạy thay cho agent.
 
@@ -73,6 +74,8 @@ cần bạn quyết sẽ hiện ở một chỗ duy nhất là mục **Cần b�
 **Khung xem tích hợp**
 - Mở Markdown, file văn bản, mã nguồn, ảnh và SVG từ link trong chat.
 - Xem trước HTML trong sandbox: không chạy JavaScript, không gửi request mạng.
+- Tab **Dự án** ở panel phải hiện cây file của thư mục chính, của nhánh chưa gộp của một agent, hoặc của một commit gần
+  đây. File đã đổi có nhãn M, A, D, U; bấm để xem diff, chuột phải để chép đường dẫn tương đối hoặc đầy đủ.
 
 **Cài đặt**
 - Cửa sổ cài đặt có ô tìm kiếm: font giao diện và cỡ chữ tin nhắn, vị trí cài từng CLI, tài khoản nào đã đăng nhập.

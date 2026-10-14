@@ -19,6 +19,8 @@ if (process.isMainFrame !== false) {
     stopMerge: (dir, request) => ipcRenderer.invoke('stopMerge', dir, request),
     requestMergeRepair: (dir, request) => ipcRenderer.invoke('requestMergeRepair', dir, request),
     files: dir => ipcRenderer.invoke('files', dir),
+    projectTree: (dir, source = null) => ipcRenderer.invoke('projectTree', dir, source),
+    fileDiff: (dir, source, file) => ipcRenderer.invoke('fileDiff', dir, source, file),
     continueChain: (dir, request) => ipcRenderer.invoke('continueChain', dir, request),
     send: (dir, text) => ipcRenderer.invoke('send', dir, text),
     retract: (dir, seq) => ipcRenderer.invoke('retract', dir, seq),

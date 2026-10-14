@@ -231,11 +231,11 @@ async function startWorkspace(job) {
       if (unmerged.length || files.some(file => isChatPath(file) || !core.scopeAllows(job.scope, file)))
         throw gitError('DIRTY_WORKSPACE', `Workspace của ${job.name} có thay đổi chưa được app ghi nhận: ${files.slice(0, 5).join(', ')}${files.length > 5 ? '…' : ''}`)
       await git(cwd, ['add', '--', ...files])
-      await git(cwd, ['-c', 'user.name=Agent Chat', '-c', 'user.email=agent-chat@local', 'commit', '-m', `agent ${job.name}: thay đổi còn lại từ lượt trước`])
+      await git(cwd, ['-c', 'user.name=Agent Chat', '-c', 'user.email=agent-chat@local', 'commit', '-m', `${job.name} · Thay đổi còn lại từ lượt trước`])
     }
-    const head = await gitHead(cwd), behind = await git(cwd, ['merge-base', '--is-ancestor', head, probe.sha]).then(() => true).catch(() => false)
-    const ahead = Number((await git(cwd, ['rev-list', '--count', `${probe.sha}..${head}`])).stdout.trim() || 0)
-    if (behind && !ahead && head !== probe.sha) await git(cwd, ['merge', '--ff-only', probe.sha])
+    // everything on the branch is already in main (merged, or squashed into it): start from main
+    const head = await gitHead(cwd)
+    if (head !== probe.sha && await contained(job.root, head, record, probe.sha)) await git(cwd, ['reset', '-q', '--hard', probe.sha])
     job.depsReady = await bootstrapDependencies(job.root, cwd)
     job.baseSha = await gitHead(cwd)
   })
@@ -254,14 +254,17 @@ async function worktreeState(root) {
   const registry = readWorktrees(root), agents = []
   for (const record of registry.agents) {
     let ahead = 0
-    try { ahead = Number((await git(root, ['rev-list', '--count', `${probe?.sha || registry.targetSha}..${record.branch}`])).stdout.trim() || 0) } catch {}
+    try {
+      ahead = Number((await git(root, ['rev-list', '--ignore-missing', '--count', record.branch, '--not', probe?.sha || registry.targetSha,
+        ...(record.merged || [])])).stdout.trim() || 0)
+    } catch {}
     agents.push({ name: record.agent, workspaceId: record.id, branch: record.branch, ahead,
       busy: jobs.some(job => job.root === root && job.workspaceId === record.id && !job.finished) })
   }
   const queue = await Promise.all(registry.queue.filter(entry => !entry.supersededBy).map(async entry => {
     // Old registries keep failed attempts even after a retry (or a later commit) was merged.
     if (probe?.branch === registry.targetRef && RETRYABLE_MERGE_STATES.includes(entry.state)
-      && await git(root, ['merge-base', '--is-ancestor', entry.headSha, probe.sha]).then(() => true).catch(() => false))
+      && await contained(root, entry.headSha, registry.agents.find(item => item.id === entry.workspaceId), probe.sha))
       entry = { ...entry, state: 'merged', error: null }
     return { id: entry.id, agent: entry.agent, headSha: entry.headSha, state: entry.state, label: queueLabel(entry),
       error: entry.error || null, canRetry: RETRYABLE_MERGE_STATES.includes(entry.state),
@@ -351,6 +354,18 @@ async function workspaceChanges(cwd) {
   return [...new Set([...tracked, ...staged, ...untracked])]
 }
 
+// "dev-be · T43 Xem diff mỗi lượt", or the files a turn without a task touched: one line per turn in main's history
+async function turnSubject(job, result, files) {
+  const ids = core.parseTaskStatusBlock(result.text || '').changes?.map(change => change.id) || job.taskIds
+  let title = null
+  if (ids.length) try { title = (await core.taskBoardIndexed(job.root)).tasks.find(task => task.id === ids[0])?.title } catch {}
+  const names = [...new Set(files.map(file => path.basename(file)))]
+  const what = ids.length ? `${ids.slice(0, 3).join(' ')}${title ? ` ${title}` : ''}`
+    : names.length ? `Sửa ${names.slice(0, 3).join(', ')}${names.length > 3 ? ` +${names.length - 3}` : ''}` : 'Cập nhật'
+  const subject = `${job.name} · ${what}${result.outcome === 'success' ? '' : ' (lượt chưa xong)'}`.replace(/\s+/g, ' ')
+  return subject.length > 72 ? `${subject.slice(0, 71)}…` : subject
+}
+
 async function commitWorkspace(job, result, changed, auditComplete, outside) {
   if (!job.worktree || result.orphanState) return null
   return withGitLock(job.root, async () => {
@@ -374,23 +389,24 @@ async function commitWorkspace(job, result, changed, auditComplete, outside) {
       if (files.length) throw gitError('SCOPE_AUDIT', 'Không tự commit vì thay đổi chưa qua kiểm tra phạm vi', { files })
       return null
     }
-    let headSha = beforeHead
+    let headSha = beforeHead, subject = null
     if (files.length) {
       await git(cwd, ['add', '--', ...files])
       const staged = nul((await git(cwd, ['diff', '--cached', '--no-renames', '--name-only', '-z', 'HEAD'])).stdout)
       if (!staged.length || staged.some(file => !files.includes(file) || !core.scopeAllows(job.scope, file)))
         throw gitError('SCOPE_AUDIT', 'Tập file chuẩn bị commit không hợp lệ', { files: staged })
-      const ids = job.taskIds.length ? ` [${job.taskIds.join(', ')}]` : ''
-      const message = `agent ${job.name}${ids}: ${result.outcome === 'success' ? 'hoàn tất lượt' : 'checkpoint lượt chưa hoàn tất'}`
-      await git(cwd, ['-c', 'user.name=Agent Chat', '-c', 'user.email=agent-chat@local', 'commit', '-m', message, '-m', `Agent-Chat-Run: ${job.runId}`])
+      subject = await turnSubject(job, result, staged)
+      await git(cwd, ['-c', 'user.name=Agent Chat', '-c', 'user.email=agent-chat@local', 'commit', '-m', subject, '-m', `Agent-Chat-Run: ${job.runId}`])
       headSha = await gitHead(cwd)
     }
-    const probe = await repoProbe(job.root), ahead = await git(job.root, ['merge-base', '--is-ancestor', headSha, probe.sha]).then(() => false).catch(() => true)
+    const probe = await repoProbe(job.root), ahead = !await contained(job.root, headSha, record, probe.sha)
     if (result.outcome === 'success' && ahead) {
       const settings = core.projectSettings(job.root).settings
+      // the agent committed by itself: name the squash after what the turn changed
+      subject ??= await turnSubject(job, result, nul((await git(cwd, ['diff', '--no-renames', '--name-only', '-z', job.baseSha, headSha])).stdout))
       updateRegistry(job.root, latest => {
         if (!latest.queue.some(entry => entry.runId === job.runId && entry.headSha === headSha)) latest.queue.push({ id: randomUUID(), agent: job.name,
-          runId: job.runId, workspaceId: job.workspaceId, headSha, checks: [...settings.mergeChecks], state: 'queued',
+          runId: job.runId, workspaceId: job.workspaceId, headSha, subject, checks: [...settings.mergeChecks], state: 'queued',
           baseSha: probe.sha, candidateSha: null, error: null,
           pgid: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() })
         latest.targetSha = probe.sha
@@ -423,7 +439,27 @@ function updateEntry(root, id, change) {
   })
   return entry
 }
-const isAncestor = (root, sha, of) => git(root, ['merge-base', '--is-ancestor', sha, of]).then(() => true).catch(() => false)
+// Merges are squashed, so the agent's own commits never reach main's history. A commit's changes are in main when it is
+// reachable from main or from a head already squashed into it (record.merged).
+async function contained(root, sha, record, mainSha) {
+  const out = await git(root, ['rev-list', '--ignore-missing', '--count', sha, '--not', mainSha, ...(record?.merged || [])]).catch(() => null)
+  return out?.stdout.trim() === '0'
+}
+function rememberMerged(registry, entry) {
+  const record = registry.agents.find(item => item.id === entry.workspaceId)
+  // ponytail: last 50 heads; an older failed entry may show "Thử lại" again, and the retry finds nothing left to merge
+  if (record && !record.merged?.includes(entry.headSha)) record.merged = [...(record.merged || []), entry.headSha].slice(-50)
+}
+// After a squash the agent's branch no longer leads to main: an idle, clean workspace is moved onto main now, a busy one
+// when its next turn starts (startWorkspace)
+async function syncWorkspace(root, workspaceId, mainSha) {
+  if (jobs.some(job => job.root === root && job.workspaceId === workspaceId && !job.finished)) return
+  const record = readWorktrees(root).agents.find(item => item.id === workspaceId)
+  if (!record) return
+  const cwd = await verifyWorkspace(root, record), head = await gitHead(cwd)
+  if (head !== mainSha && !(await workspaceChanges(cwd)).length && await contained(root, head, record, mainSha))
+    await git(cwd, ['reset', '-q', '--hard', mainSha])
+}
 
 async function processMerge(root, id) {
   let entry = readWorktrees(root).queue.find(item => item.id === id)
@@ -452,10 +488,12 @@ async function processMerge(root, id) {
       await emitWorktreeState(root)
       probe = await repoProbe(root, { requireClean: true })
       if (probe.branch !== readWorktrees(root).targetRef) throw gitError('TARGET_CHANGED', 'Nhánh chính đã đổi ngoài app')
-      if (await isAncestor(root, entry.headSha, probe.sha)) {
-        updateEntry(root, id, (item, registry) => { item.state = 'merged'; item.updatedAt = now(); registry.targetSha = probe.sha })
+      const alreadyMerged = async () => {
+        updateEntry(root, id, (item, registry) => { item.state = 'merged'; item.updatedAt = now(); registry.targetSha = probe.sha; rememberMerged(registry, item) })
+        await syncWorkspace(root, entry.workspaceId, probe.sha).catch(e => console.error(e))
         return true
       }
+      if (await contained(root, entry.headSha, readWorktrees(root).agents.find(item => item.id === entry.workspaceId), probe.sha)) return alreadyMerged()
       const base = (await git(root, ['merge-base', probe.sha, entry.headSha])).stdout.trim()
       const files = nul((await git(root, ['diff', '--no-renames', '--name-only', '-z', `${base}..${entry.headSha}`])).stdout)
       const scope = core.normalizeScope(owner, root)
@@ -464,14 +502,17 @@ async function processMerge(root, id) {
       updateEntry(root, id, item => { item.baseSha = probe.sha })
       fs.mkdirSync(path.dirname(integration), { recursive: true })
       await git(root, ['worktree', 'add', '--detach', integration, probe.sha])
-      try { await git(integration, ['merge', '--no-ff', '--no-commit', entry.headSha]) }
+      try { await git(integration, ['merge', '--squash', entry.headSha]) }
       catch (e) {
         const conflicts = nul((await git(integration, ['diff', '--name-only', '--diff-filter=U', '-z'])).stdout)
         if (conflicts.length) throw gitError('CONFLICT', 'Nhánh xung đột với thay đổi đã gộp', { files: conflicts })
         throw e
       }
+      // a branch whose changes main already has (squashed earlier, or the agent merged main and kept nothing new)
+      if (!(await git(integration, ['diff', '--cached', '--name-only'])).stdout.trim()) { await removeIntegration(root, entry); return alreadyMerged() }
       if (!await bootstrapDependencies(root, integration)) throw gitError('NEEDS_DEPS', 'Integration worktree chưa có dependency phù hợp')
-      await git(integration, ['-c', 'user.name=Agent Chat', '-c', 'user.email=agent-chat@local', 'commit', '-m', `merge agent ${entry.agent}`, '-m', `Agent-Chat-Queue: ${entry.id}`])
+      await git(integration, ['-c', 'user.name=Agent Chat', '-c', 'user.email=agent-chat@local', 'commit', '-m', entry.subject || `${entry.agent} · Cập nhật`,
+        '-m', `Agent-Chat-Queue: ${entry.id}`])
       const candidateSha = await gitHead(integration)
       entry = updateEntry(root, id, item => { item.candidateSha = candidateSha; item.state = 'checking'; item.updatedAt = now() })
       return false
@@ -514,8 +555,9 @@ async function processMerge(root, id) {
       await git(root, ['merge', '--ff-only', '--no-edit', '--no-overwrite-ignore', '--no-autostash', entry.candidateSha])
       const published = await gitHead(root)
       if (published !== entry.candidateSha) throw gitError('TARGET_CHANGED', 'Không xác minh được commit đã xuất bản')
-      updateEntry(root, id, (item, registry) => { item.state = 'merged'; item.error = null; item.updatedAt = now(); registry.targetSha = published })
+      updateEntry(root, id, (item, registry) => { item.state = 'merged'; item.error = null; item.updatedAt = now(); registry.targetSha = published; rememberMerged(registry, item) })
       await removeIntegration(root, entry)
+      await syncWorkspace(root, entry.workspaceId, published).catch(e => console.error(e)) // main is already published: a stuck workspace syncs at its next turn
     })
     if (!requeued) await post(root, 'system', `Đã gộp nhánh của ${entry.agent} sau khi kiểm tra đạt.`, { kind: 'merge', queueId: entry.id, owner: entry.agent, headSha: entry.headSha })
   } catch (e) {
@@ -1710,7 +1752,7 @@ ipcMain.handle('retryMerge', (event, dir, request) => {
       if (!old || !RETRYABLE_MERGE_STATES.includes(old.state)) throw gitError('INVALID_ARGUMENT', 'Mục gộp không thể thử lại')
       const probe = await repoProbe(root)
       if (probe.branch === registry.targetRef
-        && await git(root, ['merge-base', '--is-ancestor', old.headSha, probe.sha]).then(() => true).catch(() => false)) return
+        && await contained(root, old.headSha, registry.agents.find(item => item.id === old.workspaceId), probe.sha)) return
       const workspace = registry.agents.find(item => item.id === old.workspaceId)
       if (!workspace) throw gitError('CONFIG_ERROR', 'Workspace không còn tồn tại')
       const headSha = await gitHead(await verifyWorkspace(root, workspace)), settings = core.projectSettings(root).settings
@@ -1819,6 +1861,78 @@ ipcMain.handle('readProjectFile', async (event, dir, href, fromFile, workspaceId
   return { ...await core.readProjectFile(target.base, target.href, target.fromFile), workspace: target.workspace }
 })
 ipcMain.handle('saveImage', (event, dir, data) => { validSender(event); return apiCall(async () => ({ path: core.saveImage(knownProject(dir), data) })) })
+// ---- Right panel "Dự án": the files of the main folder or of an agent's worktree with what changed in it, or the files one
+// commit changed (Antigravity's Uncommitted / Branch / Agent Edits). Letters: M sửa, A thêm, D xoá, U mới chưa theo dõi.
+const TREE_LIMIT = 5000, DIFF_LIMIT = 512 * 1024
+function treeSource(root, source) {
+  if (source?.commit != null) {
+    if (!/^[0-9a-f]{40}$/.test(source.commit)) throw gitError('INVALID_ARGUMENT', 'Commit không hợp lệ')
+    return { cwd: root, commit: source.commit, workspaceId: null }
+  }
+  const workspaceId = source?.workspace || null
+  return { cwd: viewerRoot(root, workspaceId), commit: null, workspaceId }
+}
+const pairs = list => { const out = {}; for (let i = 0; i + 1 < list.length; i += 2) out[list[i + 1]] = list[i][0]; return out }
+// where the agent's branch left main: its changes since then, committed or not, are what it will merge
+const branchBase = async (root, cwd) => (await git(cwd, ['merge-base', 'HEAD', await gitHead(root)])).stdout.trim()
+
+async function projectTree(root, source) {
+  const { cwd, commit, workspaceId } = treeSource(root, source)
+  const big = { maxBuffer: 32 * 1024 * 1024 }
+  const isGit = await git(cwd, ['rev-parse', '--verify', '-q', 'HEAD']).then(() => true).catch(() => false)
+  let files = [], changes = {}
+  if (commit) {
+    changes = pairs(nul((await git(root, ['show', '--no-renames', '--name-status', '-z', '--diff-merges=first-parent', '--format=', commit], big)).stdout))
+    files = Object.keys(changes)
+  } else if (isGit) {
+    files = nul((await git(cwd, ['ls-files', '-z', '--cached', '--others', '--exclude-standard'], big)).stdout)
+    if (workspaceId) {
+      changes = pairs(nul((await git(cwd, ['diff', '--no-renames', '--name-status', '-z', await branchBase(root, cwd)], big)).stdout))
+      for (const file of nul((await git(cwd, ['ls-files', '-z', '--others', '--exclude-standard'], big)).stdout)) changes[file] = 'U'
+    } else {
+      const prefix = (await git(cwd, ['rev-parse', '--show-prefix'])).stdout.trim() // status paths are relative to the repo root
+      for (const item of nul((await git(cwd, ['status', '--porcelain=v1', '-z', '--untracked-files=all', '--no-renames'], big)).stdout)) {
+        const code = item.slice(0, 2), file = item.slice(3)
+        if (file.startsWith(prefix)) changes[file.slice(prefix.length)] = code === '??' ? 'U' : code.includes('D') ? 'D' : code.includes('A') ? 'A' : 'M'
+      }
+    }
+  } else {
+    async function walk(folder, prefix = '') {
+      for (const entry of await rawFs.promises.readdir(folder, { withFileTypes: true })) {
+        if (files.length >= TREE_LIMIT) return
+        const relative = prefix ? `${prefix}/${entry.name}` : entry.name
+        if (['.git', 'node_modules', '.DS_Store'].includes(entry.name) || (!prefix && entry.name === 'dist')) continue
+        if (entry.isDirectory()) await walk(path.join(folder, entry.name), relative)
+        else if (entry.isFile()) files.push(relative)
+      }
+    }
+    await walk(cwd)
+  }
+  files = files.filter(file => !isChatPath(file))
+  const commits = isGit || commit ? nul((await git(root, ['log', '-30', '-z', '--format=%H%x1f%s%x1f%cI']).catch(() => ({ stdout: '' }))).stdout)
+    .map(line => { const [sha, subject, at] = line.split('\x1f'); return { sha: sha.trim(), subject, at } }) : []
+  return { base: cwd, git: isGit || !!commit, files: files.slice(0, TREE_LIMIT), truncated: files.length > TREE_LIMIT, changes, commits,
+    workspaces: readWorktrees(root).agents.map(record => ({ id: record.id, agent: record.agent })) }
+}
+
+async function fileDiff(root, source, file) {
+  if (typeof file !== 'string' || !file || file.includes('\0') || path.isAbsolute(file) || file.split('/').includes('..') || isChatPath(file))
+    throw gitError('INVALID_ARGUMENT', 'Đường dẫn không hợp lệ')
+  const { cwd, commit, workspaceId } = treeSource(root, source)
+  const flags = ['--no-color', '--no-ext-diff', '--no-textconv'], big = { maxBuffer: 8 * 1024 * 1024 }
+  let text = (await git(cwd, commit ? ['show', ...flags, '--diff-merges=first-parent', '--format=', commit, '--', file]
+    : ['diff', ...flags, workspaceId ? await branchBase(root, cwd) : 'HEAD', '--', file], big)).stdout
+  if (!text && !commit) { // not tracked yet: the whole file is new
+    const read = await core.readProjectFile(cwd, file.split('/').map(encodeURIComponent).join('/'))
+    if (!read.ok) throw gitError(read.code, read.message)
+    const lines = read.file.content.replace(/\n$/, '').split('\n')
+    text = `--- /dev/null\n+++ b/${file}\n@@ -0,0 +1,${lines.length} @@\n${lines.map(line => `+${line}`).join('\n')}\n`
+  }
+  return { diff: text.slice(0, DIFF_LIMIT), truncated: text.length > DIFF_LIMIT }
+}
+ipcMain.handle('projectTree', (event, dir, source) => { validSender(event); return apiCall(() => projectTree(knownProject(dir), source)) })
+ipcMain.handle('fileDiff', (event, dir, source, file) => { validSender(event); return apiCall(() => fileDiff(knownProject(dir), source, file)) })
+
 ipcMain.handle('readImage', async (event, dir, href, fromFile, workspaceId) => {
   validSender(event)
   const root = knownProject(dir), target = viewerTarget(root, href, fromFile, workspaceId)

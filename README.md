@@ -63,7 +63,8 @@ own Git worktrees and report back in the chat. Anything that needs your decision
 **Safe parallel work**
 - Each agent has a file scope (`owns`). In shared-folder mode, scopes become locks so two agents never edit the same files at once.
 - Optional per-agent Git worktrees. Every turn is committed to the agent's own branch, and a merge queue runs your
-  checks (for example `npm run check`) before anything reaches the main branch.
+  checks (for example `npm run check`) before anything reaches the main branch. Each turn lands on the main branch as
+  one squashed commit named after the agent and its task, such as `dev-be · T43 Per-turn diff`, so history stays linear.
 - After every turn the app compares a file snapshot with the agent's scope and warns about edits outside it.
 - Per-agent tool permissions, and an allowlist of commands the app runs on the agent's behalf.
 
@@ -75,6 +76,8 @@ own Git worktrees and report back in the chat. Anything that needs your decision
 **Built-in viewer**
 - Opens Markdown, text and source files, images and SVG from links in the chat.
 - Previews HTML in a sandbox that runs no JavaScript and makes no network requests.
+- A **Project** tab in the right panel shows the file tree of the main folder, of an agent's unmerged branch or of a
+  recent commit, marks changed files (M, A, D, U), opens their diff, and copies a file's relative or full path.
 
 **Settings**
 - A searchable settings window: interface font and message size, where each CLI is installed, and whether each

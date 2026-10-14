@@ -214,6 +214,8 @@ const ICONS = {
   tasks: '<rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><path d="m9 14 2 2 4-4"/>',
   task: '<rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><path d="m9 14 2 2 4-4"/>',
   files: '<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/>',
+  folder: '<path d="M3 6.5A1.5 1.5 0 0 1 4.5 5h4.2l2 2.2h8.8A1.5 1.5 0 0 1 21 8.7v9.8a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 18.5Z"/>',
+  chev: '<path d="m9 5 7 7-7 7"/>',
   file: '<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/>',
   type: '<path d="M5 7V5h14v2M9.5 19h5M12 5v14"/>',
   terminal: '<path d="m5 7 5 5-5 5M12 18h7"/>',
@@ -446,6 +448,7 @@ async function openProject(d, c = d === dir ? box : null) {
   updateHeaderStats()
   renderTeam()
   refreshFiles()
+  resetTree()
   loadProjects()
   loadTasks()
   refreshNeeds()
@@ -3183,6 +3186,7 @@ function renderNeeds() {
   const items = [...perms, ...needs]
   $('#needs-sec').hidden = !items.length
   $('#needs-count').textContent = items.length
+  $('#aside-needs').textContent = items.length; $('#aside-needs').hidden = !items.length // seen from the "Dự án" tab too
   markActiveBadge()
   $('#needs').replaceChildren(...items.map(item => {
     const card = el('div', 'need')
@@ -3312,6 +3316,7 @@ let currentViewerPath = null
 let currentViewerCanExternal = false
 const fileHref = p => p.split('/').map(encodeURIComponent).join('/') // paths from main are literal, not URL-encoded
 let currentViewerHref = null
+let currentDiff = null // { file, source, label } while the viewer shows a diff instead of a file
 let currentViewerWorkspace = null
 let viewerGen = 0
 let lastFocusBeforeViewer = null
@@ -3588,6 +3593,7 @@ async function openFileViewer(href, fromFile = null, workspace = null) {
 
   currentViewerHref = href
   currentViewerWorkspace = workspace
+  currentDiff = null
 
   const storedLayout = loadViewerLayout()
   viewerNormalLayout = { width: storedLayout.width, height: storedLayout.height }
@@ -3783,6 +3789,7 @@ function closeViewer() {
   currentViewerHref = null
   currentViewerCanExternal = false
   currentViewerWorkspace = null
+  currentDiff = null
 
   const imgCtrl = $('#viewer-img-controls')
   if (imgCtrl) { imgCtrl.style = imgCtrl.style || {}; imgCtrl.style.display = 'none' }
@@ -4129,7 +4136,8 @@ setInterval(() => {
 
 $('#viewer-close').onclick = () => closeViewer()
 $('#viewer-reload').onclick = () => {
-  if (currentViewerHref) openFileViewer(currentViewerHref, null, currentViewerWorkspace)
+  if (currentDiff) openDiffViewer(currentDiff.file, currentDiff.source, currentDiff.label)
+  else if (currentViewerHref) openFileViewer(currentViewerHref, null, currentViewerWorkspace)
 }
 $('#viewer-external').onclick = async () => {
   if (currentViewerPath && currentViewerCanExternal) {
@@ -4487,6 +4495,7 @@ api.on('message', (d, m, meta) => {
     if (meta.totals) currentTotals = meta.totals
     updateHeaderStats()
     if (m.taskUpdates) loadTasks()
+    if (m.from !== 'user') reloadTreeSoon() // a turn or a merge may have changed files
 
     const log = $('#log')
     const nearBottom = (log.scrollHeight - log.clientHeight - log.scrollTop) <= 48
@@ -4573,6 +4582,7 @@ api.on('worktree-state', (d, state) => {
   if (d === dir) {
     worktreeState = state
     renderWorktreeUI()
+    reloadTreeSoon()
   }
 })
 
@@ -4633,5 +4643,181 @@ api.on('permissions-changed', (d, data) => {
     renderNeeds()
   }
 })
+
+// ---- Right panel tab "Dự án": the files of the main folder, of an agent's worktree, or of one commit, with what changed.
+// Click opens the file (or its diff when it changed); right-click copies its path.
+const TREE_STATUS = { M: 'đã sửa', A: 'mới thêm', D: 'đã xoá', U: 'mới, chưa commit' }
+let asideTab = 'overview', tree = null, treeSeq = 0, treeTimer = null, treeOpen = new Set()
+const treeSourceOf = value => value.startsWith('w:') ? { workspace: value.slice(2) } : value.startsWith('c:') ? { commit: value.slice(2) } : null
+
+function showAsideTab(name) {
+  asideTab = name; setPref('asideTab', name === 'tree' ? 'tree' : '')
+  for (const [tab, pane] of [['overview', '#aside-overview'], ['tree', '#tree-pane']]) {
+    $(`#aside-tab-${tab}`).classList.toggle('on', tab === name)
+    $(`#aside-tab-${tab}`).setAttribute('aria-selected', String(tab === name))
+    $(pane).hidden = tab !== name
+  }
+  if (name === 'tree') loadTree()
+}
+function resetTree() {
+  tree = null; treeOpen = new Set(); $('#tree-source').value = ''; $('#tree-filter').value = ''
+  $('#tree').replaceChildren(); $('#tree-summary').textContent = ''
+  if (asideTab === 'tree') loadTree()
+}
+function reloadTreeSoon() {
+  if (asideTab !== 'tree') return
+  clearTimeout(treeTimer); treeTimer = setTimeout(loadTree, 400)
+}
+async function loadTree() {
+  if (!dir || asideTab !== 'tree') return
+  const reqDir = dir, seq = ++treeSeq, value = $('#tree-source').value
+  const res = await api.projectTree(reqDir, treeSourceOf(value))
+  if (seq !== treeSeq || dir !== reqDir) return
+  if (!res.ok) {
+    if (value) { $('#tree-source').value = ''; return loadTree() } // the worktree is gone: back to the main folder
+    $('#tree').replaceChildren(el('div', 'none', res.error.message)); return
+  }
+  tree = { ...res, value, source: treeSourceOf(value) }
+  renderTreeSources(); renderTree()
+}
+function renderTreeSources() {
+  const select = $('#tree-source'), keep = select.value, group = label => { const g = el('optgroup'); g.label = label; return g }
+  const option = (value, text) => { const o = el('option', '', text); o.value = value; return o }
+  const agents = group('Nhánh của agent'), commits = group('Commit gần đây')
+  agents.append(...tree.workspaces.map(w => option(`w:${w.id}`, `@${w.agent} · chưa gộp`)))
+  const when = at => new Date(at).toDateString() === new Date().toDateString() ? hhmm(at) : new Date(at).toLocaleDateString('vi-VN', { day: '2-digit', month: '2-digit' })
+  commits.append(...tree.commits.map(c => option(`c:${c.sha}`, `${when(c.at)} · ${c.subject.length > 46 ? c.subject.slice(0, 45) + '…' : c.subject}`)))
+  select.replaceChildren(option('', 'Thư mục chính'), ...[agents, commits].filter(g => g.children.length))
+  select.value = [...select.options].some(o => o.value === keep) ? keep : ''
+}
+function treeLabel() {
+  if (tree.source?.workspace) return `nhánh @${tree.workspaces.find(w => w.id === tree.source.workspace)?.agent || 'agent'}`
+  if (tree.source?.commit) return tree.commits.find(c => c.sha === tree.source.commit)?.subject || tree.source.commit.slice(0, 7)
+  return 'chưa commit'
+}
+function renderTree() {
+  if (!tree) return
+  const { changes } = tree, q = fold($('#tree-filter').value.trim()), onlyChanged = $('#tree-changed').getAttribute('aria-pressed') === 'true' || !!tree.source?.commit
+  let files = [...new Set([...tree.files, ...Object.keys(changes)])] // a deleted file is only in the changes
+  if (onlyChanged) files = files.filter(f => changes[f])
+  if (q) files = files.filter(f => fold(f).includes(q))
+  const top = { dirs: new Map(), files: [] }
+  for (const f of files) {
+    let node = top
+    for (const [i, part] of f.split('/').slice(0, -1).entries()) {
+      if (!node.dirs.has(part)) node.dirs.set(part, { path: f.split('/').slice(0, i + 1).join('/'), dirs: new Map(), files: [], changed: false })
+      node = node.dirs.get(part)
+      if (changes[f]) node.changed = true
+    }
+    node.files.push(f)
+  }
+  const expandAll = !!q || onlyChanged, frag = document.createDocumentFragment(), byName = (a, b) => a.localeCompare(b, undefined, { numeric: true })
+  const row = (name, depth, kind, target) => {
+    const r = el('button', 'trow'); r.type = 'button'; r.setAttribute('role', 'treeitem'); r.style.setProperty('--depth', depth)
+    r.append(kind === 'folder' ? icon('chev', 'chev') : el('span', 'chev'), icon(kind), el('span', 'tname', name))
+    r.oncontextmenu = e => { e.preventDefault(); openTreeMenu(e, r, target, kind === 'folder') }
+    return r
+  }
+  const walk = (node, depth) => {
+    for (const [name, child] of [...node.dirs].sort(([a], [b]) => byName(a, b))) {
+      const open = expandAll || treeOpen.has(child.path), r = row(name, depth, 'folder', child.path)
+      r.setAttribute('aria-expanded', String(open)); r.title = child.path
+      if (child.changed) { const dot = el('span', 'tdot'); dot.title = 'Có file đã đổi bên trong'; r.append(dot) }
+      if (!expandAll) r.onclick = () => { treeOpen.has(child.path) ? treeOpen.delete(child.path) : treeOpen.add(child.path); renderTree() }
+      frag.append(r)
+      if (open) walk(child, depth + 1)
+    }
+    for (const f of node.files.sort((a, b) => byName(base(a), base(b)))) {
+      const s = changes[f], r = row(base(f), depth, 'file', f)
+      r.title = `${f}${s ? ` · ${TREE_STATUS[s]}` : ''}\nBấm để ${treeShowsDiff(f) ? 'xem thay đổi' : 'mở'} · chuột phải để chép đường dẫn`
+      if (s) { r.dataset.s = s; const tag = el('span', 'tstat', s); tag.dataset.s = s; r.append(tag) }
+      r.onclick = () => treeShowsDiff(f) ? openDiffViewer(f, tree.source, treeLabel()) : openTreeFile(f)
+      frag.append(r)
+    }
+  }
+  walk(top, 0)
+  const changedCount = Object.keys(changes).filter(f => !q || fold(f).includes(q)).length
+  $('#tree-summary').textContent = !tree.git ? `${files.length} file · không phải Git repo nên không có thay đổi`
+    : `${changedCount ? `${changedCount} file đã đổi` : 'Không có thay đổi'} · ${treeLabel()}${tree.truncated ? ` · chỉ hiện ${tree.files.length} file đầu` : ''}`
+  $('#tree').replaceChildren(files.length ? frag : el('div', 'none', q ? 'Không có file khớp.' : onlyChanged ? 'Không có file đã đổi.' : 'Thư mục trống.'))
+}
+// a modified, deleted or committed file opens as a diff; a new or unchanged one opens as itself
+const treeShowsDiff = f => !!tree.source?.commit || ['M', 'D'].includes(tree.changes[f])
+const openTreeFile = f => openFileViewer(fileHref(f), null, tree.source?.workspace ? { id: tree.source.workspace } : null)
+
+function openTreeMenu(e, rowEl, target, isFolder) {
+  const menu = $('#tree-menu'), absolute = tree.base + (tree.base.includes('\\') ? '\\' + target.replaceAll('/', '\\') : '/' + target)
+  const copy = text => navigator.clipboard.writeText(text).then(() => showToast(`Đã chép: ${text}`), () => showToast('Không chép được vào clipboard'))
+  const items = [
+    ...(!isFolder && tree.changes[target] !== 'D' ? [['Mở file', () => openTreeFile(target)]] : []),
+    ...(!isFolder && (tree.changes[target] || tree.source?.commit) ? [['Xem thay đổi', () => openDiffViewer(target, tree.source, treeLabel())]] : []),
+    null, ['Chép đường dẫn tương đối', () => copy(target)], ['Chép đường dẫn đầy đủ', () => copy(absolute)],
+  ].filter((item, i, all) => item || (i > 0 && all[i - 1]))
+  menu.replaceChildren(...items.map(item => {
+    if (!item) return el('hr')
+    const b = el('button', '', item[0]); b.type = 'button'; b.setAttribute('role', 'menuitem')
+    b.onclick = () => { closeTreeMenu(); item[1]() }
+    return b
+  }))
+  document.querySelector('.trow.menu-open')?.classList.remove('menu-open'); rowEl.classList.add('menu-open')
+  menu.hidden = false
+  const at = e.clientX || e.clientY ? { x: e.clientX, y: e.clientY } : rowEl.getBoundingClientRect() // Shift+F10 has no mouse position
+  const box = menu.getBoundingClientRect()
+  menu.style.left = `${Math.max(8, Math.min(at.x, innerWidth - box.width - 8))}px`
+  menu.style.top = `${Math.max(8, Math.min(at.y, innerHeight - box.height - 8))}px`
+  menu.querySelector('button')?.focus()
+}
+function closeTreeMenu() {
+  if ($('#tree-menu').hidden) return
+  $('#tree-menu').hidden = true
+  document.querySelector('.trow.menu-open')?.classList.remove('menu-open')
+}
+document.addEventListener('mousedown', e => { if (!$('#tree-menu').contains(e.target)) closeTreeMenu() })
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && !$('#tree-menu').hidden) { e.stopPropagation(); closeTreeMenu() } }, true)
+$('#tree-menu').onkeydown = e => {
+  if (!['ArrowDown', 'ArrowUp'].includes(e.key)) return
+  const buttons = [...$('#tree-menu').querySelectorAll('button')], i = buttons.indexOf(document.activeElement)
+  buttons[(i + (e.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length]?.focus(); e.preventDefault()
+}
+$('body > aside').addEventListener('scroll', closeTreeMenu)
+
+async function openDiffViewer(file, source, label) {
+  if (!dir) return
+  const thisGen = ++viewerGen, dialog = $('#viewer'), bodyEl = $('#viewer-body')
+  if (!dialog.open) lastFocusBeforeViewer = document.activeElement
+  closeCurrentHtmlPreview(); revokeViewerBlob()
+  currentViewerHref = null; currentViewerPath = null; currentViewerWorkspace = null; currentViewerCanExternal = false
+  currentDiff = { file, source, label }
+  const stored = loadViewerLayout()
+  viewerNormalLayout = { width: stored.width, height: stored.height }; viewerIsMaximized = stored.maximized; applyViewerLayout()
+  $('#viewer-title').textContent = `${base(file)} · thay đổi`
+  $('#viewer-path').textContent = `${file} · ${label}`
+  for (const id of ['#viewer-img-controls', '#viewer-html-tabs', '#viewer-html-external', '#viewer-notice', '#viewer-external']) $(id).style.display = 'none'
+  bodyEl.replaceChildren(el('div', 'none', 'Đang tải…'))
+  if (!dialog.open) dialog.showModal()
+  $('#viewer-close').focus()
+  const res = await api.fileDiff(dir, source, file)
+  if (thisGen !== viewerGen) return
+  if (!res.ok) return bodyEl.replaceChildren(el('div', 'viewer-error', res.error.message))
+  if (!res.diff.trim()) return bodyEl.replaceChildren(el('div', 'none', 'Không có thay đổi.'))
+  const pre = el('pre', 'viewer-text diff')
+  for (const line of res.diff.replace(/\n$/, '').split('\n')) {
+    const cls = /^(diff |index |--- |\+\+\+ |new file|deleted file|similarity|rename |Binary )/.test(line) ? 'd-meta'
+      : line.startsWith('@@') ? 'd-hunk' : line.startsWith('+') ? 'd-add' : line.startsWith('-') ? 'd-del' : ''
+    pre.append(el('span', cls, line || ' '))
+  }
+  bodyEl.replaceChildren(pre, ...(res.truncated ? [el('div', 'none', 'Diff quá dài, chỉ hiện 512 KB đầu.')] : []))
+}
+
+$('#aside-tab-overview').onclick = () => showAsideTab('overview')
+$('#aside-tab-tree').onclick = () => showAsideTab('tree')
+$('#tree-source').onchange = () => { treeOpen = new Set(); loadTree() }
+$('#tree-reload').onclick = () => loadTree()
+$('#tree-filter').oninput = () => renderTree()
+$('#tree-changed').onclick = () => {
+  const on = $('#tree-changed').getAttribute('aria-pressed') !== 'true'
+  $('#tree-changed').setAttribute('aria-pressed', String(on)); renderTree()
+}
+if (pref('asideTab') === 'tree') showAsideTab('tree')
 
 loadProjects()

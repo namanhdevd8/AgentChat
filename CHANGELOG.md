@@ -1,5 +1,16 @@
 # Các thay đổi
 
+## 0.9.0 · 2026-10-14
+
+### Mới
+- Panel phải có hai tab: **Tổng quan** (Cần bạn, Bảng task, Hàng chờ merge, File chung) và **Dự án**. Tab Tổng quan hiện số mục đang cần bạn.
+- Tab **Dự án** hiện cây file của thư mục chính, của nhánh chưa gộp của một agent, hoặc của một commit gần đây. File đã đổi có nhãn M (sửa), A (thêm), D (xoá), U (mới, chưa commit); thư mục chứa file đổi có chấm. Có nút "Đã đổi" để chỉ hiện file thay đổi và ô lọc theo tên.
+- Bấm file đã sửa hoặc đã xoá thì xem diff ngay trong khung xem. Chuột phải để mở file, xem thay đổi, chép đường dẫn tương đối hoặc đầy đủ.
+
+### Thay đổi
+- Mỗi lượt của agent vào nhánh chính thành đúng một commit (squash), không còn cặp "agent X: hoàn tất lượt" + "merge agent X". Tên commit là agent và việc đã làm, ví dụ `dev-be · T43 Xem diff mỗi lượt`, hoặc các file đã sửa khi lượt không gắn task.
+- Sau khi gộp, nhánh của agent đang rảnh được đưa về nhánh chính ngay; agent đang chạy thì được đưa về ở đầu lượt kế tiếp.
+
 ## 0.8.0 · 2026-10-13
 
 ### Mới

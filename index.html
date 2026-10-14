@@ -339,6 +339,42 @@
   body > aside { padding: 0 16px 16px; overflow-y: auto; border-left: 1px solid var(--line); }
   body > aside section.box { padding: 14px 0; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; }
   body > aside section:last-child { border-bottom: 0; }
+  /* right panel: "Tổng quan" (needs, tasks, merges, shared files) or "Dự án" (the file tree) */
+  .aside-tabs { position: sticky; top: 0; z-index: 2; margin: 0 -16px; padding: 12px 16px 4px; background: var(--bg); }
+  .aside-tabs .seg { display: flex; }
+  .aside-tabs .seg button { flex: 1; display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 4px 10px; }
+  .tab-badge { font: 600 11px/1 var(--mono); padding: 2px 5px; border-radius: 8px; background: var(--warn-bg); color: var(--warn-ink); }
+  #tree-pane { padding-top: 10px; }
+  .tree-bar { display: flex; gap: 6px; align-items: center; margin-bottom: 8px; }
+  .tree-bar select { flex: 1; min-width: 0; height: 28px; padding: 0 6px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); font: 12.5px var(--sans); color: var(--ink); }
+  .tree-bar .btn[aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+  #tree-filter { width: 100%; height: 28px; padding: 0 8px; margin-bottom: 6px; background: var(--surface); font: 12.5px var(--sans); color: var(--ink); }
+  .tree-summary { font-size: 12px; color: var(--muted); margin-bottom: 6px; min-height: 1em; }
+  .tree { font: 12.5px/1.5 var(--mono); }
+  .trow { display: flex; align-items: center; gap: 6px; width: calc(100% + 12px); margin: 0 -6px; padding: 2px 6px 2px calc(6px + var(--depth, 0) * 14px);
+    background: none; border: 0; border-radius: 5px; text-align: left; font: inherit; color: var(--ink); }
+  .trow:hover, .trow.menu-open { background: var(--hover); }
+  .trow .ico { width: 14px; height: 14px; color: var(--faint); }
+  .trow .chev { width: 10px; height: 10px; transition: transform .12s; }
+  .trow[aria-expanded="true"] .chev { transform: rotate(90deg); }
+  .trow .tname { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .trow[data-s="D"] .tname { text-decoration: line-through; color: var(--muted); }
+  .tstat { flex: none; width: 1.3em; text-align: center; font: 600 11px/1 var(--mono); }
+  .tstat[data-s="M"] { color: var(--warn-ink); }
+  .tstat[data-s="A"], .tstat[data-s="U"] { color: var(--ok); }
+  .tstat[data-s="D"] { color: var(--danger); }
+  .tdot { flex: none; width: 6px; height: 6px; margin: 0 .4em; border-radius: 50%; background: var(--accent); }
+  .tree-menu { position: fixed; z-index: 60; min-width: 200px; padding: 4px; background: var(--surface); box-shadow: var(--pop-shadow); }
+  .tree-menu button { display: block; width: 100%; padding: 5px 10px; border: 0; border-radius: 5px; background: none; text-align: left; font-size: 13px; }
+  .tree-menu button:hover, .tree-menu button:focus-visible { outline: 0; background: var(--hover); }
+  .tree-menu hr { margin: 4px 0; border: 0; border-top: 1px solid var(--line); }
+  /* a diff in the viewer: one block per line, so additions and removals read as bands */
+  .viewer-text.diff { padding: 8px 0; white-space: pre; word-break: normal; overflow-x: auto; font-variant-ligatures: none; } /* "=>" must read as typed */
+  .viewer-text.diff > span { display: block; min-width: max-content; padding: 0 12px; }
+  .d-add { background: color-mix(in srgb, var(--ok) 15%, transparent); }
+  .d-del { background: color-mix(in srgb, var(--danger) 15%, transparent); }
+  .d-hunk { color: var(--accent); background: var(--accent-soft); }
+  .d-meta { color: var(--muted); }
   body > aside h3 {
     margin: 0;
     font: 600 13px/1.4 var(--sans);
@@ -699,6 +735,11 @@
 
 <div id="aside-grip" class="aside-grip" role="separator" aria-orientation="vertical" aria-label="Độ rộng panel bên phải" tabindex="0" title="Kéo để đổi độ rộng · bấm đúp để về mặc định"></div>
 <aside>
+  <div class="aside-tabs"><div class="seg" role="tablist" aria-label="Panel phải">
+    <button id="aside-tab-overview" class="on" role="tab" aria-selected="true" aria-controls="aside-overview" type="button">Tổng quan<span id="aside-needs" class="tab-badge" hidden></span></button>
+    <button id="aside-tab-tree" role="tab" aria-selected="false" aria-controls="tree-pane" type="button">Dự án</button>
+  </div></div>
+  <div id="aside-overview" role="tabpanel" aria-labelledby="aside-tab-overview">
   <section class="box" id="needs-sec" hidden>
     <div class="sec-head"><h3><i data-icon="user" class="lead"></i>Cần bạn</h3><span id="needs-count" class="needs-count"></span></div>
     <div id="needs" class="needs-list"></div>
@@ -725,7 +766,19 @@
     </details>
   </section>
   <section class="box"><div class="sec-head"><h3><i data-icon="files" class="lead"></i>File chung</h3></div><div id="files"><div class="none">—</div></div></section>
+  </div>
+  <div id="tree-pane" role="tabpanel" aria-labelledby="aside-tab-tree" hidden>
+    <div class="tree-bar">
+      <select id="tree-source" aria-label="Xem cây của"><option value="">Thư mục chính</option></select>
+      <button id="tree-changed" class="box press btn sm" type="button" aria-pressed="false" title="Chỉ hiện file đã đổi">Đã đổi</button>
+      <button id="tree-reload" class="box press icon sm" type="button" title="Tải lại cây thư mục"><i data-icon="refresh"></i></button>
+    </div>
+    <input id="tree-filter" class="box" type="search" placeholder="Lọc theo tên file…" aria-label="Lọc theo tên file" autocomplete="off" spellcheck="false">
+    <div id="tree-summary" class="tree-summary"></div>
+    <div id="tree" class="tree" role="tree" aria-label="Cây thư mục dự án"></div>
+  </div>
 </aside>
+<div id="tree-menu" class="tree-menu box" role="menu" aria-label="Thao tác với file" hidden></div>
 
 <dialog id="settings" class="box">
   <div class="dhead"><h2>Cài đặt nhóm</h2><small id="spath"></small></div>

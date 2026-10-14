@@ -1726,6 +1726,7 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
     on = await call('saveProjectSettings', root, { settings: { ...cfg.settings, worktreesEnabled: true }, expectedRevision: cfg.revision })
   }
   assert.ok(on.ok, JSON.stringify(on.error))
+  const enabledAt = git('rev-parse', 'HEAD').trim(), mergeCommits = () => git('log', '--merges', '--format=%h %s', `${enabledAt}..main`)
   const lines = () => fs.readFileSync(at('a.txt'), 'utf8').split('\n'), clean = () => assert.strictEqual(git('status', '--porcelain'), '')
   const done = e => !['queued', 'merging', 'checking', 'publishing'].includes(e.state)
   let q0 = 0, entries
@@ -2062,6 +2063,12 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
   await edit({ 'dev-a': [['a.txt', 2, 'A2']], 'dev-b': [['a.txt', 8, 'B8']] }, '@dev-a @dev-b sửa a.txt')
   entries = await settle(2, 'merge song song khác dòng')
   assert.deepStrictEqual(entries.map(e => e.state), ['merged', 'merged']); assert.deepStrictEqual([lines()[2], lines()[8]], ['A2', 'B8']); clean()
+  // squash: main stays linear, one commit per turn named after the agent and what it changed; idle branches move onto main
+  assert.deepStrictEqual([mergeCommits(), git('log', '-2', '--format=%s').trim().split('\n').sort()], ['', ['dev-a · Sửa a.txt', 'dev-b · Sửa a.txt']])
+  const branchHead = agent => execFileSync('git', ['-C', JSON.parse(fs.readFileSync(registryFile, 'utf8')).agents.find(a => a.agent === agent).path,
+    'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim()
+  const onMain = agent => { try { git('merge-base', '--is-ancestor', branchHead(agent), 'main'); return true } catch { return false } }
+  await waitFor('nhánh agent rảnh về main sau squash', () => ['dev-a', 'dev-b'].every(onMain))
 
   // a slow merge check runs outside the git lock: another agent's turn still starts (send returns) and both merge
   process.env.CHECK_SLOW_MS = '4000'
@@ -2160,6 +2167,26 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
   assert.strictEqual(fs.readFileSync(at('package.json'), 'utf8'), pkgBefore)
   await waitFor('một tin báo chặn deps', () => errorMsgs(entries[0].id) === 1, 5000)
   delete process.env.FAKE_EDITS
+
+  assert.strictEqual(mergeCommits(), '', 'gộp phải là squash: main không có merge commit, kể cả khi agent tự merge main vào nhánh')
+
+  // "Dự án" tab: main folder's uncommitted changes, an agent's unmerged branch, one commit; nothing outside the project
+  fs.writeFileSync(at('new.txt'), 'n1\nn2\n'); fs.appendFileSync(at('chk.js'), '\n// x')
+  let tr = await call('projectTree', root, null)
+  assert.deepStrictEqual([tr.ok, tr.changes['new.txt'], tr.changes['chk.js'], tr.files.includes('a.txt'), tr.files.some(f => f.startsWith('.chat'))],
+    [true, 'U', 'M', true, false], JSON.stringify(tr).slice(0, 300))
+  let df = await call('fileDiff', root, null, 'chk.js'); assert.ok(df.ok && df.diff.includes('+// x'), JSON.stringify(df))
+  df = await call('fileDiff', root, null, 'new.txt'); assert.ok(df.ok && df.diff.includes('+n2'), JSON.stringify(df))
+  tr = await call('projectTree', root, { workspace: lost.workspaceId }) // its same-line edit never merged
+  df = await call('fileDiff', root, { workspace: lost.workspaceId }, 'a.txt')
+  assert.ok(tr.changes['a.txt'] === 'M' && df.diff.includes(lost.agent === 'dev-a' ? '+A4' : '+B4'), JSON.stringify([tr.changes, df]))
+  const headSha = git('rev-parse', 'HEAD').trim()
+  tr = await call('projectTree', root, { commit: headSha })
+  df = await call('fileDiff', root, { commit: headSha }, tr.files[0])
+  assert.ok(tr.ok && tr.files.length && tr.commits[0].sha === headSha && df.diff.includes('@@'), JSON.stringify([tr, df]).slice(0, 400))
+  for (const bad of ['../x', path.join(root, 'a.txt'), '.chat/log.jsonl', 'a\0b', '']) assert.strictEqual((await call('fileDiff', root, null, bad)).ok, false, bad)
+  for (const bad of [{ commit: 'HEAD' }, { commit: '--output=/tmp/x' }, { workspace: '../../x' }]) assert.strictEqual((await call('projectTree', root, bad)).ok, false, JSON.stringify(bad))
+  fs.rmSync(at('new.txt')); git('checkout', '--', 'chk.js')
 
   // A stopped pending retry stays paused, without overwriting other queue entries.
   const stoppedConfig = core.projectSettings(root)
