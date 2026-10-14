@@ -60,10 +60,14 @@ Giữ giới hạn lượt hiện có (mặc định 12), trần chi phí tùy c
 | T50 | techlead | `reports/sprint-12-design.md`: contract tiến triển/ngưỡng, đồng thời, chống trùng, dừng/Tiếp tục, sự kiện merge và migration | manual | PM đối chiếu S1–S3 và các ca mục 6; chốt được interface và phạm vi file trước khi giao dev |
 | T51 | dev-be | S1–S3 trong `core.js`, `main.js`, `preload.js` khi cần; các assertion liên quan trong `check.js` | code | Check có hồ sơ đúng task/bản bàn giao, queue gộp đạt; QA T52 đạt; PM duyệt bằng checks theo Sprint 11 |
 | T52 | qa | Check độc lập trong `check.js`; kết quả theo từng tiêu chí, SHA đã kiểm và cách tái hiện lỗi trong bàn giao chat | manual | Chạy `npm run check` và harness app thật trên repo tạm, đối chiếu ca mục 6; PM ghi kết quả vào spec rồi duyệt manual |
+| T53 | dev-fe | `renderer.js`, `index.html`: thẻ dừng/Cần bạn theo ChainView, chi tiết mergeEvent, guard callback/box; chỉ suite rendererS12Checks và assertion FE trong `check.js` | code | Dùng đúng payload BE theo contract mục 7 và bổ sung mục 8 bên dưới; QA T52 đạt luồng draining/ready/continued, phím/theme, chống callback cũ; PM duyệt bằng checks |
+| T54 | dev-be | Hotfix `core.js`/`main.js` và assertion BE trong `check.js`: approval manual có report hợp lệ hoạt động | code | Ca main thực với report tương đối hợp lệ đạt; report ngoài dự án bị từ chối, manual reason-only vẫn đạt, task code có worktree vẫn không được duyệt manual; QA T52 kiểm lại và PM duyệt bằng checks |
 
-Hiện chỉ giao T50. T51 và T52 chờ. Hai phần triển khai cùng nằm ở luồng điều phối BE nên giao một dev; dùng lại UI sẵn có. Nếu contract cho thấy cần thay `renderer.js`/`index.html`, techlead báo PM để tạo task FE với interface riêng, không tự sửa vượt phạm vi.
+Sau bàn giao T50, PM chấp nhận cần phần FE để hiển thị trạng thái chờ nhánh kết thúc và ngăn bấm Tiếp tục trước khi đủ điều kiện. T53 dùng thẻ/nút sẵn có, không thêm màn hình hoặc cấu hình. T54 là lỗi mới phát hiện khi PM nghiệm thu tài liệu; giao cùng BE sửa trước phần T51, không gộp nó thành một mục mở rộng không có task.
 
-Thứ tự: techlead bàn giao → PM duyệt contract và giao BE → BE bàn giao/merge đạt → PM gọi QA → sửa lỗi nếu có → PM nghiệm thu. Dev không tự đổi task sang done. Tài liệu/QA dùng approval manual có báo cáo; task code dùng đúng checkIds của lần bàn giao. Không dùng task thật, log thật hay nhánh đang làm của team làm fixture.
+Thứ tự cập nhật: PM duyệt T50 → BE T54 rồi T51, song song với FE T53 theo contract đã chốt → PM nhận đủ T51/T53/T54 và code đã gộp → gọi QA T52 một lần → sửa lỗi nếu có → PM nghiệm thu. Trong `check.js`, BE sở hữu sprint12CoreChecks/main harness và ca manual-report; FE sở hữu rendererS12Checks. Khi ráp dòng nối suites cuối file phải giữ cả hai bên; không sửa chung fixture nếu chưa thống nhất.
+
+Dev không tự đổi task sang done. Tài liệu/QA dùng approval manual có lý do và báo cáo nghiệm thu; trường report là tùy chọn. Task code dùng đúng checkIds của lần bàn giao. Không dùng task thật, log thật hay nhánh đang làm của team làm fixture.
 
 ## 6. Ca nghiệm thu bắt buộc
 
@@ -80,3 +84,22 @@ Thứ tự: techlead bàn giao → PM duyệt contract và giao BE → BE bàn g
 ## 7. Ghi nhận khi lập spec
 
 PM đã đọc nguồn P0, contract Sprint 11 và các đường `recordChainTurn`, `routeTargets`, `haltChain`, `continueChain`, `mergeError` cùng parser task hiện tại. Lượt này chỉ lập tài liệu/task, chưa sửa code sản phẩm và chưa chạy bộ kiểm sản phẩm. Không coi việc duyệt spec là nghiệm thu S1–S3.
+
+## 8. PM nghiệm thu T50 và giao triển khai (2026-10-14)
+
+Đã đọc toàn bộ [contract Sprint 12](sprint-12-design.md), bản techlead `41e6b0f`, gộp vào main `38c2710`. Contract đạt S1–S3: có baseline/novelty cho source, task, check; giới hạn 3 lượt success; admission chung cho nhiều nhánh; lưu claim qua restart; sự kiện theo attempt và giữ thao tác sửa thủ công. T50 đủ điều kiện đóng bằng approval manual. Đã tạo T53 FE theo yêu cầu mục 7–8; QA T52 chờ đủ hai phía.
+
+PM chốt hai quy ước tích hợp còn chưa ghi rõ trong type để BE/FE không tự chọn khác nhau; đọc cùng contract mục 7:
+
+1. `ChainView.revision` giữ kiểu string, là **chuỗi số thập phân tăng đơn điệu theo stopId**, bắt đầu `"1"`, lưu cùng checkpoint và không reset sau restart. Mỗi thay đổi view tăng một lần; chỉ đọc lại không tăng. FE so giá trị số, bỏ response/event có revision thấp hơn bản đã nhận; bản bằng nhau không cần render lại. Guard dir/box/openSeq vẫn bắt buộc. Ca bắt buộc: nhận revision `"10"` rồi response chậm `"9"` không được mở lại nút Tiếp tục hoặc làm mất pending.
+2. Dùng lại `worktreeState.queue[].canRepair` làm cờ quyền bấm nút: BE trả false khi mục không còn hiệu lực hoặc claim sửa đã nhận, kể cả sau restart; không chỉ dựa vào state conflict/check-failed. Bổ sung `queue[].mergeEvent: MergeFailure | null` với payload đã lọc giống thông báo chat để FE đọc chi tiết từ cùng nguồn. Không cần gửi private claim hay thêm API claim cho FE. FE dùng trạng thái queue hiện hành để vô hiệu nút trong cả chat/hàng chờ; nếu chưa tải được trạng thái thì không suy ra được phép sửa chỉ từ log cũ. BE vẫn kiểm lại tại IPC. Lỗi legacy giữ cách hiển thị và kiểm quyền bằng queue hiện tại.
+
+Đây là quy ước triển khai của cùng chức năng đã duyệt, không thêm màn hình hay hành vi tự động. Nếu dev thấy cần đổi interface, báo PM và techlead trước khi thay để hai phía cùng cập nhật. QA dùng payload thực từ BE, không chỉ fixture tự dựng.
+
+### T54 — Lỗi duyệt manual kèm report
+
+- Phát hiện khi chuẩn bị duyệt T50: `main.js`, hàm `verifyTaskApproval`, gọi `core.validTaskSpec(approval.report, root)`, nhưng `core.js` chưa export `validTaskSpec`.
+- PM đã chạy probe chỉ đọc: lấy nguyên nhánh manual của hàm từ main, dùng core thật và giả lập registry/settings rỗng. `{kind:'manual',reason:'…'}` trả `{ok:true}`; thêm `report:'reports/sprint-12.md'` gây **TypeError: core.validTaskSpec is not a function**. Đây là probe cô lập, chưa phải nghiệm thu IPC toàn luồng.
+- BE sửa tại validator dùng chung, giữ kiểm phạm vi report và cổng chặn manual cho task code có worktree. Thêm assert qua main harness thật cho đường có report; kiểm cả report hợp lệ, đường thoát dự án, reason-only và task code. Không nới quyền hoặc bỏ validation để tránh lỗi.
+- T50 lần này dùng approval manual với reason có nêu đường dẫn báo cáo, bỏ trường report tùy chọn; đây là định dạng parser đã hỗ trợ. Sau T54, dùng lại trường report khi có tài liệu.
+- Lượt PM này chỉ sửa tài liệu/task/memory, xác minh JSON/parser và probe trên; chưa chạy `npm run check` hay Electron. Phần sản phẩm do BE/FE triển khai và QA T52 nghiệm thu.
