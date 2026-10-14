@@ -1579,12 +1579,21 @@ function parseTaskChanges(changes, dir = '.') {
       throw fail('INVALID', 'Yêu cầu cập nhật task không hợp lệ')
     ids.add(change.id)
     if (change.status === 'done') {
-      if (!sameKeys(change, ['id', 'status', 'expectedRevision', 'approval']))
+      const allowed = ['id', 'status', 'expectedRevision', 'approval']
+      if (change.reviewId !== undefined) allowed.push('reviewId')
+      if (!sameKeys(change, allowed))
         throw fail('INVALID', 'Đóng task bắt buộc kèm approval')
       change.approval = parseApproval(change.approval, dir)
     } else {
-      if (!sameKeys(change, ['id', 'status', 'expectedRevision']))
+      const allowed = ['id', 'status', 'expectedRevision']
+      if (change.reviewId !== undefined) allowed.push('reviewId')
+      if (!sameKeys(change, allowed))
         throw fail('INVALID', 'Yêu cầu cập nhật task không hợp lệ')
+    }
+    if (change.reviewId !== undefined) {
+      if (typeof change.reviewId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(change.reviewId)) {
+        throw fail('INVALID', 'reviewId không hợp lệ')
+      }
     }
   }
   return changes
@@ -1656,7 +1665,11 @@ function parseTaskStatusBlock(text) {
   if (block.error || block.payload == null) return { text: block.text, changes: null,
     error: block.error || (block.protocols.has('task-status') ? 'Block task-status phải ở cuối câu trả lời' : null) }
   try {
-    const changes = parseTaskChanges(JSON.parse(block.payload))
+    const raw = JSON.parse(block.payload)
+    if (Array.isArray(raw) && raw.some(c => c && typeof c === 'object' && 'reviewId' in c)) {
+      throw fail('INVALID', 'Không được tự khai reviewId')
+    }
+    const changes = parseTaskChanges(raw)
     return { text: block.text, changes, error: null }
   } catch (e) { return { text: block.text, changes: null, error: e.message } }
 }

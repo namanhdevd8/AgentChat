@@ -237,10 +237,17 @@ async function resolveTaskVerification(root, task, allReviews, allChecks, probe,
     }
   }
 
-  const relevantChecks = allChecks.filter(c =>
-    (c.reviewIds?.includes(latestReview.id) || c.taskRefs?.some(tr => tr.id === task.id && tr.definitionRevision === task.definitionRevision))
-    && c.checkPolicyHash === currentPolicyHash
-  )
+  const relevantChecks = allChecks.filter(c => {
+    if (c.checkPolicyHash !== currentPolicyHash) return false
+    const matchesTask = c.taskRefs?.some(tr => tr.id === task.id && tr.definitionRevision === task.definitionRevision)
+    if (!matchesTask) return false
+    if (c.reviewIds?.includes(latestReview.id)) return true
+    if (c.origin === 'run-command' && latestReview.sourceSha && c.sourceSha === latestReview.sourceSha) {
+      if (latestReview.workspaceId && c.workspaceId && c.workspaceId !== latestReview.workspaceId) return false
+      return true
+    }
+    return false
+  })
 
   if (!relevantChecks.length) {
     const failedEntry = registry.queue.find(q =>
@@ -375,6 +382,8 @@ async function verifyTaskApproval(root, task, approval, actor) {
     if (verification.state !== 'ready') {
       return { ok: false, code: 'EVIDENCE_REQUIRED', message: 'Bằng chứng chưa sẵn sàng để duyệt' }
     }
+    const matchingReviews = allReviews.filter(r => r.task && r.task.id === task.id && r.task.definitionRevision === task.definitionRevision)
+    const latestReview = matchingReviews[matchingReviews.length - 1]
     for (const id of approval.checkIds) {
       const check = allChecks.find(c => c.id === id)
       if (!check) {
@@ -382,6 +391,18 @@ async function verifyTaskApproval(root, task, approval, actor) {
       }
       if (check.outcome !== 'passed' || !check.treeStable) {
         return { ok: false, code: 'EVIDENCE_REQUIRED', message: `Check ${id} không đạt` }
+      }
+      const matchesTask = check.taskRefs?.some(tr => tr.id === task.id && tr.definitionRevision === task.definitionRevision)
+      if (!matchesTask) {
+        return { ok: false, code: 'EVIDENCE_REQUIRED', message: `Check ${id} không thuộc task ${task.id}` }
+      }
+      const matchesReview = latestReview && (
+        check.reviewIds?.includes(latestReview.id) ||
+        (check.origin === 'run-command' && latestReview.sourceSha && check.sourceSha === latestReview.sourceSha &&
+          (!latestReview.workspaceId || !check.workspaceId || check.workspaceId === latestReview.workspaceId))
+      )
+      if (!matchesReview) {
+        return { ok: false, code: 'EVIDENCE_REQUIRED', message: `Check ${id} không thuộc lần bàn giao hiện tại của task ${task.id}` }
       }
     }
     return { ok: true }
@@ -1464,9 +1485,10 @@ function recordChainTurn(job, result, changed, metadataChanged, auditComplete) {
   if (!chain.accountedRuns.has(job.runId)) {
     chain.accountedRuns.add(job.runId)
     const cost = result?.usage?.costUsd
-    if (typeof cost === 'number' && Number.isFinite(cost) && cost >= 0 && !result?.usage?.partial) {
+    if (typeof cost === 'number' && Number.isFinite(cost) && cost >= 0) {
       chain.costUsd += cost
-    } else {
+    }
+    if (result?.usage?.partial || typeof cost !== 'number' || !Number.isFinite(cost) || cost < 0) {
       chain.costIncomplete = true
     }
   }
