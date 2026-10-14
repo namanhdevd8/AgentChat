@@ -255,6 +255,7 @@ const runKey = (d, name) => d + '\0' + name
 // Sprint 12 state: chain views and merge details
 const chainViewsByMsg = new Map()
 const chainStopUpdateCallbacks = new Map()
+const continuingChains = new Set()
 let activeChainUnbinds = []
 
 // Sprint 6 state: paging, search, worktree, totals
@@ -346,6 +347,7 @@ async function openProject(d, c = d === dir ? box : null) {
   needs = []
   turnTimes.clear()
   chainViewsByMsg.clear()
+  continuingChains.clear()
   chainStopUpdateCallbacks.clear()
   $('#title').textContent = base(d)
   $('#path').textContent = tilde(c && c !== '.chat' ? `${d} · ${c}` : d)
@@ -1591,9 +1593,17 @@ function applyChainViewUpdate(state) {
   if (typeof renderNeeds === 'function') renderNeeds()
 }
 
+function canContinueChain(state) {
+  if (!state || ['draining', 'continued', 'unavailable'].includes(state.phase)) return false
+  return state.phase === 'interrupted' ? state.canContinue === true : state.canContinue !== false
+}
+
 function renderChainStopCard(m, sys) {
   const msgKey = m.seq != null ? String(m.seq) : String(m.runId || m.stopId || '')
   let currentState = (m.stopId ? chainViewsByMsg.get(String(m.stopId)) : null) || chainViewsByMsg.get(msgKey) || m.state || null
+  const actionKey = `${openSeq}:${msgKey}`
+  const thisDir = dir, thisSeq = openSeq, thisBox = box
+  let statePending = !currentState && typeof api.chainState === 'function', stateFailed = false
   if (currentState) {
     chainViewsByMsg.set(msgKey, currentState)
     if (currentState.stopId) chainViewsByMsg.set(String(currentState.stopId), currentState)
@@ -1642,6 +1652,7 @@ function renderChainStopCard(m, sys) {
       state.pending.forEach((p, idx) => {
         if (idx > 0) pendRow.append('; ')
         const pSpan = el('span', '', `@${p.agent}`)
+        if (p.uncertain) pSpan.append(' (chưa rõ kết quả, không tự chạy lại)')
         if (p.taskIds && p.taskIds.length) {
           pSpan.append(` (task: ${p.taskIds.join(', ')})`)
         }
@@ -1692,11 +1703,7 @@ function renderChainStopCard(m, sys) {
       contBtn.disabled = true
       contBtn.textContent = 'Tiếp tục'
       contBtn.title = 'Chờ các nhánh đang chạy hoàn tất trước khi tiếp tục'
-    } else if (phase === 'interrupted' || phase === 'unavailable') {
-      contBtn.disabled = true
-      contBtn.textContent = 'Tiếp tục'
-      contBtn.title = state?.reason?.text || 'Không thể tiếp tục'
-    } else if (state && state.canContinue === false) {
+    } else if (!canContinueChain(state || m) || stateFailed || statePending) {
       contBtn.disabled = true
       contBtn.textContent = 'Tiếp tục'
       contBtn.title = state?.reason?.text || 'Không đủ điều kiện tiếp tục'
@@ -1705,6 +1712,7 @@ function renderChainStopCard(m, sys) {
       contBtn.textContent = 'Tiếp tục'
       contBtn.title = 'Chạy tiếp chuỗi với bộ đếm mới'
     }
+    if (continuingChains.has(actionKey)) contBtn.disabled = true
   }
 
   const updateCard = (newState) => {
@@ -1716,6 +1724,7 @@ function renderChainStopCard(m, sys) {
       }
     }
     currentState = newState
+    statePending = false; stateFailed = false
     chainViewsByMsg.set(msgKey, newState)
     if (newState.stopId) {
       chainViewsByMsg.set(String(newState.stopId), newState)
@@ -1729,7 +1738,8 @@ function renderChainStopCard(m, sys) {
   }
 
   contBtn.onclick = async () => {
-    const thisDir = dir, thisSeq = openSeq, thisBox = box
+    if (contBtn.disabled || continuingChains.has(actionKey) || !sameOpen(thisDir, thisSeq) || box !== thisBox) return
+    continuingChains.add(actionKey)
     contBtn.disabled = true
     contBtn.textContent = 'Đang tiếp tục…'
     try {
@@ -1748,13 +1758,9 @@ function renderChainStopCard(m, sys) {
     } catch (err) {
       if (thisDir !== dir || thisSeq !== openSeq || thisBox !== box) return
       showToast(err.message.replace(/^.*?Error: /, ''))
-      if (currentState) {
-        renderCardContent(currentState)
-      } else {
-        contBtn.disabled = false
-        contBtn.textContent = 'Tiếp tục'
-      }
-    }
+      stateFailed = true
+      renderCardContent(currentState)
+    } finally { continuingChains.delete(actionKey) }
   }
 
   registerChainStopCallback(msgKey, updateCard)
@@ -1765,13 +1771,19 @@ function renderChainStopCard(m, sys) {
 
   if (typeof api !== 'undefined' && typeof api.chainState === 'function') {
     const reqDir = dir, reqSeq = openSeq, reqBox = box
+    const requestedState = currentState
+    const failState = () => {
+      if (!sameOpen(reqDir, reqSeq) || box !== reqBox || currentState !== requestedState) return
+      statePending = false; stateFailed = true
+      renderCardContent(currentState)
+    }
     api.chainState(reqDir, { messageId: m.seq != null ? m.seq : m.runId }).then(res => {
       if (!sameOpen(reqDir, reqSeq) || box !== reqBox) return
       if (res && res.ok && res.state) {
         applyChainViewUpdate(res.state)
         updateCard(res.state)
-      }
-    }).catch(() => {})
+      } else failState()
+    }).catch(failState)
   }
 }
 
@@ -3892,7 +3904,20 @@ function renderNeeds() {
     } else if (item.kind === 'chain') {
       const msgKey = String(item.seq)
       let cView = chainViewsByMsg.get(msgKey) || (item.stopId ? chainViewsByMsg.get(String(item.stopId)) : null) || item.chainView || null
-      const resume = needButton('Tiếp tục', () => needAction(resume, () => api.continueChain(dir, { messageId: item.seq })), 'btn sm primary')
+      const thisDir = dir, thisSeq = openSeq, thisBox = box, actionKey = `${openSeq}:${msgKey}`
+      const resume = needButton('Tiếp tục', async () => {
+        if (resume.disabled || continuingChains.has(actionKey) || !sameOpen(thisDir, thisSeq) || box !== thisBox) return
+        continuingChains.add(actionKey); resume.disabled = true
+        try {
+          const res = await api.continueChain(thisDir, { messageId: item.seq })
+          if (!sameOpen(thisDir, thisSeq) || box !== thisBox) return
+          if (!res?.ok) throw new Error(res?.error?.message || 'Không thể tiếp tục')
+          if (res.state) applyChainViewUpdate(res.state)
+          resume.textContent = 'Đã tiếp tục'
+        } catch (err) {
+          if (sameOpen(thisDir, thisSeq) && box === thisBox) showToast(err.message.replace(/^.*?Error: /, ''))
+        } finally { continuingChains.delete(actionKey) }
+      }, 'btn sm primary')
       if (cView) {
         if (cView.phase === 'continued') {
           resume.disabled = true
@@ -3902,7 +3927,7 @@ function renderNeeds() {
           resume.disabled = true
           resume.textContent = 'Tiếp tục'
           resume.title = 'Chờ các nhánh đang chạy hoàn tất trước khi tiếp tục'
-        } else if (cView.phase === 'interrupted' || cView.phase === 'unavailable' || cView.canContinue === false) {
+        } else if (!canContinueChain(cView)) {
           resume.disabled = true
           resume.textContent = 'Tiếp tục'
           resume.title = cView.reason?.text || 'Không thể tiếp tục'
@@ -3912,13 +3937,14 @@ function renderNeeds() {
           resume.title = 'Chạy tiếp chuỗi với bộ đếm mới'
         }
       } else {
-        if (item.canContinue === false || item.phase === 'draining' || item.phase === 'continued' || item.phase === 'interrupted' || item.phase === 'unavailable') {
+        if (!canContinueChain(item)) {
           resume.disabled = true
           if (item.phase === 'continued') resume.textContent = 'Đã tiếp tục'
           else if (item.phase === 'draining') resume.title = 'Chờ các nhánh đang chạy hoàn tất trước khi tiếp tục'
           else resume.title = item.reason?.text || 'Không thể tiếp tục'
         }
       }
+      if (continuingChains.has(actionKey)) resume.disabled = true
       actions.append(resume)
     } else actions.append(needButton('Mở mục Quyền', () => openSettingsForAgent(item.from)))
     card.append(head, text, actions)

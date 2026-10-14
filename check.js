@@ -1853,7 +1853,7 @@ async function rendererS11Checks() {
   console.log('ok (sprint 11 FE task verification & evidence)')
 }
 
-async function rendererS12Checks() {
+async function rendererS12Checks(recovered = null) {
   const ui = fs.readFileSync(path.join(__dirname, 'renderer.js'), 'utf8'), vm = require('vm')
   const html = fs.readFileSync(path.join(__dirname, 'index.html'), 'utf8')
 
@@ -2143,6 +2143,107 @@ async function rendererS12Checks() {
   assert.ok(badge.className.includes('badge-continued'), 'badge must update to badge-continued')
   assert.strictEqual(btn.textContent, 'Đã tiếp tục')
   assert.strictEqual(btn.disabled, true, 'button must be disabled when continued')
+
+  // Recovery can leave an interrupted chain with safe pending work; use the actual IPC payload.
+  if (recovered) {
+    const { message, state } = recovered
+    assert.ok(state.pending.some(p => !p.uncertain) && state.canContinue, 'fixture phải còn phần chắc chắn chưa chạy')
+    chainStateResponses.set(String(message.seq), { ok: true, state })
+    const recoveredNode = el('div', 'sys')
+    ctx.renderChainStopCard(message, recoveredNode)
+    await new Promise(r => setImmediate(r))
+    const resume = recoveredNode.querySelector('button')
+    assert.strictEqual(resume.disabled, false,
+      `T52-recovery-ui: BE cho phép Tiếp tục nhưng FE khóa nút: ${JSON.stringify({ phase: state.phase, canContinue: state.canContinue, pending: state.pending })}`)
+    await resume.onclick()
+    assert.strictEqual(continueChainCalls.at(-1).opts.messageId, message.seq, 'stop con gửi đúng seq, không cần runId')
+  }
+
+  // Exercise the real Needs renderer too: cache, embedded ChainView, and legacy/item fallback.
+  Object.assign(ctx, { needs: [], permissionRequests: [], icon: name => el('i', '', name),
+    avatar: () => el('span'), hhmm: x => x, imageLabels: x => x, markActiveBadge: () => {} })
+  vm.runInContext(part('function needButton(', '// ---- timeline:'), ctx)
+  const recovery = recovered?.state || { ...readyState, phase: 'interrupted', reason: { code: 'restart-interrupted', text: 'Kiểm tra phần chưa rõ kết quả' } }
+  let seq = 10000
+  const build = async (mode, overrides = {}, responseError = false) => {
+    vm.runInContext('chainViewsByMsg.clear(); chainStopUpdateCallbacks.clear()', ctx)
+    const messageId = recovered && !Object.keys(overrides).length ? recovered.message.seq : seq++
+    const state = { ...recovery, ...overrides, stopId: 'test-' + seq++, chainId: 'test-chain-' + seq++, revision: '1' }
+    ctx.fixtureState = state
+    if (mode === 'chat') {
+      const node = el('div'), message = { ...(recovered?.message || stopMsg), seq: messageId, stopId: state.stopId, chainId: state.chainId, state: responseError ? undefined : state }
+      chainStateResponses.set(String(messageId), responseError ? { ok: false, error: { message: 'UNAVAILABLE' } } : { ok: true, state })
+      ctx.renderChainStopCard(message, node)
+      await new Promise(r => setImmediate(r))
+      return { button: node.querySelector('button'), node, state, messageId }
+    }
+    ctx.needs = [{ kind: 'chain', seq: messageId, text: 'Chuỗi đã ngắt', stopId: state.stopId,
+      ...(mode === 'embedded' ? { chainView: state } : mode === 'fallback' ? state : {}) }]
+    if (mode === 'cached') vm.runInContext('chainViewsByMsg.set(fixtureState.stopId, fixtureState)', ctx)
+    ctx.renderNeeds()
+    return { button: $('#needs').querySelector('.need-actions').querySelector('button'), state, messageId }
+  }
+  const allowed = [
+    [{ phase: 'interrupted', canContinue: true }, true],
+    [{ phase: 'interrupted', canContinue: false }, false],
+    [{ phase: 'interrupted', canContinue: undefined }, false],
+    [{ phase: 'interrupted', canContinue: false, pending: [{ agent: 'qa-a', uncertain: true, sourceSeqs: [] }] }, false],
+    [{ phase: 'interrupted', canContinue: false, running: [{ agent: 'qa-a', phase: 'orphan' }] }, false],
+    [{ phase: 'draining', canContinue: true }, false],
+    [{ phase: 'continued', canContinue: true }, false],
+    [{ phase: 'unavailable', canContinue: true }, false],
+    [{ phase: 'ready', canContinue: true }, true],
+    [{ phase: 'ready', canContinue: false }, false],
+    [{ phase: undefined, canContinue: undefined }, true] // legacy items still go through main's validation
+  ]
+  for (const mode of ['chat', 'cached', 'embedded', 'fallback']) {
+    for (const [fields, enabled] of allowed) {
+      const { button } = await build(mode, fields), count = continueChainCalls.length
+      assert.strictEqual(!!button.disabled, !enabled, `${mode}: ${fields.phase}/${fields.canContinue}`)
+      if (!enabled) { await button.onclick(); assert.strictEqual(continueChainCalls.length, count, `${mode}: không cấp từ trạng thái bị khóa`) }
+    }
+    const { button, state, messageId } = await build(mode)
+    assert.strictEqual(!!button.disabled, false, `${mode}: payload recovery BE cho phép phải bấm được`)
+    const originalContinue = ctx.api.continueChain
+    let resolve
+    ctx.api.continueChain = (d, opts) => { continueChainCalls.push({ d, opts }); return new Promise(r => { resolve = r }) }
+    const before = continueChainCalls.length, action = button.onclick()
+    assert.strictEqual(continueChainCalls.at(-1).opts.messageId, messageId, `${mode}: đúng seq stop con, không cần runId`)
+    ctx.applyChainViewUpdate({ ...state, revision: '2' }) // a state update while the request is pending must not unlock it
+    if (mode !== 'chat') {
+      const updatedButton = $('#needs').querySelector('.need-actions').querySelector('button')
+      assert.ok(updatedButton.disabled, `${mode}: render lại khi pending không bật nút mới`)
+      await updatedButton.onclick()
+    }
+    await button.onclick()
+    assert.strictEqual(continueChainCalls.length, before + 1, `${mode}: không gửi hai lần khi đang đợi`)
+    resolve({ ok: true, state: { ...state, revision: '3', phase: 'continued', canContinue: false } })
+    await action
+    assert.ok(button.disabled)
+    if (mode !== 'chat') assert.strictEqual($('#needs').querySelector('.need-actions').querySelector('button').textContent, 'Đã tiếp tục')
+    ctx.api.continueChain = originalContinue
+
+    const failed = await build(mode)
+    ctx.api.continueChain = async () => ({ ok: false, error: { message: 'Không đủ điều kiện' } })
+    await failed.button.onclick()
+    assert.ok(failed.button.disabled, `${mode}: lỗi API không tự bật nút`)
+    ctx.api.continueChain = originalContinue
+
+    const oldBox = await build(mode), callCount = continueChainCalls.length
+    ctx.box = '.another-box'; await oldBox.button.onclick(); ctx.box = '.chat'
+    assert.strictEqual(continueChainCalls.length, callCount, `${mode}: nút thuộc box cũ không gửi sang box mới`)
+    const delayed = await build(mode)
+    ctx.api.continueChain = () => new Promise(r => { resolve = r })
+    const delayedAction = delayed.button.onclick()
+    ctx.box = '.another-box'
+    resolve({ ok: true, state: { ...delayed.state, phase: 'continued', revision: '8', canContinue: false } })
+    await delayedAction
+    assert.notStrictEqual(delayed.button.textContent, 'Đã tiếp tục', `${mode}: response của box cũ không áp vào box mới`)
+    ctx.box = '.chat'; ctx.api.continueChain = originalContinue
+  }
+  assert.ok((await build('chat', {}, true)).button.disabled, 'chainState lỗi/thiếu không mặc định cho phép tiếp tục')
+  const mixed = await build('chat', { pending: [...recovery.pending, { agent: 'uncertain-agent', uncertain: true, sourceSeqs: [] }] })
+  assert.ok(!mixed.button.disabled && mixed.node.textContent.includes('chưa rõ kết quả'), 'giữ cảnh báo uncertain dù có phần được phép tiếp tục')
 
   console.log('ok (sprint 12 FE chain-stop & merge details)')
 }
@@ -2436,14 +2537,23 @@ async function rendererT56Checks() {
 async function rendererT52Checks() {
   const ui = fs.readFileSync(path.join(__dirname, 'renderer.js'), 'utf8'), vm = require('vm')
   const from = ui.indexOf('function handleChainChanged'), to = ui.indexOf('\n// ----', from)
-  const channel = new Set(), applied = []
-  const preloadLike = { // same shape as preload.js: both register on the one ipc channel
-    onChainChanged: fn => { const h = (...a) => fn(...a); channel.add(h); return () => channel.delete(h) },
-    on: (name, fn) => { const h = (...a) => fn(...a); if (name === 'chain-changed') channel.add(h); return () => channel.delete(h) } }
-  const ctx = vm.createContext({ api: preloadLike, dir: '/box', openingDir: null, pendingEvents: [], activeChainUnbinds: [], applyChainViewUpdate: st => applied.push(st) })
-  vm.runInContext(ui.slice(from, to), ctx)
-  for (const h of channel) h('/box', { stopId: 's1', revision: '2', phase: 'ready' }) // one event from main reaches every listener on the channel
-  assert.strictEqual(applied.length, 1, `T53: một event chain-changed bị xử lý ${applied.length} lần (renderer đăng ký cả onChainChanged lẫn on('chain-changed'))`)
+  for (const mode of ['both', 'dedicated', 'generic']) {
+    const channel = new Set(), applied = [], unbinds = []
+    const subscribe = fn => { const h = (...a) => fn(...a); channel.add(h); return () => channel.delete(h) }
+    const preloadLike = { // Both preload APIs subscribe to the same channel.
+      ...(mode !== 'generic' && { onChainChanged: subscribe }),
+      ...(mode !== 'dedicated' && { on: (name, fn) => name === 'chain-changed' ? subscribe(fn) : () => {} }) }
+    const ctx = vm.createContext({ api: preloadLike, dir: '/box', openingDir: null, pendingEvents: [], activeChainUnbinds: unbinds, applyChainViewUpdate: st => applied.push(st) })
+    vm.runInContext(ui.slice(from, to), ctx)
+    assert.strictEqual(channel.size, 1, `${mode}: chỉ một listener chain-changed`)
+    for (const h of channel) h('/another-project', { stopId: 'other', revision: '1' })
+    assert.strictEqual(applied.length, 0, `${mode}: bỏ event của dự án khác`)
+    for (const h of channel) h('/box', { stopId: 's1', revision: '2', phase: 'ready' })
+    assert.strictEqual(applied.length, 1, `${mode}: một event chỉ xử lý một lần`)
+    assert.strictEqual(unbinds.length, 1)
+    unbinds[0]()
+    assert.strictEqual(channel.size, 0, `${mode}: callback unsubscribe gỡ đúng listener`)
+  }
   console.log('ok (T52 chain-changed listener)')
 }
 
@@ -3660,6 +3770,7 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
   assert.ok(eView.phase === 'continued' && !eView.canContinue)
   const childView = (await call('chainState', root, { messageId: crashedChild })).state
   assert.ok(childView.canContinue && childView.pending.some(p => p.agent === waitingAgent && !p.uncertain && p.sourceSeqs.length && p.taskIds.includes('T908')), JSON.stringify(childView))
+  await rendererS12Checks({ message: eStop, state: childView })
   await call('chainState', root, { messageId: crashedChild }); await call('continueChain', root, { messageId: s12.stopB.seq })
   assert.strictEqual(log().filter(m => m.kind === 'chain-stop' && m.chainId === crashedChild).length, 1, 'không đăng lặp stop con')
   const childMark = log().length, childAction = await call('continueChain', root, { messageId: crashedChild })
