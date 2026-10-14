@@ -1764,7 +1764,7 @@ function electronChecks() {
   if (!line) { console.error(String(r.stdout + r.stderr).slice(-3000)); process.exit(1) }
   const out = JSON.parse(line.slice(4))
   console.log(`Electron ${out.electron || '?'}${out.timeout ? ' — HẾT GIỜ' : ''}`)
-  for (const x of out.results) console.log(`${x.ok ? 'ok  ' : 'FAIL'} ${x.name}${x.ok ? '' : ' — ' + x.info}`)
+  for (const x of out.results) console.log(`${x.ok ? 'ok  ' : 'FAIL'} ${x.name}${x.ok && !process.env.QA_VERBOSE ? '' : ' — ' + x.info}`)
   process.exit(!out.timeout && out.results.length && out.results.every(x => x.ok) ? 0 : 1)
 }
 function qaElectronEntry() { // runs inside Electron, serialized by electronChecks
@@ -1802,6 +1802,12 @@ function qaElectronEntry() { // runs inside Electron, serialized by electronChec
   <svg onload="console.log('INLINE-SVG-RAN')"><image href="${P}/inline-svg-img" width="5" height="5"/></svg>
   <video src="${P}/video"></video><audio src="${P}/audio"></audio>
   </body></html>`)
+    // T56: two real tasks (code without hand-off → none, manual) for the real IPC path; the layout cases inject fixtures
+    const tAt = new Date().toISOString()
+    w('reports/s.md', '# Spec QA')
+    w('.chat/tasks.json', JSON.stringify({ version: 1, tasks: [
+      { id: 'T1', title: 'Task thật cần bằng chứng', assignee: 'dev', spec: 'reports/s.md', createdAt: tAt, updatedAt: tAt, acceptance: 'code' },
+      { id: 'T2', title: 'Task thật nghiệm thu tay', assignee: 'qa', spec: 'reports/s.md', createdAt: tAt, updatedAt: tAt, acceptance: 'manual' }] }))
     fs.writeFileSync(path.join(ud, 'projects.json'), JSON.stringify([root]))
     require(MAIN)
     await app.whenReady()
@@ -1861,10 +1867,152 @@ function qaElectronEntry() { // runs inside Electron, serialized by electronChec
     await js(`document.head.append(Object.assign(document.createElement('link'), { rel: 'stylesheet', href: 'https://fonts.googleapis.com/css2?family=Inter&qa=' + Date.now() }))`); await sleep(3000)
     check('font Google của UI chính không bị cổng preview huỷ (kể cả khi preview đang mở)', fonts.length > 0 && !fonts.includes('net::ERR_BLOCKED_BY_CLIENT'), JSON.stringify(fonts))
     await js(`closeViewer()`)
+    // ---- T56: task board hotfix (2-tier rows, status = evidence button) on the real renderer/CSS ----
+    const { nativeTheme, screen } = require('electron')
+    win.setSize(Math.min(2400, screen.getPrimaryDisplay().workAreaSize.width), Math.min(1100, screen.getPrimaryDisplay().workAreaSize.height))
+    win.webContents.setZoomFactor(0.6) // 635px needs a ≥1905 CSS px wide window: zoom out instead of a huge screen
+    await sleep(500)
+    await js(`loadTasks()`); await sleep(600)
+    const press = async key => { // a real key: keyDown, the char Chromium uses to activate buttons, keyUp
+      win.webContents.sendInputEvent({ type: 'keyDown', keyCode: key })
+      if (key === 'Space' || key === 'Enter') win.webContents.sendInputEvent({ type: 'char', keyCode: key === 'Space' ? ' ' : '\r' })
+      win.webContents.sendInputEvent({ type: 'keyUp', keyCode: key }); await sleep(400)
+    }
+    win.focus(); win.webContents.focus()
+    // keyboard on real rows: Enter on the title opens the spec, Esc closes it and gives focus back
+    await js(`document.querySelector('.tree-task-item[data-task-id="T1"] .tree-task-title').focus()`)
+    await press('Enter')
+    const specOpen = await js(`[document.querySelector('#viewer').open, document.querySelector('#viewer-path')?.textContent || document.querySelector('#viewer-title')?.textContent]`)
+    await press('Escape')
+    const specBack = await js(`[document.querySelector('#viewer').open, document.activeElement?.classList.contains('tree-task-title'), document.querySelector('.tree-task-item[data-task-id="T1"] .tree-task-evidence-btn').getAttribute('aria-expanded')]`)
+    check('T56 Enter trên tên mở spec (không mở bằng chứng), Esc đóng và trả focus', specOpen[0] && /s\.md/.test(specOpen[1]) && !specBack[0] && specBack[1] && specBack[2] === 'false', JSON.stringify([specOpen, specBack]))
+    // Enter/Space on the status button: opens the evidence (real taskEvidence IPC); Esc closes, focus back on the button
+    const btn = id => `document.querySelector('.tree-task-item[data-task-id="${id}"] .tree-task-evidence-btn')`
+    await js(`${btn('T1')}.focus()`); await press('Enter')
+    const kb1 = await js(`[${btn('T1')}.getAttribute('aria-expanded'), !!document.querySelector('#task-evidence-T1'), document.querySelector('#task-evidence-T1')?.textContent.slice(0, 80), ${btn('T1')}.getAttribute('aria-label'), document.querySelector('#viewer').open]`)
+    await press('Escape') // focus is still on the button
+    const kbEscOnBtn = await js(`[${btn('T1')}.getAttribute('aria-expanded'), !!document.querySelector('#task-evidence-T1')]`)
+    if (kbEscOnBtn[1]) { await js(`document.querySelector('#task-evidence-T1 .tree-task-evidence-close')?.focus()`); await press('Escape') }
+    const kb2 = await js(`[${btn('T1')}.getAttribute('aria-expanded'), !!document.querySelector('#task-evidence-T1'), document.activeElement === ${btn('T1')}]`)
+    await js(`${btn('T2')}.focus()`); await press('Space')
+    const kb3 = await js(`[${btn('T2')}.getAttribute('aria-expanded'), document.querySelector('#task-evidence-T2')?.textContent.slice(0, 60), ${btn('T2')}.textContent]`)
+    check('T56 Enter mở bằng chứng (IPC thật, aria-expanded, tên truy cập), Esc trong panel đóng + trả focus, Space mở', kb1[0] === 'true' && kb1[1] && !/Lỗi/.test(kb1[2]) && kb1[3] === 'Bằng chứng T1: Chưa có bằng chứng' && !kb1[4]
+      && kb2[0] === 'false' && !kb2[1] && kb2[2] && kb3[0] === 'true' && kb3[2] === 'Cần nghiệm thu', JSON.stringify([kb1, kb2, kb3]))
+    check('T56 Esc khi focus còn ở nút trạng thái cũng đóng bằng chứng', kbEscOnBtn[0] === 'false' && !kbEscOnBtn[1], JSON.stringify(kbEscOnBtn))
+    // layout: fixtures for all 8 states + done/approved, very long title/assignee/error, test-change warning; panels open
+    const longWord = 'x'.repeat(260)
+    const fx = await js(`(() => {
+      const v = (state, reason, extra = {}) => ({ state, reason, reviewId: null, checkIds: [], warnings: { files: [], total: 0, truncated: false }, approval: null, ...extra })
+      const T = (id, status, verification, x = {}) => ({ id, title: 'Task ' + id + ' ' + 'nội dung khá dài để thử xuống dòng '.repeat(3), assignee: 'dev', spec: 'reports/s.md', status,
+        revision: 'r' + id, definitionRevision: 'd' + id, acceptance: 'code', createdAt: '2026-10-14T00:00:00.000Z', verification, ...x })
+      const warn = { files: [{ path: 'check.js', reason: 'check-script' }, { path: 'test/a.test.js', reason: 'test' }], total: 2, truncated: false }
+      currentTasks = [T('T501', 'review', v('ready', 'Đã kiểm · chờ PM duyệt', { warnings: warn })), T('T502', 'review', v('failed', 'Lệnh kiểm tra lỗi: ${longWord}')),
+        T('T503', 'review', v('stale', 'Cần kiểm lại')), T('T504', 'doing', v('pending', 'Chờ kiểm')), T('T505', 'todo', v('none', 'Chưa có bằng chứng'), { assignee: 'agent-ten-rat-dai-khong-co-khoang-trang-xxxxxxxxxxxxxxxxxxxx' }),
+        T('T506', 'review', v('manual', 'Cần nghiệm thu'), { acceptance: 'manual', title: '${longWord}' }), T('T507', 'review', v('unavailable', 'Chưa xác minh được')),
+        T('T508', 'review', v('legacy', 'Lịch sử trước Sprint 11')), T('T509', 'done', v('ready', 'Đã duyệt', { approval: { kind: 'checks', reviewer: 'pm', at: '2026-10-14T00:00:00.000Z', checkIds: ['c'], note: 'ok' } }))]
+      taskEvidenceOpenStates.clear(); renderBoard()
+      const sha = 'a'.repeat(40)
+      for (const t of currentTasks.filter(t => t.status !== 'done')) {
+        const item = document.querySelector('.tree-task-item[data-task-id="' + t.id + '"]'), b = item.querySelector('.tree-task-evidence-btn')
+        const panel = el('div', 'tree-task-evidence-panel'); panel.id = 'task-evidence-' + t.id; item.append(panel); b.setAttribute('aria-expanded', 'true')
+        renderEvidenceContent(panel, t, { ok: true, taskId: t.id, revision: t.revision, verification: t.verification, total: 1, truncated: false,
+          review: { version: 1, kind: 'review', id: 'rv', at: '2026-10-14T00:00:00.000Z', task: { id: t.id }, runId: 'run', workspaceId: 'ws', sourceSha: sha, baseSha: sha, checkPolicyHash: 'h',
+            artifactPaths: ['src/' + 'rat-dai-'.repeat(20) + '.js'], pathsComplete: true, warnings: t.verification.warnings },
+          checks: [{ version: 1, kind: 'check', id: 'c-' + t.id, origin: 'merge', runId: 'run', queueId: 'q', workspaceId: 'ws', taskRefs: [], reviewIds: ['rv'], sourceSha: sha, baseSha: sha, candidateSha: sha,
+            checkPolicyHash: 'h', startedAt: '2026-10-14T00:00:00.000Z', finishedAt: '2026-10-14T00:01:00.000Z', outcome: t.verification.state === 'failed' ? 'failed' : 'passed', treeStable: true,
+            commands: [{ command: 'npm run check', exitCode: 1, signal: null, durationMs: 1200, error: null, excerpt: '<script>alert(1)</script> ' + '${longWord}', truncated: false }] }] }, b)
+      }
+      return currentTasks.length
+    })()`)
+    const measure = () => js(`(() => {
+      const aside = document.querySelector('body > aside'), tree = document.querySelector('#tasks-tree'), ar = aside.getBoundingClientRect()
+      const ov = (x, y) => x && y && x.left < y.right - 0.5 && y.left < x.right - 0.5 && x.top < y.bottom - 0.5 && y.top < x.bottom - 0.5
+      const inside = r => r.left >= ar.left - 0.5 && r.right <= ar.right + 0.5
+      const out = { asideW: Math.round(ar.width), dark: matchMedia('(prefers-color-scheme: dark)').matches, hScroll: aside.scrollWidth > aside.clientWidth + 1 || tree.scrollWidth > tree.clientWidth + 1, bad: [] , scripts: document.querySelectorAll('#tasks-tree script').length }
+      for (const item of tree.querySelectorAll('.tree-task-item')) {
+        if (!item.offsetParent) continue
+        const id = item.dataset.taskId, q = c => item.querySelector(c), r = c => q(c)?.getBoundingClientRect()
+        const t = r('.tree-task-title'), m = r('.tree-task-meta'), b = r('.tree-task-evidence-btn'), a = r('.tree-task-assignee'), wb = r('.tree-task-warn-badge')
+        const lines = Math.round(t.height / parseFloat(getComputedStyle(q('.tree-task-title')).lineHeight))
+        if (lines > 2 || t.width < 60) out.bad.push(id + ': tên ' + lines + ' dòng, rộng ' + Math.round(t.width))
+        if (m.top < t.bottom - 1) out.bad.push(id + ': meta không nằm dưới tên')
+        if (!inside(b) || !inside(a) || (wb && !inside(wb))) out.bad.push(id + ': nút/người nhận/cảnh báo tràn khỏi cột')
+        if (ov(a, b) || ov(b, wb)) out.bad.push(id + ': chồng người nhận/nút/cảnh báo')
+        const p = q('.tree-task-evidence-panel')
+        if (p) {
+          const pr = p.getBoundingClientRect(), c = p.querySelector('.tree-task-evidence-close')?.getBoundingClientRect(), hb = p.querySelector('.evidence-header .tree-task-badge')?.getBoundingClientRect()
+          if (p.scrollWidth > p.clientWidth + 1 || !inside(pr)) out.bad.push(id + ': panel tràn ngang')
+          if (!c || c.right > pr.right + 0.5 || ov(hb, c)) out.bad.push(id + ': nút đóng panel bị che/tràn')
+        }
+      }
+      out.warnShown = !!tree.querySelector('.tree-task-item[data-task-id="T501"] .tree-task-warn-badge')
+      out.doneCollapsed = [...tree.querySelectorAll('details.task-group')].some(d => !d.open && d.textContent.includes('T509'))
+      return out
+    })()`)
+    const layouts = []
+    for (const theme of ['light', 'dark']) {
+      nativeTheme.themeSource = theme; await sleep(300)
+      for (const width of [240, 300, 635]) {
+        await js(`document.body.style.setProperty('--aside-w', '${width}px')`); await sleep(250)
+        layouts.push({ theme, width, ...(await measure()) })
+      }
+    }
+    check('T56 bố cục 240/300/635px × sáng/tối: tên ≤2 dòng, meta dưới tên, không tràn/chồng, 8 trạng thái panel không che nút đóng',
+      fx === 9 && layouts.every(l => Math.abs(l.asideW - l.width) <= 1 && !l.hScroll && !l.bad.length && l.warnShown && l.doneCollapsed && !l.scripts) && layouts.some(l => l.dark),
+      JSON.stringify(layouts.map(l => [l.theme, l.width, l.asideW, l.dark, l.hScroll, l.bad.length, l.warnShown, l.doneCollapsed])) + ' lỗi: '
+        + JSON.stringify(layouts.filter(l => Math.abs(l.asideW - l.width) > 1 || l.hScroll || l.bad.length || !l.warnShown || !l.doneCollapsed || l.scripts).slice(0, 3)))
+    nativeTheme.themeSource = 'system'; win.webContents.setZoomFactor(1)
     console.log('E2E ' + JSON.stringify({ electron: process.versions.electron, results }))
     app.exit(results.every(r => r.ok) ? 0 : 1)
   })
   setTimeout(() => { console.log('E2E ' + JSON.stringify({ timeout: true, results })); app.exit(2) }, 60000)
+}
+
+// ---- T56 (QA): the task board never shows a previous box's tasks or evidence when its IPC answers late ----
+async function rendererT56Checks() {
+  const ui = fs.readFileSync(path.join(__dirname, 'renderer.js'), 'utf8'), vm = require('vm'), nodes = new Map()
+  const part = (from, to) => ui.slice(ui.indexOf(from), ui.indexOf(to, ui.indexOf(from)))
+  const all = n => [n, ...(n.children || []).flatMap(all)]
+  const has = (n, cls) => String(n.className || '').split(' ').includes(cls)
+  const el = (tag, className = '', textContent = '') => {
+    const n = { tag, className, textContent, children: [], dataset: {}, attrs: {}, style: { setProperty() {} }, hidden: false,
+      append(...c) { for (const x of c) if (x && typeof x === 'object') x.parent = this; this.children.push(...c) },
+      replaceChildren(...c) { this.children = []; this.append(...c) }, remove() { if (this.parent) this.parent.children = this.parent.children.filter(x => x !== this) },
+      setAttribute(k, v) { this.attrs[k] = String(v) }, getAttribute(k) { return this.attrs[k] }, focus() { ctx.document.activeElement = this },
+      querySelector(sel) { return this.querySelectorAll(sel)[0] || null },
+      querySelectorAll(sel) { const m = /^\.([\w-]+)(?:\[data-task-id="(.+)"\])?/.exec(sel); return all(this).slice(1).filter(x => m && has(x, m[1]) && (!m[2] || x.dataset.taskId === m[2])) },
+      closest(sel) { for (let x = this; x; x = x.parent) if (has(x, sel.slice(1))) return x; return null }, classList: { contains: c => has(n, c) } }
+    return n
+  }
+  const $ = id => { if (!nodes.has(id)) { const n = el('div'); n.parentElement = el('div'); nodes.set(id, n) } return nodes.get(id) }
+  const pending = []
+  const later = () => new Promise(resolve => pending.push(resolve))
+  const ctx = vm.createContext({ $, el, dir: '/a', box: '.chat', openSeq: 1, document: { activeElement: null }, showToast() {}, openFileViewer() {},
+    getAgentAvatar: () => null, hhmm: () => '12:00', navigator: { clipboard: { writeText: async () => {} } },
+    api: { tasks: () => later(), taskEvidence: () => later() } })
+  vm.runInContext(part('const STATUS_MAP', '// ---- "Cần bạn"'), ctx)
+  const task = (id, title) => ({ id, title, assignee: 'dev', spec: null, status: 'review', revision: 'r', definitionRevision: 'd', acceptance: 'code',
+    verification: { state: 'ready', reason: null, reviewId: null, checkIds: [], warnings: { files: [], total: 0, truncated: false }, approval: null } })
+  const shown = () => all($('#tasks-tree')).filter(n => has(n, 'tree-task-item')).map(n => n.dataset.taskId)
+  // a slow tasks reply for box A lands after switching to box B (same folder): ignored
+  ctx.loadTasks(); ctx.box = '.chat2'; ctx.openSeq++
+  pending.shift()({ tasks: [task('T7', 'của box cũ')], error: null }); await new Promise(r => setImmediate(r))
+  assert.deepStrictEqual(shown(), [], 'T56: danh sách task của box cũ hiện ở box mới')
+  // evidence opened, then the box changes (or the board reloads) before the reply: the old evidence never appears
+  vm.runInContext("currentTasks = [" + JSON.stringify(task('T8', 'box mới')) + "]; renderBoard()", ctx)
+  for (const change of [() => { ctx.box = '.chat3'; ctx.openSeq++ }, () => { ctx.loadTasks() }]) {
+    vm.runInContext('taskEvidenceOpenStates.clear(); renderBoard()', ctx)
+    const btn = all($('#tasks-tree')).find(n => has(n, 'tree-task-evidence-btn'))
+    btn.onclick({ stopPropagation() {} })
+    assert.ok(all($('#tasks-tree')).some(n => has(n, 'tree-task-evidence-loading')), 'panel bằng chứng phải đang chờ IPC')
+    const evidenceReply = pending.pop(); change()
+    evidenceReply({ ok: true, taskId: 'T8', revision: 'r', verification: { state: 'failed', reason: 'BẰNG CHỨNG CŨ' }, review: null, checks: [], total: 0, truncated: false })
+    await new Promise(r => setImmediate(r))
+    assert.ok(!JSON.stringify(all($('#tasks-tree')).map(n => n.textContent)).includes('BẰNG CHỨNG CŨ'), 'T56: bằng chứng trả về muộn hiện sau khi đổi box/tải lại')
+    while (pending.length) pending.pop()({ tasks: [task('T8', 'box mới')], error: null })
+    await new Promise(r => setImmediate(r))
+  }
+  console.log('ok (T56 task board stale IPC)')
 }
 
 // ---- Sprint 6 H + J through the real main.js: Electron stubbed, a sample git repo, a fake codex. Own process: main.js registers IPC globally ----
@@ -2831,7 +2979,7 @@ function appSettingsChecks() {
   console.log('ok (app settings search)')
 }
 
-logChecks().then(needsChecks).then(timelineChecks).then(taskChecks).then(auditChecks).then(viewerChecks).then(runChecks).then(cliPathChecks).then(appSettingsChecks).then(sprint7Checks).then(sprint8Checks).then(sprint9Checks).then(sprint11CoreChecks).then(sprint6Checks).then(rendererChecks).then(rendererFileChecks).then(rendererS9Checks).then(rendererS10Checks).then(rendererS11Checks).then(mainChecks).then(() => console.log('ok'), e => { console.error(e); process.exit(1) })
+logChecks().then(needsChecks).then(timelineChecks).then(taskChecks).then(auditChecks).then(viewerChecks).then(runChecks).then(cliPathChecks).then(appSettingsChecks).then(sprint7Checks).then(sprint8Checks).then(sprint9Checks).then(sprint11CoreChecks).then(sprint6Checks).then(rendererChecks).then(rendererFileChecks).then(rendererS9Checks).then(rendererS10Checks).then(rendererS11Checks).then(rendererT56Checks).then(mainChecks).then(() => console.log('ok'), e => { console.error(e); process.exit(1) })
 
 // PM creates a task and moves it in the same turn (no revision yet): "" is accepted only for PM on a todo task
 {
