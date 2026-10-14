@@ -65,3 +65,11 @@ QA báo kiểm độc lập trên main `18a0b92`, Electron 44.4.5 thật, bằng
 3. Chạy `npm run check` và xác minh ca phím trên Electron thật; gửi lại review T55 để bằng chứng gắn bản sửa mới. CheckId của nguồn `18a0b92` là lịch sử, không dùng thay kết quả kiểm bản sửa Esc.
 
 PM trả T55 về Đang làm. T56 giữ Chờ duyệt; sau khi bản sửa đã gộp, PM gọi QA kiểm lại ca Esc và hồi quy mở/đóng/focus. Chưa đóng hotfix hoặc báo đã đạt toàn bộ bàn phím; phần thử trên box thật vẫn chờ sau nghiệm thu QA. Không cần task mới vì Esc đã nằm trong tiêu chí T55/T56.
+
+## Nhận bản sửa Esc — giao QA T56 kiểm lại (2026-10-14)
+
+- Bản sửa T55 đã vào main **`d1543f3`**. PM đọc diff xác nhận handler Esc chuyển lên phần tử chứa nút/panel của từng task; chỉ xử lý task có panel mở, xóa trạng thái, cập nhật aria, gỡ panel và trả focus. Ca QA IPC chậm còn nguyên; bổ sung assert Enter/Space → Esc ngay và không đóng panel khác.
+- Techlead báo `npm run check`, `node check.js --electron` và whitespace đạt. PM chưa chạy lại sản phẩm; giao T56 kiểm độc lập trên main có bản sửa, ghi đúng SHA thực kiểm.
+- T56 → Đang làm: kiểm Enter → Esc ngay và Space → Esc ngay khi focus vẫn tại nút; Esc từ trong panel; mở đồng thời hai panel chỉ đóng đúng task; IPC còn chờ rồi trả muộn không mở lại panel; Esc khi đã đóng không bị chặn. Kiểm lại focus/aria và ca viewer/box reload đã có trong suite.
+- Chạy `npm run check` và `node check.js --electron` trên repo tạm; tận dụng bộ kiểm hiện có, không thêm assertion trùng. Sau khi đạt, gửi review T56 và báo giới hạn thử trên box thật. T55 giữ Chờ duyệt trong thời gian này.
+- T53 của FE đang được tích hợp riêng, chưa phải nền nghiệm thu hotfix. Sau khi T53 gộp, QA T52 sẽ kiểm hồi quy với bố cục và bản sửa Esc này; không gộp T56 thành nghiệm thu sớm Sprint 12.

@@ -103,3 +103,18 @@ PM chốt hai quy ước tích hợp còn chưa ghi rõ trong type để BE/FE k
 - BE sửa tại validator dùng chung, giữ kiểm phạm vi report và cổng chặn manual cho task code có worktree. Thêm assert qua main harness thật cho đường có report; kiểm cả report hợp lệ, đường thoát dự án, reason-only và task code. Không nới quyền hoặc bỏ validation để tránh lỗi.
 - T50 lần này dùng approval manual với reason có nêu đường dẫn báo cáo, bỏ trường report tùy chọn; đây là định dạng parser đã hỗ trợ. Sau T54, dùng lại trường report khi có tài liệu.
 - Lượt PM này chỉ sửa tài liệu/task/memory, xác minh JSON/parser và probe trên; chưa chạy `npm run check` hay Electron. Phần sản phẩm do BE/FE triển khai và QA T52 nghiệm thu.
+
+## 9. Nhận T53 lần 1 — cần hoàn tất tích hợp (2026-10-14)
+
+FE báo đã làm ChainView/Cần bạn, mergeEvent và rendererS12Checks, check cục bộ đạt. Tuy nhiên T53 chưa có hồ sơ kiểm hợp lệ trên bảng task, và app đã báo không tự commit vì kiểm phạm vi chưa đủ. PM chưa nghiệm thu T53.
+
+PM đọc worktree FE tại thời điểm nhận bàn giao: HEAD `6318ecc`, đang merge, còn `UU index.html` và `UU check.js`. CSS nhánh FE đổi hàng task thành flex-wrap, title một dòng và min-width 120px; phía main đã có hotfix hai tầng bằng grid, title tối đa hai dòng, metadata riêng. Đây là phần T53 được yêu cầu giữ từ T55. Các report xuất hiện do main mang vào không tự chứng minh FE sửa ngoài phạm vi.
+
+Trả T53 về Đang làm, dev-fe thực hiện trong worktree của mình:
+
+1. Hoàn tất xung đột đang có và tích hợp main chứa **`d1543f3`**. Giữ các thay đổi Sprint 12 của FE, đồng thời giữ nguyên bố cục bảng task từ main: grid, tên hai dòng, metadata riêng, nút trạng thái mở bằng chứng và bản sửa Esc T55. Không dùng bản CSS flex-wrap/tiêu đề một dòng của T53 thay hotfix.
+2. `check.js`: giữ rendererS12Checks cùng toàn bộ suite/cách chạy của main, gồm ca QA IPC chậm và Enter/Space → Esc. Dòng nối suites cuối file phải giữ cả hai bên. Assertion mới `html.includes('flex-wrap: wrap')` không chứng minh riêng hàng task đúng và không được dùng để buộc khôi phục CSS cũ; kiểm hành vi T53 và tái sử dụng ca bố cục T56 hiện có.
+3. Cảnh báo `.chat/memory.md`, `.chat/tasks.json` ghi rõ **chưa xác định tác nhân**; dữ liệu chung có thể thay đổi trong lượt agent khác. Không xóa/hoàn tác metadata chung, không nới scope hay bỏ kiểm để vượt cổng. Sau khi tích hợp, gửi lại lượt bàn giao để app audit/commit/check đúng bản hiện tại. Nếu tiếp tục bị chặn, báo PM nguyên văn lỗi và trạng thái worktree để giao điều tra riêng; không quy kết nguồn sửa từ cảnh báo này.
+4. Chạy `npm run check` và `node check.js --electron` để bảo đảm phần tích hợp giữ hotfix; gửi review T53 lại sau khi sạch xung đột, báo kết quả và phần BE còn chờ. Check đạt trên bản cũ không được trình bày như đã kiểm bản sau giải quyết xung đột.
+
+T51/T54 vẫn đang do BE làm. PM chỉ gọi QA T52 khi đã nhận đủ các phần và code gộp đạt. QA T56 kiểm lại hotfix riêng trên main d1543f3 theo [báo cáo hotfix](hotfix-task-layout-acceptance.md). Lượt PM này chỉ đọc diff/worktree và cập nhật báo cáo, không sửa code hay tự giải xung đột thay FE.
