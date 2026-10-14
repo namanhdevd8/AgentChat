@@ -122,3 +122,5 @@ T51/T54 vẫn đang do BE làm. PM chỉ gọi QA T52 khi đã nhận đủ các
 ## 10. Bàn giao BE và FE bị chặn trước CLI (2026-10-14)
 
 T51/T54 gửi task-status sai vị trí nên app chưa chuyển review; PM đọc diff còn thiếu hai trường worktreeState và nguồn system của repair theo contract. FE vẫn kẹt merge ở bước startWorkspace, nên gọi lại chưa cho agent cơ hội giải quyết conflict. Chi tiết bằng chứng, việc trả BE và phương án sao lưu/hủy merge FE cần End-User cho phép nằm tại [sprint-12-integration-recovery.md](sprint-12-integration-recovery.md). T51/T53/T54 giữ Đang làm; chưa đủ điều kiện gọi T52.
+
+End-User đã duyệt phục hồi FE; PM sao lưu và hủy merge dở thành công ngày 2026-10-14. Worktree FE sạch, giữ nguyên HEAD `6318ecc` và code T53; chi tiết bản sao/kiểm chứng tại mục 4 của báo cáo phục hồi. Giao lại FE tiếp tục tích hợp main và bàn giao; trạng thái T53 vẫn Đang làm.

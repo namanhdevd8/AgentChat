@@ -49,3 +49,15 @@ PM chưa thực hiện bước nào thay Git/file ở worktree FE. Cần phép r
 - Chờ quyết định phục hồi FE, T53 giữ Đang làm. Chưa gọi lại FE trong lúc cổng startWorkspace vẫn chặn.
 - T56 vẫn đang do QA kiểm lại Esc trên main có `d1543f3`; T55 vẫn chờ kết quả và thử trên box thật. T52 chỉ bắt đầu sau khi BE/FE đã gộp và có bằng chứng phù hợp.
 - Chỉ cập nhật báo cáo trong lượt PM này; không sửa tasks.json/memory.md trong khi dev tiếp tục kiểm để giảm thay đổi metadata chung không cần thiết. Đây là biện pháp điều phối tạm, không phải bản sửa nguyên nhân audit.
+
+## 4. Đã phục hồi FE theo phê duyệt End-User (2026-10-14)
+
+End-User đã duyệt đích danh yêu cầu sao lưu/hủy merge dở trong worktree FE ở tin 21:27. PM thực hiện đúng ngoại lệ được duyệt; không đổi scope/quyền hay dữ liệu `.chat`.
+
+- Kiểm lại trước thao tác: HEAD/ORIG_HEAD/MERGE_HEAD và năm file còn đúng mục 2; không có file untracked mới, job FE trong locks.json, queue FE đang chạy hoặc process có cwd trong worktree FE. Không có MERGE_AUTOSTASH.
+- Sao lưu lúc **2026-10-14T14:32:37Z** vào `/Users/namanh/Library/Application Support/Agent Chat/recovery/fe-merge-20261014T143237Z`: năm file hiện tại, status, diff working/index, toàn bộ stage index, sáu blob của conflict và các file Git metadata. `manifest.json` lưu SHA-256/kích thước; đã so khớp bản sao và kiểm source không đổi trước abort.
+- Ref dự phòng: `recovery/fe-t53-20261014T143237Z` trỏ `6318ecc5aaa1647cc91fc3b9a48e31b242556286`.
+- Đã chạy `git merge --abort` đúng worktree FE, **exit 0**. Sau đó không còn MERGE_HEAD, không còn file unmerged; Git status sạch. Không dùng reset --hard/clean hoặc xóa worktree.
+- HEAD vẫn `6318ecc5aaa1647cc91fc3b9a48e31b242556286`, tree vẫn `eab894d7cc72301da5fdf5674a22de1be78169cb`: code T53 đã commit được giữ nguyên. Kết quả lưu thêm tại `recovery-result.json` trong thư mục sao lưu.
+- Đủ điều kiện gọi FE lại để tiếp tục T53 trên worktree của mình. FE tích hợp main mới có T55, giữ CSS hai tầng và sửa Esc, giữ suites QA cùng rendererS12Checks; hoàn tất conflict và commit merge trước khi kết thúc lượt. Chạy kiểm sau tích hợp rồi gửi review với block cuối cùng.
+- T53 vẫn Đang làm. Đây là phục hồi trạng thái Git, chưa nghiệm thu code T53; PM không chạy lại bộ kiểm sản phẩm vì chưa thay nội dung commit T53. T52 vẫn chờ đủ BE/FE.
