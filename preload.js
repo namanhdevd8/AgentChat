@@ -25,6 +25,7 @@ if (process.isMainFrame !== false) {
     send: (dir, text) => ipcRenderer.invoke('send', dir, text),
     retract: (dir, seq) => ipcRenderer.invoke('retract', dir, seq),
     tasks: dir => ipcRenderer.invoke('tasks', dir),
+    taskEvidence: (dir, request) => ipcRenderer.invoke('taskEvidence', dir, request),
     readProjectFile: (dir, href, fromFile = null, workspaceId = null) => ipcRenderer.invoke('readProjectFile', dir, href, fromFile, workspaceId),
     createHtmlPreview: (dir, href, fromFile = null, workspaceId = null) => ipcRenderer.invoke('createHtmlPreview', dir, href, fromFile, workspaceId),
     closeHtmlPreview: previewId => ipcRenderer.invoke('closeHtmlPreview', previewId),

@@ -219,7 +219,7 @@ async function taskChecks() {
   const writeTasks = (...tasks) => fs.writeFileSync(tasksFile, JSON.stringify({ version: 1, tasks }))
   const board = () => core.taskBoardIndexed(box), task = async id => (await board()).tasks.find(t => t.id === id)
   const code = async fn => { try { await fn(); return 'OK' } catch (e) { return e.code } }
-  const change = async (id, status, actor = 'pm', rev) => core.validateTaskChanges(await board(), [{ id, status, expectedRevision: rev ?? (await task(id)).revision }], actor)
+  const change = async (id, status, actor = 'pm', rev, approval) => core.validateTaskChanges(await board(), [{ id, status, expectedRevision: rev ?? (await task(id)).revision, ...(status === 'done' ? { approval: approval || { kind: 'manual', reason: 'ok' } } : {}) }], actor)
   const commit = async (from, taskUpdates) => core.appendLogIndexed(box, { from, text: 'x', at: new Date().toISOString(), kind: 'task-status', taskUpdates: await taskUpdates })
   const statuses = async () => (await board()).tasks.map(t => [t.id, t.status])
 
@@ -426,7 +426,7 @@ if (process.env.FAKE_MODE === 'slow') {
   else if (mode === 'loop') reply(ask('node ok.js'))
   else if (mode === 'gone') reply('phiên mới')
   else if (mode === 'text') reply(process.env.FAKE_TEXT)
-  else if (mode === 'task') reply(F + 'task-status\\n[{"id":"T1","status":"done","expectedRevision":"r"}]\\n' + F)
+  else if (mode === 'task') reply(F + 'task-status\\n[{"id":"T1","status":"review","expectedRevision":"r"}]\\n' + F)
   else reply('')
 } else {
   const b = Buffer.from(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'xin chào' } }) + '\\n')
@@ -829,6 +829,102 @@ async function sprint9Checks() {
   assert.deepStrictEqual(r.progress.filter(([label]) => label === 'Đang chạy lệnh').map(([, detail]) => detail), ['npm test -- a', 'npm test -- b'])
   for (const key of ['FAKE_STEPS', 'FAKE_TID', 'FAKE_IN', 'FAKE_ERR']) delete process.env[key]
   console.log('ok (sprint 9 R7/R4)')
+}
+
+async function sprint11CoreChecks() {
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-chat-s11-')); core.init(d)
+  const at = '2026-10-14T12:00:00.000Z'
+  const tasksFile = path.join(d, '.chat', 'tasks.json')
+  const T = (id, x = {}) => ({ id, title: `Task ${id}`, assignee: 'dev', spec: 'reports/s.md', createdAt: at, updatedAt: at, ...x })
+
+  // 1. Acceptance parsing & defaults
+  const rawTasks = [
+    T('T1', { acceptance: 'code' }),
+    T('T2', { acceptance: 'manual' }),
+    T('T3') // defaults to code
+  ]
+  const defs = core.parseTaskDefinitions(JSON.stringify({ version: 1, tasks: rawTasks }), d)
+  assert.strictEqual(defs[0].acceptance, 'code')
+  assert.strictEqual(defs[1].acceptance, 'manual')
+  assert.strictEqual(defs[2].acceptance, 'code')
+  assert.strictEqual(defs[2].rawAcceptance, null)
+  fs.writeFileSync(tasksFile, JSON.stringify({ version: 1, tasks: rawTasks }))
+
+  const b1 = await core.taskBoardIndexed(d)
+  assert.strictEqual(b1.tasks[0].acceptance, 'code')
+  assert.strictEqual(b1.tasks[1].acceptance, 'manual')
+  assert.strictEqual(b1.tasks[2].acceptance, 'code')
+  assert.ok(b1.tasks[0].definitionRevision)
+
+  // 2. Acceptance update bumps revision and definitionRevision
+  const defsMod = [
+    T('T1', { acceptance: 'manual', updatedAt: '2026-10-14T13:00:00.000Z' }),
+    T('T2', { acceptance: 'manual' }),
+    T('T3')
+  ]
+  fs.writeFileSync(tasksFile, JSON.stringify({ version: 1, tasks: defsMod }))
+  const b2 = await core.taskBoardIndexed(d)
+  assert.notStrictEqual(b2.tasks[0].definitionRevision, b1.tasks[0].definitionRevision)
+  assert.notStrictEqual(b2.tasks[0].revision, b1.tasks[0].revision)
+
+  // 3. validateTaskChanges gate
+  assert.throws(() => core.validateTaskChanges(b2, [{ id: 'T1', status: 'done', expectedRevision: b2.tasks[0].revision }], 'dev'), /approval/)
+  assert.throws(() => core.validateTaskChanges(b2, [{ id: 'T1', status: 'done', expectedRevision: b2.tasks[0].revision, approval: { kind: 'manual', reason: 'done' } }], 'dev'), /Chỉ PM/)
+
+  assert.throws(() => core.validateTaskChanges(b2, [{ id: 'T1', status: 'done', expectedRevision: b2.tasks[0].revision }], 'pm'), /approval/)
+
+  const approved = core.validateTaskChanges(b2, [{ id: 'T1', status: 'done', expectedRevision: b2.tasks[0].revision, approval: { kind: 'manual', reason: 'đã nghiệm thu' } }], 'pm')
+  assert.strictEqual(approved.length, 1)
+  assert.strictEqual(approved[0].status, 'done')
+  assert.strictEqual(approved[0].approval.kind, 'manual')
+  assert.strictEqual(approved[0].approval.reviewer, 'pm')
+
+  // 4. parseTaskStatusBlock
+  const blk = j => '```task-status\n' + j + '\n```'
+  const pDoneValid = core.parseTaskStatusBlock('Xong\n' + blk('[{"id":"T1","status":"done","expectedRevision":"r","approval":{"kind":"checks","checkIds":["00000000-0000-4000-8000-000000000001"],"note":"note"}}]'))
+  assert.strictEqual(pDoneValid.error, null)
+  assert.strictEqual(pDoneValid.changes[0].approval.kind, 'checks')
+  assert.deepStrictEqual(pDoneValid.changes[0].approval.checkIds, ['00000000-0000-4000-8000-000000000001'])
+
+  const pDoneNoApproval = core.parseTaskStatusBlock('Xong\n' + blk('[{"id":"T1","status":"done","expectedRevision":"r"}]'))
+  assert.ok(pDoneNoApproval.error)
+
+  // 5. parseRunCommandBlock with tasks array
+  const cmdBlk = j => '```run-command\n' + j + '\n```'
+  const pCmdValid = core.parseRunCommandBlock('Chạy\n' + cmdBlk('{"command":"npm test","tasks":[{"id":"T1","expectedRevision":"r1"}]}'))
+  assert.strictEqual(pCmdValid.requested, true)
+  assert.strictEqual(pCmdValid.command, 'npm test')
+  assert.deepStrictEqual(pCmdValid.tasks, [{ id: 'T1', expectedRevision: 'r1' }])
+
+  const pCmdTooManyTasks = core.parseRunCommandBlock('Chạy\n' + cmdBlk(JSON.stringify({ command: 'npm test', tasks: Array.from({ length: 21 }, (_, i) => ({ id: `T${i + 1}`, expectedRevision: 'r' })) })))
+  assert.ok(pCmdTooManyTasks.error)
+
+  // 6. PM prompt contains work distribution rules
+  const pmPrompt = await core.promptIndexed(d, { name: 'pm', role: 'PM' }, null)
+  assert.ok(pmPrompt.text.includes('Luật chia việc cho PM:'))
+  assert.ok(pmPrompt.text.includes('acceptance: "code" cho code sản phẩm, "manual"'))
+
+  const devPrompt = await core.promptIndexed(d, { name: 'dev', role: 'Dev' }, null)
+  assert.ok(!devPrompt.text.includes('Luật chia việc cho PM:'))
+  assert.ok(devPrompt.text.includes('Chỉ PM được đóng task (done).'))
+
+  // 7. formatAppFacts & prompt app context
+  const facts = {
+    version: 1,
+    capturedAt: '2026-10-14T12:00:00.000Z',
+    source: 'worktree',
+    branch: 'feat',
+    headSha: '0123456789abcdef0123456789abcdef01234567',
+    diff: { files: 2, insertions: 10, deletions: 2, untracked: 1, binary: 0, paths: ['a.js', 'b.js'], truncated: false },
+    latestCheck: { outcome: 'passed', finishedAt: '2026-10-14T11:59:00.000Z', current: true }
+  }
+  const promptWithFacts = await core.promptIndexed(d, { name: 'dev', role: 'Dev' }, null, { appContext: { facts } })
+  assert.ok(promptWithFacts.text.includes('Dữ kiện hiện tại do app cung cấp'))
+  assert.ok(promptWithFacts.text.includes('HEAD: 0123456789'))
+  assert.ok(promptWithFacts.text.includes('Diff: 2 file, +10 -2, 1 file mới'))
+  assert.ok(promptWithFacts.text.includes('Check gần nhất: passed'))
+
+  console.log('ok (sprint 11 core G1-G6)')
 }
 
 // ---- Sprint 6 F: indexed log, accent-insensitive search, 10k messages, J settings, summary checkpoint ----
@@ -2519,6 +2615,35 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
     delete process.env.FAKE_REPLY; pickPath = null; dialogAnswer = 0
     console.log('ok (boxes)')
   }
+
+  // Sprint 11 G1-G6: verification records, tasks IPC with verification, taskEvidence IPC
+  {
+    const boardRes = await call('tasks', root)
+    assert.ok(Array.isArray(boardRes.tasks))
+    for (const t of boardRes.tasks) {
+      assert.ok(t.verification, `task ${t.id} missing verification`)
+      assert.ok(typeof t.verification.state === 'string')
+    }
+
+    if (boardRes.tasks.length > 0) {
+      const firstTask = boardRes.tasks[0]
+      const evidence = await call('taskEvidence', root, { taskId: firstTask.id, expectedRevision: firstTask.revision })
+      assert.strictEqual(evidence.ok, true)
+      assert.strictEqual(evidence.taskId, firstTask.id)
+      assert.strictEqual(evidence.revision, firstTask.revision)
+      assert.ok(evidence.verification)
+      assert.ok(Array.isArray(evidence.checks))
+
+      const conflictEvidence = await call('taskEvidence', root, { taskId: firstTask.id, expectedRevision: 'wrong-rev' })
+      assert.strictEqual(conflictEvidence.ok, false)
+      assert.strictEqual(conflictEvidence.error.code, 'CONFLICT')
+    }
+
+    const badEvidence = await call('taskEvidence', root, {})
+    assert.strictEqual(badEvidence.ok, false)
+    assert.strictEqual(badEvidence.error.code, 'INVALID_ARGUMENT')
+    console.log('ok (sprint 11 BE IPC & verification)')
+  }
 }
 // Cài đặt › CLI Agent: a scan lists each real file once, PATH first and executables only; a check reads the version and
 // each account's login through the picked file; a turn whose file is gone points to the setting
@@ -2584,7 +2709,7 @@ function appSettingsChecks() {
   console.log('ok (app settings search)')
 }
 
-logChecks().then(needsChecks).then(timelineChecks).then(taskChecks).then(auditChecks).then(viewerChecks).then(runChecks).then(cliPathChecks).then(appSettingsChecks).then(sprint7Checks).then(sprint8Checks).then(sprint9Checks).then(sprint6Checks).then(rendererChecks).then(rendererFileChecks).then(rendererS9Checks).then(rendererS10Checks).then(rendererS11Checks).then(mainChecks).then(() => console.log('ok'), e => { console.error(e); process.exit(1) })
+logChecks().then(needsChecks).then(timelineChecks).then(taskChecks).then(auditChecks).then(viewerChecks).then(runChecks).then(cliPathChecks).then(appSettingsChecks).then(sprint7Checks).then(sprint8Checks).then(sprint9Checks).then(sprint11CoreChecks).then(sprint6Checks).then(rendererChecks).then(rendererFileChecks).then(rendererS9Checks).then(rendererS10Checks).then(rendererS11Checks).then(mainChecks).then(() => console.log('ok'), e => { console.error(e); process.exit(1) })
 
 // PM creates a task and moves it in the same turn (no revision yet): "" is accepted only for PM on a todo task
 {
@@ -2592,7 +2717,7 @@ logChecks().then(needsChecks).then(timelineChecks).then(taskChecks).then(auditCh
   const V = (changes, actor) => core.validateTaskChanges(board, changes, actor)
   assert.strictEqual(V([{ id: 'T1', status: 'doing', expectedRevision: '' }], 'pm').length, 1)
   assert.throws(() => V([{ id: 'T1', status: 'doing', expectedRevision: '' }], 'dev'), /thay đổi/) // others still need the revision
-  assert.throws(() => V([{ id: 'T2', status: 'done', expectedRevision: '' }], 'pm'), /thay đổi/)   // already moved → revision required
+  assert.throws(() => V([{ id: 'T2', status: 'done', expectedRevision: '', approval: { kind: 'manual', reason: 'ok' } }], 'pm'), /thay đổi/)   // already moved → revision required
   console.log('ok (task revision)')
 }
 // Claude: cache reads/writes are tokens sent too (without them a turn showed "Vào 4")

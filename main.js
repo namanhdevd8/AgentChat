@@ -89,6 +89,487 @@ function updateRegistry(root, change) {
   change(registry); writeWorktrees(root, registry)
   return registry
 }
+
+const verificationFile = root => path.join(worktreeBase(root), `verification${core.chatName(root)}.jsonl`)
+
+function readVerificationRecords(root) {
+  const file = verificationFile(root)
+  if (!rawFs.existsSync(file)) return []
+  try {
+    const content = rawFs.readFileSync(file, 'utf8')
+    const lines = content.split('\n')
+    const records = []
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i].trim()
+      if (!line) continue
+      try {
+        const parsed = JSON.parse(line)
+        records.push(parsed)
+      } catch (e) {
+        if (i === lines.length - 1) break
+        return Object.assign(records, { corrupted: true })
+      }
+    }
+    return records
+  } catch {
+    return Object.assign([], { corrupted: true })
+  }
+}
+
+function appendVerificationRecord(root, record) {
+  try {
+    const file = verificationFile(root)
+    fs.mkdirSync(worktreeBase(root), { recursive: true })
+    rawFs.appendFileSync(file, JSON.stringify(record) + '\n', 'utf8')
+  } catch (e) {
+    console.error('Không ghi được hồ sơ kiểm tra:', e)
+  }
+}
+
+function detectTestWarnings(changedFiles) {
+  const testPatterns = [
+    /^check\.js$/i,
+    /^(test|tests|__tests__)\//i,
+    /\.(test|spec)\.[a-z0-9]+$/i,
+  ]
+  const configPatterns = [
+    /^(jest|vitest|playwright|cypress)\.config\.[a-z0-9]+$/i,
+    /^karma\.conf\.[a-z0-9]+$/i,
+    /^(pytest|tox)\.ini$/i,
+    /^conftest\.py$/i,
+    /^\.github\/workflows\//i,
+  ]
+  const files = []
+  let total = 0
+  for (const f of changedFiles) {
+    const norm = f.replace(/\\/g, '/')
+    let reason = null
+    if (testPatterns.some(p => p.test(norm))) {
+      reason = 'test'
+    } else if (configPatterns.some(p => p.test(norm))) {
+      reason = 'test-config'
+    } else if (/^package\.json$/i.test(norm)) {
+      reason = 'check-script'
+    }
+    if (reason) {
+      total++
+      if (files.length < 50) files.push({ path: norm, reason })
+    }
+  }
+  return { files, total, truncated: total > 50 }
+}
+
+const checkPolicyHash = checks => createHash('sha256')
+  .update(JSON.stringify((checks || []).map(c => String(c).trim()))).digest('hex')
+
+function cleanExcerpt(stdout, stderr) {
+  const combined = ((stdout || '') + '\n' + (stderr || '')).trim()
+  const noAnsi = combined.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')
+  const cleaned = noAnsi.replace(/[\0-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '')
+  if (cleaned.length > 4096) {
+    return { excerpt: cleaned.slice(-4096), truncated: true }
+  }
+  return { excerpt: cleaned, truncated: false }
+}
+
+async function resolveTaskVerification(root, task, allReviews, allChecks, probe, settings) {
+  if (task.status === 'done') {
+    if (!task.approval) {
+      return {
+        state: 'legacy',
+        reason: 'Lịch sử trước Sprint 11',
+        reviewId: null,
+        checkIds: [],
+        warnings: { files: [], total: 0, truncated: false },
+        approval: null
+      }
+    }
+    return {
+      state: task.approval.kind === 'manual' ? 'manual' : 'ready',
+      reason: 'Đã duyệt',
+      reviewId: task.reviewId || null,
+      checkIds: task.approval.checkIds || [],
+      warnings: { files: [], total: 0, truncated: false },
+      approval: task.approval
+    }
+  }
+
+  if (task.acceptance === 'manual') {
+    return {
+      state: 'manual',
+      reason: 'Cần nghiệm thu',
+      reviewId: null,
+      checkIds: [],
+      warnings: { files: [], total: 0, truncated: false },
+      approval: null
+    }
+  }
+
+  const matchingReviews = allReviews.filter(r => r.task && r.task.id === task.id && r.task.definitionRevision === task.definitionRevision)
+  const latestReview = matchingReviews[matchingReviews.length - 1]
+  if (!latestReview) {
+    return {
+      state: 'none',
+      reason: 'Chưa có bằng chứng',
+      reviewId: null,
+      checkIds: [],
+      warnings: { files: [], total: 0, truncated: false },
+      approval: null
+    }
+  }
+
+  const warnings = latestReview.warnings || { files: [], total: 0, truncated: false }
+  const currentPolicyHash = checkPolicyHash(settings?.mergeChecks || [])
+
+  const registry = readWorktrees(root)
+  const activeQueueEntry = registry.queue.find(q =>
+    (q.reviewIds?.includes(latestReview.id) || (q.runId === latestReview.runId && q.workspaceId === latestReview.workspaceId))
+    && ['queued', 'checking', 'publishing'].includes(q.state)
+  )
+  if (activeQueueEntry) {
+    return {
+      state: 'pending',
+      reason: 'Chờ kiểm',
+      reviewId: latestReview.id,
+      checkIds: [],
+      warnings,
+      approval: null
+    }
+  }
+
+  const relevantChecks = allChecks.filter(c =>
+    (c.reviewIds?.includes(latestReview.id) || c.taskRefs?.some(tr => tr.id === task.id && tr.definitionRevision === task.definitionRevision))
+    && c.checkPolicyHash === currentPolicyHash
+  )
+
+  if (!relevantChecks.length) {
+    const failedEntry = registry.queue.find(q =>
+      (q.reviewIds?.includes(latestReview.id) || (q.runId === latestReview.runId && q.workspaceId === latestReview.workspaceId))
+      && ['check-failed', 'conflict', 'error', 'paused'].includes(q.state)
+    )
+    if (failedEntry) {
+      return {
+        state: 'failed',
+        reason: 'Kiểm tra lỗi',
+        reviewId: latestReview.id,
+        checkIds: [],
+        warnings,
+        approval: null
+      }
+    }
+    return {
+      state: 'none',
+      reason: 'Chưa có bằng chứng',
+      reviewId: latestReview.id,
+      checkIds: [],
+      warnings,
+      approval: null
+    }
+  }
+
+  const latestCheck = relevantChecks[relevantChecks.length - 1]
+  if (latestCheck.outcome !== 'passed' || !latestCheck.treeStable) {
+    return {
+      state: 'failed',
+      reason: 'Kiểm tra lỗi',
+      reviewId: latestReview.id,
+      checkIds: [latestCheck.id],
+      warnings,
+      approval: null
+    }
+  }
+
+  let isStale = false
+  let staleReason = null
+  if (latestReview.sourceSha && probe?.sha) {
+    try {
+      const checkSha = latestCheck.candidateSha || latestCheck.sourceSha || probe.sha
+      if (checkSha !== probe.sha) {
+        const diffMain = (await git(root, ['diff', '--no-renames', '--name-only', '-z', checkSha, probe.sha])).stdout
+        const changedOnMain = nul(diffMain)
+        const testWarningsMain = detectTestWarnings(changedOnMain)
+        if (testWarningsMain.total > 0 || (latestReview.artifactPaths && changedOnMain.some(p => latestReview.artifactPaths.includes(p)))) {
+          isStale = true
+          staleReason = 'Cần kiểm lại (code hoặc test trên main đã thay đổi)'
+        }
+      }
+    } catch {
+      isStale = true
+      staleReason = 'Chưa xác minh được'
+    }
+  }
+
+  if (isStale) {
+    return {
+      state: 'stale',
+      reason: staleReason || 'Cần kiểm lại',
+      reviewId: latestReview.id,
+      checkIds: [latestCheck.id],
+      warnings,
+      approval: null
+    }
+  }
+
+  return {
+    state: 'ready',
+    reason: 'Đã kiểm · chờ PM duyệt',
+    reviewId: latestReview.id,
+    checkIds: [latestCheck.id],
+    warnings,
+    approval: null
+  }
+}
+
+async function verifyTaskApproval(root, task, approval, actor) {
+  if (actor.toLowerCase() !== 'pm') {
+    return { ok: false, code: 'INVALID', message: 'Chỉ PM được đóng task' }
+  }
+  if (!approval || !approval.kind) {
+    return { ok: false, code: 'INVALID', message: 'Đóng task bắt buộc kèm approval' }
+  }
+  if (approval.kind === 'manual') {
+    const registry = readWorktrees(root)
+    const hasWorktree = core.projectSettings(root).settings.worktreesEnabled
+    const hadWorkspace = registry.queue.some(q => q.taskRefs?.some(tr => tr.id === task.id))
+    if (task.acceptance === 'code' && (hasWorktree || hadWorkspace)) {
+      return { ok: false, code: 'INVALID', message: 'Task code có worktree không được duyệt manual' }
+    }
+    if (!approval.reason || !approval.reason.trim()) {
+      return { ok: false, code: 'INVALID', message: 'Duyệt manual bắt buộc có reason' }
+    }
+    if (approval.report && !core.validTaskSpec(approval.report, root)) {
+      return { ok: false, code: 'INVALID', message: 'Đường dẫn report không hợp lệ' }
+    }
+    return { ok: true }
+  }
+
+  if (approval.kind === 'checks') {
+    if (task.status !== 'review') {
+      return { ok: false, code: 'REVIEW_REQUIRED', message: 'Task phải ở trạng thái Chờ duyệt (review) trước khi đóng' }
+    }
+    const records = readVerificationRecords(root)
+    if (records.corrupted) {
+      return { ok: false, code: 'EVIDENCE_UNAVAILABLE', message: 'Hồ sơ kiểm tra bị lỗi, không thể xác minh' }
+    }
+    const allReviews = records.filter(r => r.kind === 'review')
+    const allChecks = records.filter(r => r.kind === 'check')
+    const probe = await repoProbe(root).catch(() => null)
+    const settings = core.projectSettings(root).settings
+    const verification = await resolveTaskVerification(root, task, allReviews, allChecks, probe, settings)
+
+    if (verification.state === 'none') {
+      return { ok: false, code: 'EVIDENCE_REQUIRED', message: 'Task chưa có bằng chứng kiểm tra đạt' }
+    }
+    if (verification.state === 'pending') {
+      return { ok: false, code: 'EVIDENCE_REQUIRED', message: 'Kiểm tra đang chạy, chưa có kết quả đạt' }
+    }
+    if (verification.state === 'failed') {
+      return { ok: false, code: 'EVIDENCE_REQUIRED', message: 'Kiểm tra thất bại, không thể duyệt đóng task' }
+    }
+    if (verification.state === 'stale') {
+      return { ok: false, code: 'EVIDENCE_STALE', message: 'Bằng chứng đã cũ; code hoặc test đã thay đổi' }
+    }
+    if (verification.state === 'unavailable') {
+      return { ok: false, code: 'EVIDENCE_UNAVAILABLE', message: 'Chưa xác minh được bằng chứng kiểm tra' }
+    }
+    if (verification.state !== 'ready') {
+      return { ok: false, code: 'EVIDENCE_REQUIRED', message: 'Bằng chứng chưa sẵn sàng để duyệt' }
+    }
+    for (const id of approval.checkIds) {
+      const check = allChecks.find(c => c.id === id)
+      if (!check) {
+        return { ok: false, code: 'EVIDENCE_REQUIRED', message: `Không tìm thấy check ${id}` }
+      }
+      if (check.outcome !== 'passed' || !check.treeStable) {
+        return { ok: false, code: 'EVIDENCE_REQUIRED', message: `Check ${id} không đạt` }
+      }
+    }
+    return { ok: true }
+  }
+
+  return { ok: false, code: 'INVALID', message: 'kind của approval không hỗ trợ' }
+}
+
+async function captureAppFacts(root, agentName, workspaceId, runId) {
+  const capturedAt = new Date().toISOString()
+  const registry = readWorktrees(root)
+  const probe = await repoProbe(root).catch(() => null)
+  let branch = null, headSha = null, source = 'main', cwd = root
+  if (workspaceId) {
+    const agentRecord = registry.agents.find(a => a.id === workspaceId)
+    if (agentRecord) {
+      branch = agentRecord.branch
+      cwd = managedPath(root, 'agent', workspaceId)
+      source = 'worktree'
+    }
+  }
+  if (!probe) source = 'no-git'
+  headSha = await gitHead(cwd).catch(() => null)
+  if (!headSha && source !== 'no-git') source = 'unavailable'
+
+  let diff = null
+  if (source !== 'no-git' && headSha && probe?.sha) {
+    try {
+      const baseSha = probe.sha
+      const diffStat = await git(cwd, ['diff', '--shortstat', baseSha, headSha]).catch(() => ({ stdout: '' }))
+      let files = 0, insertions = 0, deletions = 0
+      const statMatch = /(\d+)\s+file/.exec(diffStat.stdout)
+      if (statMatch) files = Number(statMatch[1])
+      const insMatch = /(\d+)\s+insertion/.exec(diffStat.stdout)
+      if (insMatch) insertions = Number(insMatch[1])
+      const delMatch = /(\d+)\s+deletion/.exec(diffStat.stdout)
+      if (delMatch) deletions = Number(delMatch[1])
+
+      const untrackedOut = await git(cwd, ['ls-files', '--others', '--exclude-standard', '-z']).catch(() => ({ stdout: '' }))
+      const untrackedFiles = nul(untrackedOut.stdout)
+      const diffPathsOut = await git(cwd, ['diff', '--no-renames', '--name-only', '-z', baseSha, headSha]).catch(() => ({ stdout: '' }))
+      const allPaths = [...new Set([...nul(diffPathsOut.stdout), ...untrackedFiles])]
+
+      diff = {
+        baseSha,
+        files: files + untrackedFiles.length,
+        insertions,
+        deletions,
+        untracked: untrackedFiles.length,
+        binary: 0,
+        paths: allPaths.slice(0, 20),
+        truncated: allPaths.length > 20
+      }
+    } catch {}
+  }
+
+  const board = await core.taskBoardIndexed(root).catch(() => ({ tasks: [] }))
+  const tasks = board.tasks.filter(t => t.status !== 'done').map(t => ({ id: t.id, revision: t.revision, status: t.status }))
+
+  const records = readVerificationRecords(root)
+  const checks = records.filter(r => r.kind === 'check' && (r.workspaceId === workspaceId || r.taskRefs?.some(tr => tr.assignee === agentName)))
+  const latestCheckRecord = checks[checks.length - 1]
+  const latestCheck = latestCheckRecord ? {
+    id: latestCheckRecord.id,
+    sourceSha: latestCheckRecord.sourceSha,
+    candidateSha: latestCheckRecord.candidateSha,
+    finishedAt: latestCheckRecord.finishedAt,
+    outcome: latestCheckRecord.outcome,
+    current: latestCheckRecord.sourceSha === headSha
+  } : null
+
+  return {
+    version: 1,
+    capturedAt,
+    runId,
+    workspaceId: workspaceId || null,
+    branch,
+    headSha,
+    source,
+    diff,
+    tasks,
+    latestCheck,
+    error: null
+  }
+}
+
+async function runCommandWithVerification(job, { command, tasks, signal, onProgress, onSpawn, agent, cwd }) {
+  const root = job.root
+  let taskRefs = []
+  if (tasks && tasks.length) {
+    if (tasks.length > 20) {
+      return { command, exitCode: null, signal: null, stdout: '', stderr: '', truncated: false, durationMs: 0,
+        error: 'Số lượng task liên kết vượt quá 20', verificationError: 'Số lượng task liên kết vượt quá 20' }
+    }
+    const board = await core.taskBoardIndexed(root).catch(() => ({ tasks: [] }))
+    const isPm = String(job.name).toLowerCase() === 'pm'
+    const seenIds = new Set()
+    for (const req of tasks) {
+      if (seenIds.has(req.id)) {
+        return { command, exitCode: null, signal: null, stdout: '', stderr: '', truncated: false, durationMs: 0,
+          error: `Task ${req.id} bị trùng lặp`, verificationError: `Task ${req.id} bị trùng lặp` }
+      }
+      seenIds.add(req.id)
+      const t = board.tasks?.find(item => item.id === req.id)
+      if (!t) {
+        return { command, exitCode: null, signal: null, stdout: '', stderr: '', truncated: false, durationMs: 0,
+          error: `Không tìm thấy task ${req.id}`, verificationError: `Không tìm thấy task ${req.id}` }
+      }
+      if (t.revision !== req.expectedRevision) {
+        return { command, exitCode: null, signal: null, stdout: '', stderr: '', truncated: false, durationMs: 0,
+          error: `Task ${req.id} sai expectedRevision`, verificationError: `Task ${req.id} sai expectedRevision` }
+      }
+      if (!isPm && t.assignee !== job.name) {
+        return { command, exitCode: null, signal: null, stdout: '', stderr: '', truncated: false, durationMs: 0,
+          error: 'Agent chỉ được liên kết task của mình', verificationError: 'Agent chỉ được liên kết task của mình' }
+      }
+      taskRefs.push({
+        id: t.id,
+        createdAt: t.createdAt,
+        assignee: t.assignee,
+        definitionRevision: t.definitionRevision,
+        requestedRevision: req.expectedRevision
+      })
+    }
+  }
+
+  const preStatus = await git(cwd, ['status', '--porcelain=v1', '-z', '--untracked-files=all']).catch(() => ({ stdout: '' }))
+  const preClean = !preStatus.stdout
+  const headBefore = await gitHead(cwd).catch(() => null)
+  const startedAt = new Date().toISOString()
+
+  let result
+  try {
+    result = await core.runCommand(cwd, command, { signal, onProgress, onSpawn, agent })
+  } catch (e) {
+    result = { command, exitCode: null, signal: null, stdout: '', stderr: '', truncated: false, durationMs: 0, error: e.message }
+  }
+  const finishedAt = new Date().toISOString()
+  const postStatus = await git(cwd, ['status', '--porcelain=v1', '-z', '--untracked-files=all']).catch(() => ({ stdout: '' }))
+  const postClean = !postStatus.stdout
+  const headAfter = await gitHead(cwd).catch(() => null)
+  const treeStable = preClean && postClean && headBefore === headAfter
+
+  const { excerpt, truncated } = cleanExcerpt(result?.stdout, result?.stderr)
+  const cmdRecord = {
+    command,
+    exitCode: result?.exitCode ?? null,
+    signal: result?.signal ?? null,
+    durationMs: result?.durationMs || 0,
+    error: result?.error ?? null,
+    excerpt,
+    truncated
+  }
+
+  const outcome = signal?.aborted ? (signal.reason === 'timeout' ? 'timeout' : 'stopped')
+    : (result?.error || result?.exitCode !== 0 || !treeStable) ? 'failed' : 'passed'
+
+  const settings = core.projectSettings(root).settings
+  const checkRecord = {
+    version: 1,
+    kind: 'check',
+    id: randomUUID(),
+    origin: 'run-command',
+    runId: job.runId,
+    queueId: null,
+    workspaceId: job.workspaceId || null,
+    taskRefs,
+    reviewIds: [],
+    sourceSha: headAfter || null,
+    baseSha: job.baseSha || null,
+    candidateSha: null,
+    checkPolicyHash: checkPolicyHash(settings.mergeChecks || []),
+    startedAt,
+    finishedAt,
+    outcome,
+    treeStable,
+    commands: [cmdRecord]
+  }
+
+  appendVerificationRecord(root, checkRecord)
+  notifyProjectChanged(root, { tasks: true })
+
+  return {
+    ...result,
+    checkId: checkRecord.id,
+    verificationError: null
+  }
+}
 function managedPath(root, kind, id) {
   if (!/^[0-9a-f-]{36}$/i.test(id)) throw gitError('CONFIG_ERROR', 'Workspace ID không hợp lệ')
   const base = worktreeBase(root), target = path.join(base, kind, id)
@@ -400,20 +881,25 @@ async function commitWorkspace(job, result, changed, auditComplete, outside) {
       headSha = await gitHead(cwd)
     }
     const probe = await repoProbe(job.root), ahead = !await contained(job.root, headSha, record, probe.sha)
+    let queuedEntryId = null
     if (result.outcome === 'success' && ahead) {
       const settings = core.projectSettings(job.root).settings
       // the agent committed by itself: name the squash after what the turn changed
       subject ??= await turnSubject(job, result, nul((await git(cwd, ['diff', '--no-renames', '--name-only', '-z', job.baseSha, headSha])).stdout))
+      const entryId = randomUUID()
       updateRegistry(job.root, latest => {
-        if (!latest.queue.some(entry => entry.runId === job.runId && entry.headSha === headSha)) latest.queue.push({ id: randomUUID(), agent: job.name,
-          runId: job.runId, workspaceId: job.workspaceId, headSha, subject, checks: [...settings.mergeChecks], state: 'queued',
-          baseSha: probe.sha, candidateSha: null, error: null,
-          pgid: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() })
+        if (!latest.queue.some(entry => entry.runId === job.runId && entry.headSha === headSha)) {
+          latest.queue.push({ id: entryId, agent: job.name,
+            runId: job.runId, workspaceId: job.workspaceId, headSha, subject, checks: [...settings.mergeChecks], state: 'queued',
+            baseSha: probe.sha, candidateSha: null, error: null,
+            pgid: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+            bindingsPending: true })
+          queuedEntryId = entryId
+        }
         latest.targetSha = probe.sha
       })
-      pumpMerge(job.root).catch(e => console.error(e))
     }
-    return { id: record.id, branch: record.branch, headSha }
+    return { id: record.id, branch: record.branch, headSha, queuedEntryId }
   })
 }
 
@@ -522,6 +1008,9 @@ async function processMerge(root, id) {
     // 2. no lock: checks can take minutes, and agent turns need the lock to start (prepareWorkspace) and to commit
     const controller = new AbortController(); mergeControllers.set(root, { entry, controller })
     persistRegistry(root)
+    const startedAt = new Date().toISOString()
+    const commandsRun = []
+    let mergeFailed = null
     try {
       for (const command of entry.checks) {
         const timer = setTimeout(() => controller.abort('timeout'), core.timeoutMinutes(owner) * 60000)
@@ -532,12 +1021,58 @@ async function processMerge(root, id) {
           } })
         } finally { clearTimeout(timer) }
         entry.pgid = null; updateEntry(root, id, item => { item.pgid = null }); persistRegistry(root)
-        if (controller.signal.aborted) throw gitError('PAUSED', controller.signal.reason === 'timeout' ? 'Kiểm tra gộp quá giờ' : 'Đã dừng kiểm tra gộp')
-        if (result.error || result.exitCode !== 0) throw gitError('CHECK_FAILED', `Lệnh kiểm tra lỗi: ${command}`, { log: `${result.stdout}\n${result.stderr}` })
+        const { excerpt, truncated } = cleanExcerpt(result?.stdout, result?.stderr)
+        commandsRun.push({
+          command,
+          exitCode: result?.exitCode ?? null,
+          signal: result?.signal ?? null,
+          durationMs: result?.durationMs || 0,
+          error: result?.error ?? null,
+          excerpt,
+          truncated
+        })
+        if (controller.signal.aborted) {
+          mergeFailed = gitError('PAUSED', controller.signal.reason === 'timeout' ? 'Kiểm tra gộp quá giờ' : 'Đã dừng kiểm tra gộp')
+          break
+        }
+        if (result.error || result.exitCode !== 0) {
+          mergeFailed = gitError('CHECK_FAILED', `Lệnh kiểm tra lỗi: ${command}`, { log: `${result.stdout}\n${result.stderr}` })
+          break
+        }
       }
     } finally { mergeControllers.delete(root) }
-    if ((await git(integration, ['status', '--porcelain=v1', '-z', '--untracked-files=all'])).stdout)
-      throw gitError('CHECK_MUTATED_TREE', 'Lệnh kiểm tra đã sửa cây source')
+    const finishedAt = new Date().toISOString()
+    const treeStatus = await git(integration, ['status', '--porcelain=v1', '-z', '--untracked-files=all']).catch(() => ({ stdout: '' }))
+    const treeStable = !treeStatus.stdout
+    if (!mergeFailed && !treeStable) {
+      mergeFailed = gitError('CHECK_MUTATED_TREE', 'Lệnh kiểm tra đã sửa cây source')
+    }
+    const outcome = !mergeFailed && treeStable ? 'passed'
+      : controller.signal.aborted ? (controller.signal.reason === 'timeout' ? 'timeout' : 'stopped') : 'failed'
+
+    const checkRecord = {
+      version: 1,
+      kind: 'check',
+      id: randomUUID(),
+      origin: 'merge',
+      runId: entry.runId,
+      queueId: entry.id,
+      workspaceId: entry.workspaceId || null,
+      taskRefs: entry.taskRefs || [],
+      reviewIds: entry.reviewIds || [],
+      sourceSha: entry.headSha,
+      baseSha: entry.baseSha,
+      candidateSha: entry.candidateSha,
+      checkPolicyHash: checkPolicyHash(entry.checks),
+      startedAt,
+      finishedAt,
+      outcome,
+      treeStable,
+      commands: commandsRun
+    }
+    appendVerificationRecord(root, checkRecord)
+    notifyProjectChanged(root, { tasks: true })
+    if (mergeFailed) throw mergeFailed
     // 3. under the lock again: publish only if the target branch hasn't moved since step 1
     await withGitLock(root, async () => {
       entry = updateEntry(root, id, item => { item.state = 'publishing'; item.updatedAt = now() }); await emitWorktreeState(root)
@@ -577,7 +1112,7 @@ async function pumpMerge(root) {
   mergeWorkers.add(root)
   try {
     while (core.projectSettings(root).settings.worktreesEnabled) {
-      const entry = readWorktrees(root).queue.find(item => item.state === 'queued' && !item.supersededBy)
+      const entry = readWorktrees(root).queue.find(item => item.state === 'queued' && !item.supersededBy && !item.bindingsPending)
       if (!entry) break
       await processMerge(root, entry.id)
     }
@@ -646,7 +1181,7 @@ const orphanFor = dir => {
   const root = rootOf(dir)
   return orphans.filter(lock => lock.root === root).map(({ name, runId, scope, state }) => ({ name, runId, owns: core.ownsList(scope), readOnly: scope.readOnly, state }))
 }
-const chainInfo = job => job.chain ? { turns: job.chain.turns, limit: job.chain.chainLimit } : null
+const chainInfo = job => job.chain ? { turns: job.chain.turns, limit: job.chain.chainLimit, costUsd: job.chain.costUsd, costIncomplete: !!job.chain.costIncomplete } : null
 // activeAt: the last new step (CLI progress or a phase change), so the UI can tell a long silence from a busy turn
 function progress(job, label = job.label, extra) {
   if (extra !== undefined) {
@@ -693,8 +1228,12 @@ function removeJob(job) {
 async function finishWaiting(job, outcome, text) {
   if (job.finished) return
   job.finished = true
-  try { await terminal(job, { outcome, text, usage: zeroUsage() }, outcome === 'stopped' || outcome === 'timeout') }
-  finally { removeJob(job) }
+  const result = { outcome, text, usage: zeroUsage() }
+  try { await terminal(job, result, outcome === 'stopped' || outcome === 'timeout') }
+  finally {
+    recordChainTurn(job, result, [], [], true)
+    removeJob(job)
+  }
 }
 
 function stopJob(job, reason) {
@@ -713,12 +1252,13 @@ function stopJob(job, reason) {
 
 const newChain = root => {
   const { chainLimit, costCeiling } = core.projectSettings(root).settings
-  return { id: randomUUID(), turns: 0, costUsd: 0, chainLimit, costCeiling, noProgress: [], pingPong: null }
+  return { id: randomUUID(), turns: 0, costUsd: 0, costIncomplete: false, chainLimit, costCeiling, noProgress: [], pingPong: null, accountedRuns: new Set() }
 }
 async function haltChain(dir, chain, reason, targets) {
   const names = [...new Set(targets.map(agent => agent.name))]
   return post(dir, 'system', reason, { kind: 'chain-stop', canContinue: true, runId: chain.id, targets: names,
-    continuationTarget: names.map(name => `@${name}`).join(' ') })
+    continuationTarget: names.map(name => `@${name}`).join(' '),
+    costUsd: chain.costUsd, costIncomplete: !!chain.costIncomplete })
 }
 // routes in flight per folder: a box switch waits for them, or their turns would read and post into the other box
 const routing = new Map()
@@ -901,6 +1441,7 @@ async function failJob(job, error) {
   const result = { outcome: 'error', text: error.message, usage: zeroUsage() }
   try { await terminal(job, result); if (job.spawned) await warning(job, [], false) }
   finally {
+    recordChainTurn(job, result, [], [], false)
     const state = job.spawned ? orphanState(job.pgid) : 'dead'
     if (state === 'dead') releaseReservation(job); else keepOrphan(job, state)
     removeJob(job)
@@ -918,8 +1459,18 @@ async function warning(job, paths, auditComplete) {
 
 function recordChainTurn(job, result, changed, metadataChanged, auditComplete) {
   const chain = job.chain
-  if (!chain || result.outcome !== 'success') return
-  if (typeof result.usage?.costUsd === 'number') chain.costUsd += result.usage.costUsd
+  if (!chain) return
+  if (!chain.accountedRuns) chain.accountedRuns = new Set()
+  if (!chain.accountedRuns.has(job.runId)) {
+    chain.accountedRuns.add(job.runId)
+    const cost = result?.usage?.costUsd
+    if (typeof cost === 'number' && Number.isFinite(cost) && cost >= 0 && !result?.usage?.partial) {
+      chain.costUsd += cost
+    } else {
+      chain.costIncomplete = true
+    }
+  }
+  if (result.outcome !== 'success') return
   if (!auditComplete || changed.length || metadataChanged.length || result.taskUpdates?.length) {
     chain.noProgress = []; chain.pingPong = null; return
   }
@@ -963,6 +1514,30 @@ async function executeJob(job) {
       onSessionChanged: () => { try { emitSessions(job.root) } catch (e) { console.error('Không gửi được trạng thái phiên:', e) } },
       ...(job.retryContext ? { retryContext: job.retryContext } : {}),
       ...(job.initialPrompt ? { initialPrompt: job.initialPrompt } : {}),
+      getAppContext: async () => {
+        const facts = await captureAppFacts(job.root, job.name, job.workspaceId, job.runId)
+        const board = await core.taskBoardIndexed(job.root).catch(() => ({ tasks: [] }))
+        const records = readVerificationRecords(job.root)
+        const allReviews = records.filter(r => r.kind === 'review')
+        const allChecks = records.filter(r => r.kind === 'check')
+        const probe = await repoProbe(job.root).catch(() => null)
+        const settings = core.projectSettings(job.root).settings
+        const taskVerification = {}
+        if (board.tasks) {
+          for (const task of board.tasks) {
+            const verification = await resolveTaskVerification(job.root, task, allReviews, allChecks, probe, settings)
+            taskVerification[task.id] = {
+              revision: task.revision,
+              verification,
+              warnings: verification.warnings || { files: [], total: 0, truncated: false }
+            }
+          }
+        }
+        return { facts, taskVerification }
+      },
+      executeCommand: async (cmdReq) => {
+        return await runCommandWithVerification(job, cmdReq)
+      }
     })
   }
   clearTimeout(job.timer)
@@ -1003,12 +1578,11 @@ async function executeJob(job) {
     }
   } else if (result.orphanState) auditComplete = false
 
-  if (job.worktree && job.baseSha && !result.orphanState) try {
-    const workspace = await commitWorkspace(job, result, changed, auditComplete, paths)
-    if (workspace) result.logExtra = { ...(result.logExtra || {}), workspace }
-  } catch (e) { workspaceError = e }
+  let msg, taskError, routeNext = false, workspace = null
+  let parsedTaskChanges = null
+  const createdReviews = []
+  const createdTaskRefs = []
 
-  let msg, taskError, routeNext = false
   if (job.kind === 'summary') {
     try {
       if (result.outcome === 'success') {
@@ -1032,20 +1606,124 @@ async function executeJob(job) {
     }
     return
   }
+
   if (result.outcome === 'success') {
     const parsed = core.parseTaskStatusBlock(result.text)
     if (parsed.error || parsed.changes) result.text = parsed.text || '(không có phản hồi)'
     if (parsed.error) taskError = parsed.error
-    else if (parsed.changes) result.taskChanges = parsed.changes
+    else if (parsed.changes) parsedTaskChanges = parsed.changes
     const handoff = core.parseHandoffBlock(result.text)
     if (handoff.requested) result.text = handoff.text || '(không có phản hồi)'
     if (handoff.error) handoffError = handoff.error
     else if (handoff.handoff) try { core.writeHandoff(job.root, job.name, job.workspaceId || null, job.runId, handoff.handoff) }
       catch (e) { handoffError = e.message }
   }
+
+  if (job.worktree && job.baseSha && !result.orphanState) try {
+    workspace = await commitWorkspace(job, result, changed, auditComplete, paths)
+    if (workspace) result.logExtra = { ...(result.logExtra || {}), workspace }
+  } catch (e) { workspaceError = e }
+
+  if (parsedTaskChanges && !taskError) {
+    try {
+      const board = await core.taskBoardIndexed(job.root)
+      if (board.error) throw new Error(board.error.message)
+      const isPm = String(job.name).toLowerCase() === 'pm'
+      const settings = core.projectSettings(job.root).settings
+
+      for (const change of parsedTaskChanges) {
+        const task = board.tasks.find(t => t.id === change.id)
+        if (!task) throw new Error(`Không tìm thấy task ${change.id}`)
+        const fresh = change.expectedRevision === '' && isPm && task.status === 'todo'
+        if (!fresh && task.revision !== change.expectedRevision) throw new Error('Task đã thay đổi, hãy chọn lại')
+
+        if (change.status === 'done') {
+          const approvalCheck = await verifyTaskApproval(job.root, task, change.approval, job.name)
+          if (!approvalCheck.ok) throw new Error(approvalCheck.message)
+        } else if (change.status === 'review') {
+          const isOwner = task.assignee === job.name
+          if (isOwner) {
+            let sourceSha = null, baseSha = null, artifactPaths = [], pathsComplete = true, warnings = { files: [], total: 0, truncated: false }
+            if (job.worktree && workspace?.headSha) {
+              sourceSha = workspace.headSha
+              baseSha = job.baseSha
+              const diffOut = (await git(job.cwd, ['diff', '--no-renames', '--name-only', '-z', job.baseSha, workspace.headSha]).catch(() => ({ stdout: '' }))).stdout
+              const untrackedOut = (await git(job.cwd, ['ls-files', '--others', '--exclude-standard', '-z']).catch(() => ({ stdout: '' }))).stdout
+              const allDiffPaths = [...new Set([...nul(diffOut), ...nul(untrackedOut)])]
+              artifactPaths = allDiffPaths.slice(0, 5000)
+              pathsComplete = allDiffPaths.length <= 5000
+              warnings = detectTestWarnings(artifactPaths)
+            }
+            const taskRef = {
+              id: task.id,
+              createdAt: task.createdAt,
+              assignee: task.assignee,
+              definitionRevision: task.definitionRevision,
+              requestedRevision: change.expectedRevision
+            }
+            const reviewRecord = {
+              version: 1,
+              kind: 'review',
+              id: randomUUID(),
+              at: new Date().toISOString(),
+              task: taskRef,
+              runId: job.runId,
+              workspaceId: job.workspaceId || null,
+              sourceSha,
+              baseSha,
+              checkPolicyHash: checkPolicyHash(settings.mergeChecks || []),
+              artifactPaths,
+              pathsComplete,
+              warnings
+            }
+            appendVerificationRecord(job.root, reviewRecord)
+            change.reviewId = reviewRecord.id
+            createdReviews.push(reviewRecord)
+            createdTaskRefs.push(taskRef)
+          }
+        }
+      }
+      result.taskChanges = parsedTaskChanges
+    } catch (e) {
+      taskError = e.message
+    }
+  }
+
   try {
     msg = await terminal(job, result)
     taskError ||= result.taskError
+
+    if (workspace?.queuedEntryId) {
+      updateRegistry(job.root, latest => {
+        const entry = latest.queue.find(item => item.id === workspace.queuedEntryId)
+        if (entry) {
+          delete entry.bindingsPending
+          if (result.taskUpdates?.length) {
+            entry.reviewIds = createdReviews.map(r => r.id)
+            entry.taskRefs = createdTaskRefs
+          }
+        }
+      })
+      pumpMerge(job.root).catch(e => console.error(e))
+    } else if (core.projectSettings(job.root).settings.worktreesEnabled) {
+      pumpMerge(job.root).catch(e => console.error(e))
+    }
+
+    try {
+      const endFacts = await captureAppFacts(job.root, job.name, job.workspaceId, job.runId)
+      appendVerificationRecord(job.root, {
+        version: 1,
+        kind: 'handoff-facts',
+        id: randomUUID(),
+        agent: job.name,
+        workspaceId: job.workspaceId || null,
+        runId: job.runId,
+        facts: endFacts
+      })
+    } catch (e) {
+      console.error('Không lưu được handoff-facts:', e)
+    }
+
     if (result.taskUpdates?.length) {
       const changes = result.taskUpdates.map(update => `${update.id} sang ${TASK_STATUS_LABELS[update.status]}`).join('; ')
       await post(job.dir, 'system', `${job.name} chuyển ${changes}.`, { kind: 'task-status-note', relatedRunId: job.runId })
@@ -1760,8 +2438,12 @@ ipcMain.handle('retryMerge', (event, dir, request) => {
       updateRegistry(root, latest => {
         const current = latest.queue.find(entry => entry.id === old.id)
         if (!current || current.supersededBy || !RETRYABLE_MERGE_STATES.includes(current.state)) return // changed while we waited
+        const sameHead = headSha === current.headSha
         latest.queue.push({ ...current, id, runId: randomUUID(), headSha, checks: [...settings.mergeChecks], state: 'queued',
-          baseSha: probe.sha, candidateSha: null, error: null, pgid: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() })
+          baseSha: probe.sha, candidateSha: null, error: null, pgid: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+          reviewIds: sameHead ? (current.reviewIds ? [...current.reviewIds] : []) : [],
+          taskRefs: sameHead ? (current.taskRefs ? [...current.taskRefs] : []) : [],
+          bindingsPending: false })
         current.supersededBy = id
       })
     })
@@ -1854,7 +2536,74 @@ ipcMain.handle('retract', (event, dir, seq) => {
     return { text: msg.text }
   })
 })
-ipcMain.handle('tasks', (event, dir) => { validSender(event); return core.taskBoardIndexed(knownProject(dir)) })
+ipcMain.handle('tasks', async (event, dir) => {
+  validSender(event)
+  const root = knownProject(dir)
+  const board = await core.taskBoardIndexed(root)
+  if (board.error || !board.tasks) return board
+  const records = readVerificationRecords(root)
+  const allReviews = records.filter(r => r.kind === 'review')
+  const allChecks = records.filter(r => r.kind === 'check')
+  const probe = await repoProbe(root).catch(() => null)
+  const settings = core.projectSettings(root).settings
+  const tasks = await Promise.all(board.tasks.map(async task => {
+    const verification = await resolveTaskVerification(root, task, allReviews, allChecks, probe, settings)
+    return { ...task, verification }
+  }))
+  return { ...board, tasks }
+})
+ipcMain.handle('taskEvidence', (event, dir, request) => {
+  validSender(event)
+  return apiCall(async () => {
+    const root = knownProject(dir)
+    const { taskId, expectedRevision } = request || {}
+    if (!taskId || typeof taskId !== 'string' || !expectedRevision || typeof expectedRevision !== 'string') {
+      throw gitError('INVALID_ARGUMENT', 'Thiếu taskId hoặc expectedRevision')
+    }
+    const board = await core.taskBoardIndexed(root)
+    const task = board.tasks?.find(t => t.id === taskId)
+    if (!task) throw gitError('NOT_FOUND', 'Không tìm thấy task')
+    if (task.revision !== expectedRevision) throw gitError('CONFLICT', 'Revision của task không khớp')
+
+    const records = readVerificationRecords(root)
+    const allReviews = records.filter(r => r.kind === 'review')
+    const allChecks = records.filter(r => r.kind === 'check')
+    const probe = await repoProbe(root).catch(() => null)
+    const settings = core.projectSettings(root).settings
+    const verification = await resolveTaskVerification(root, task, allReviews, allChecks, probe, settings)
+
+    const matchingReviews = allReviews.filter(r => r.task && r.task.id === task.id && r.task.definitionRevision === task.definitionRevision)
+    const review = matchingReviews[matchingReviews.length - 1] || null
+
+    let checks = allChecks.filter(c =>
+      (review && c.reviewIds?.includes(review.id)) ||
+      c.taskRefs?.some(tr => tr.id === task.id && tr.definitionRevision === task.definitionRevision)
+    )
+    const total = checks.length
+    const truncated = total > 20
+    if (truncated) {
+      const importantIds = new Set(verification.checkIds || [])
+      let recent = checks.slice(-20)
+      for (const id of importantIds) {
+        if (!recent.some(c => c.id === id)) {
+          const match = checks.find(c => c.id === id)
+          if (match) recent.unshift(match)
+        }
+      }
+      checks = recent.slice(-20)
+    }
+
+    return {
+      taskId: task.id,
+      revision: task.revision,
+      verification,
+      review,
+      checks,
+      total,
+      truncated
+    }
+  })
+})
 ipcMain.handle('readProjectFile', async (event, dir, href, fromFile, workspaceId) => {
   validSender(event)
   const root = knownProject(dir), target = viewerTarget(root, href, fromFile, workspaceId)
