@@ -23,7 +23,6 @@ const RETRYABLE_MERGE_STATES = ['conflict', 'check-failed', 'blocked-dirty', 'bl
 const jobs = [], orphans = [], loadedRoots = new Set(), rootDirs = new Map()
 const summaryUnavailable = new Set()
 const logGenerations = new Map(), appLogWrites = new Map()
-const continuedChains = new Map()
 const pendingPermissions = new Map(), permissionReservations = new Map()
 let win, sequence = 0, pumping = false, pumpAgain = false, orphanTimer
 let watched = { dir: null, root: null, file: null, watchers: [], timer: null, changed: null }
@@ -133,7 +132,8 @@ function readControlStore(root) {
   try {
     const text = fs.readFileSync(file, 'utf8')
     const data = JSON.parse(text)
-    if (data?.version === 1 && typeof data.stops === 'object' && typeof data.claims === 'object') {
+    if (data?.version === 1 && data.stops && !Array.isArray(data.stops) && typeof data.stops === 'object'
+      && data.claims && !Array.isArray(data.claims) && typeof data.claims === 'object') {
       return { ...data, corrupted: false }
     }
     return { version: 1, stops: {}, claims: {}, corrupted: true }
@@ -178,15 +178,16 @@ const TASK_MILESTONES = { todo: 0, doing: 1, review: 2, done: 3 }
 
 function taskSemanticKey(task) {
   if (!task) return ''
-  const content = `${task.title || ''}\0${task.spec || ''}\0${task.acceptance || ''}`
+  const content = `${task.id}\0${task.createdAt}\0${task.assignee}\0${task.title || ''}\0${task.spec || ''}\0${task.acceptance || ''}`
   return createHash('sha256').update(content).digest('hex')
 }
 
-function checkProofKey(record) {
-  if (!record || !record.treeStable || !['passed', 'failed'].includes(record.outcome)) return null
+function checkProofKey(record, semanticKeys = {}) {
+  if (!record || !record.treeStable || !record.treeSha || !record.taskRefs?.length || !record.checkPolicyHash
+    || !['passed', 'failed'].includes(record.outcome)) return null
   const cmdResults = (record.commands || []).map(c => `${c.command}:${c.exitCode}:${c.signal}`).join(';')
   const tree = record.treeSha || record.candidateSha || record.sourceSha || ''
-  const taskKey = (record.taskRefs || []).map(t => `${t.id}:${t.definitionRevision}`).join(';')
+  const taskKey = (record.taskRefs || []).map(t => semanticKeys[t.id] || `${t.id}:${t.definitionRevision}`).sort().join(';')
   return `check\0${taskKey}\0${tree}\0${record.checkPolicyHash || ''}\0${record.outcome}\0${cmdResults}`
 }
 
@@ -1407,6 +1408,7 @@ async function terminal(job, result, waiting = false) {
       : result.outcome === 'error' ? `@${job.name} lỗi: ${result.text}` : result.text
   const msg = await post(job.dir, result.outcome === 'success' ? job.name : 'system', text,
     { runId: job.runId, agent: job.name, cli: job.agent.cli, ...(result.model ? { model: result.model } : {}), outcome: result.outcome, usage: result.usage,
+      chainId: job.chain?.id || null, sourceSeqs: (job.sourceRefs || []).map(r => r.seq),
       contextInputTokens: result.contextInputTokens ?? null,
       ...(result.taskUpdates?.length ? { taskUpdates: result.taskUpdates } : {}),
       ...(result.commandResults?.length ? { commandResults: result.commandResults } : {}), ...(result.logExtra || {}) },
@@ -1466,6 +1468,7 @@ const newChain = (root, options = {}) => {
   const id = options.id || randomUUID()
   const chain = {
     id,
+    root,
     stopId: options.stopId || id,
     turns: 0,
     reservedTurns: 0,
@@ -1493,6 +1496,177 @@ const newChain = (root, options = {}) => {
   return chain
 }
 
+const sourceRef = msg => ({ seq: msg.seq, at: msg.at, textHash: createHash('sha256').update(msg.text || '').digest('hex') })
+function mergePending(list, item) {
+  let p = list.find(p => p.agent === item.agent && !!p.uncertain === !!item.uncertain && (p.runId || null) === (item.runId || null))
+  if (!p) { p = { ...item, sourceRefs: [], taskIds: [] }; list.push(p) }
+  for (const ref of item.sourceRefs || []) if (!p.sourceRefs.some(r => r.seq === ref.seq)) p.sourceRefs.push(ref)
+  p.taskIds = [...new Set([...p.taskIds, ...(item.taskIds || [])])]
+}
+function storedPending(record) {
+  return structuredClone(record.pending || (record.state?.pending || []).map(p => ({ ...p,
+    sourceRefs: (p.sourceSeqs || []).map(seq => (record.sourceRefs || []).find(r => r.seq === seq)).filter(Boolean) })))
+}
+async function sourceMessages(root, refs) {
+  if (!Array.isArray(refs) || !refs.length) throw gitError('UNAVAILABLE', 'Thiếu tin nguồn của công việc đang chờ')
+  const messages = []
+  for (const ref of refs) {
+    if (!ref || !Number.isInteger(ref.seq) || !ref.at || !ref.textHash) throw gitError('UNAVAILABLE', 'Tham chiếu tin nguồn không hợp lệ')
+    const msg = (await core.logPage(root, { around: ref.seq, limit: 1 })).messages[0]
+    if (!msg || msg.seq !== ref.seq || msg.retracted || msg.at !== ref.at || sourceRef(msg).textHash !== ref.textHash)
+      throw gitError('UNAVAILABLE', 'Tin nguồn đã thay đổi hoặc bị thu hồi; hãy kiểm tra lịch sử')
+    messages.push(msg)
+  }
+  return messages.sort((a, b) => a.seq - b.seq)
+}
+async function findChainStop(root, id) {
+  const index = await core.getLogIndex(root)
+  if (index.error) throw gitError('UNAVAILABLE', 'Lịch sử lỗi; không thể xác minh Tiếp tục')
+  const seq = Number.isInteger(id) ? id : index.records.findIndex(r => r.kind === 'chain-stop' && (r.stopId === id || r.chainId === id || r.runId === id))
+  if (!Number.isInteger(seq) || seq < 0) throw gitError('INVALID_ARGUMENT', 'Không tìm thấy thẻ dừng')
+  const stop = (await core.logPage(root, { around: seq, limit: 1 })).messages[0]
+  if (stop?.seq !== seq || stop.kind !== 'chain-stop') throw gitError('INVALID_ARGUMENT', 'Không tìm thấy thẻ dừng')
+  return stop
+}
+const stopKey = stop => stop.stopId || stop.chainId || stop.runId || String(stop.seq)
+const controlRecovery = new Map()
+async function withChainOperation(root, fn) {
+  routing.set(root, (routing.get(root) || 0) + 1)
+  try { return await fn() }
+  finally { if (routing.get(root) > 1) routing.set(root, routing.get(root) - 1); else routing.delete(root) }
+}
+function recoverChainControl(root) {
+  const key = core.chat(root)
+  if (controlRecovery.has(key)) return controlRecovery.get(key)
+  const work = withChainOperation(root, async () => {
+    const store = readControlStore(root)
+    if (store.corrupted) throw gitError('UNAVAILABLE', 'File điều phối hỏng; không thể xác minh Tiếp tục')
+    const index = await core.getLogIndex(root)
+    if (index.error) throw gitError('UNAVAILABLE', 'Lịch sử lỗi; không thể khôi phục điều phối')
+    const terminals = new Map(index.records.flatMap((r, seq) => r.runId && r.outcome ? [[r.runId, { ...r, seq }]] : []))
+    for (const claim of Object.values(store.claims)) {
+      if (claim.kind !== 'continue' || activeChains.has(claim.childChainId)) continue
+      if (!claim.childChainId || !Array.isArray(claim.dispatches)) throw gitError('UNAVAILABLE', 'Claim Tiếp tục thiếu dữ kiện')
+      const parent = store.stops[claim.stopId]
+      if (!parent?.state) throw gitError('UNAVAILABLE', 'Claim Tiếp tục không còn checkpoint cha')
+      await sourceMessages(root, [parent.logMessageRef])
+      const notice = index.records.find(r => r.kind === 'chain-continue' && (r.stopId === claim.stopId || r.continuedFrom === parent.logMessageRef.seq))
+      if (notice?.childChainId && notice.childChainId !== claim.childChainId) throw gitError('UNAVAILABLE', 'Claim và lịch sử Tiếp tục không khớp')
+      if (!notice) await postOnce(root, 'continue:' + claim.stopId, 'system', 'Khôi phục trạng thái Tiếp tục đã nhận; không tự chạy lại agent.',
+        { kind: 'chain-continue', stopId: claim.stopId, childChainId: claim.childChainId, continuedFrom: parent.logMessageRef.seq, targets: claim.dispatches.map(d => d.agent) })
+      const pending = []
+      for (const d of claim.dispatches) {
+        const terminal = terminals.get(d.runId)
+        if (terminal) continue // An accepted terminal is never replayed, regardless of the last dispatch checkpoint.
+        const source = storedPending(parent).find(p => p.agent === d.agent)
+        mergePending(pending, { agent: d.agent, sourceRefs: d.sourceRefs || source?.sourceRefs || [], taskIds: d.taskIds || source?.taskIds || [],
+          uncertain: d.state !== 'reserved' || !!d.runId, runId: d.runId || null })
+      }
+      // A terminal may have been appended before its outgoing routing was checkpointed.
+      // Keep such referrals visible as uncertain; never infer that a missing terminal means no dispatch.
+      const ended = [...terminals.values()].filter(t => t.chainId === claim.childChainId || claim.dispatches.some(d => d.runId === t.runId))
+      let knownCost = 0
+      if (!store.stops[claim.childChainId]) for (const terminal of ended) {
+        const msg = (await core.logPage(root, { around: terminal.seq, limit: 1 })).messages[0]
+        if (Number.isFinite(msg.usage?.costUsd) && msg.usage.costUsd >= 0) knownCost += msg.usage.costUsd
+        if (terminal.outcome === 'success') for (const agent of core.mentions(msg.text, core.team(root), msg.from)) {
+          if (!ended.some(t => t.from === agent.name && t.sourceSeqs?.includes(terminal.seq)))
+            mergePending(pending, { agent: agent.name, sourceRefs: [sourceRef(msg)], taskIds: [], uncertain: true })
+        }
+      }
+      updateControlStore(root, latest => {
+        const p = latest.stops[claim.stopId]
+        if (p.state.phase !== 'continued' || p.state.continuedTo !== claim.childChainId) {
+          p.state = { ...p.state, phase: 'continued', canContinue: false, continuedTo: claim.childChainId, revision: String(Number(p.state.revision || 0) + 1) }
+        }
+        if (pending.length && !latest.stops[claim.childChainId]) {
+          latest.stops[claim.childChainId] = { stopId: claim.childChainId, chainId: claim.childChainId, pending, running: [], accountedRunIds: ended.map(t => t.runId), sourceRefs: pending.flatMap(p => p.sourceRefs), logMessageRef: null,
+            state: { ...p.state, stopId: claim.childChainId, chainId: claim.childChainId, revision: '1', phase: 'interrupted', continuedTo: null,
+              reason: { code: 'restart-interrupted', text: 'Tiếp tục bị gián đoạn. Kiểm tra lượt chưa rõ kết quả; phần chưa chạy vẫn được giữ.' },
+              turns: Math.max(ended.length, claim.dispatches.filter(d => d.state !== 'reserved').length), costUsd: knownCost, costIncomplete: true, running: [], pending: [], canContinue: false } }
+        }
+      })
+    }
+    for (const saved of Object.values(readControlStore(root).stops)) {
+      if (!saved?.state || activeChains.has(saved.chainId)) continue
+      if (saved.state.phase === 'continued') continue
+      const pending = storedPending(saved), running = []
+      const accounted = new Set(saved.accountedRunIds || [])
+      let costUsd = saved.state.costUsd, costIncomplete = saved.state.costIncomplete
+      for (const run of saved.running || saved.state.running || []) {
+        const terminal = terminals.get(run.runId)
+        if (terminal) {
+          const msg = (await core.logPage(root, { around: terminal.seq, limit: 1 })).messages[0]
+          if (!accounted.has(run.runId)) {
+            const cost = msg.usage?.costUsd
+            // Old checkpoints cannot tell whether this cost was already included.
+            if (!saved.accountedRunIds) costIncomplete = true
+            else {
+              if (Number.isFinite(cost) && cost >= 0) costUsd += cost
+              if (msg.usage?.partial || !Number.isFinite(cost) || cost < 0) costIncomplete = true
+            }
+            accounted.add(run.runId)
+          }
+          if (terminal.outcome === 'success') {
+            for (const agent of core.mentions(msg.text, core.team(root), msg.from)) mergePending(pending, { agent: agent.name, sourceRefs: [sourceRef(msg)], taskIds: [], uncertain: false })
+          }
+        } else {
+          mergePending(pending, { agent: run.agent, runId: run.runId, sourceRefs: run.sourceRefs || [], taskIds: run.taskIds || [], uncertain: true })
+          if (orphans.some(o => o.root === root && o.runId === run.runId)) running.push(run)
+        }
+      }
+      const remaining = pending.filter(p => !p.uncertain || !p.runId || !terminals.has(p.runId))
+      let invalid = null
+      try {
+        if (saved.logMessageRef) await sourceMessages(root, [saved.logMessageRef])
+        for (const p of remaining.filter(p => !p.uncertain)) await sourceMessages(root, p.sourceRefs)
+      } catch (e) { invalid = e.message }
+      const interrupted = saved.state.phase === 'draining' || saved.state.phase === 'interrupted' || remaining.some(p => p.uncertain) || orphans.some(o => o.root === root)
+      const view = { ...saved.state, costUsd, costIncomplete, phase: invalid ? 'unavailable' : interrupted ? 'interrupted' : 'ready',
+        reason: invalid ? { code: 'restart-interrupted', text: invalid } : interrupted ? { code: 'restart-interrupted', text: 'Chuỗi bị gián đoạn; không tự chạy lại lượt chưa rõ kết quả. Kiểm tra log và khóa cũ.' } : saved.state.reason,
+        pending: remaining.map(p => ({ agent: p.agent, sourceSeqs: p.sourceRefs.map(r => r.seq), taskIds: p.taskIds || [], uncertain: !!p.uncertain })),
+        running: running.map(r => ({ agent: r.agent, runId: r.runId, phase: 'orphan' })),
+        canContinue: !invalid && !running.length && !orphans.some(o => o.root === root) && remaining.some(p => !p.uncertain) }
+      if (JSON.stringify(view) !== JSON.stringify(saved.state)) view.revision = String(Number(saved.state.revision || 0) + 1)
+      updateControlStore(root, latest => {
+        const r = latest.stops[saved.stopId]
+        r.state = view; r.pending = remaining; r.running = running; r.sourceRefs = remaining.flatMap(p => p.sourceRefs); r.accountedRunIds = [...accounted]
+      })
+      if (!saved.logMessageRef) {
+        const msg = await postOnce(root, 'chain-stop:' + saved.stopId, 'system', view.reason.text, { kind: 'chain-stop', stopId: saved.stopId, chainId: saved.chainId,
+          targets: remaining.map(p => p.agent), canContinue: view.canContinue, continuationTarget: remaining.map(p => '@' + p.agent).join(' '), costUsd: view.costUsd, costIncomplete: view.costIncomplete })
+        updateControlStore(root, latest => { latest.stops[saved.stopId].logMessageRef = sourceRef(msg) })
+      }
+      if (view.revision !== saved.state.revision) win?.webContents.send('chain-changed', root, view)
+    }
+  }).finally(() => controlRecovery.delete(key))
+  controlRecovery.set(key, work)
+  return work
+}
+async function chainStopRecord(root, stop) {
+  const id = stopKey(stop), store = readControlStore(root)
+  if (store.corrupted) throw gitError('UNAVAILABLE', 'File điều phối hỏng')
+  if (store.stops[id]) {
+    // The log append can be visible before haltChain saves its returned reference.
+    // Bind only the matching, verified log entry, never infer that the stop is unused.
+    if (!store.stops[id].logMessageRef && stop.chainId === store.stops[id].chainId) {
+      await sourceMessages(root, [sourceRef(stop)])
+      updateControlStore(root, latest => { latest.stops[id].logMessageRef ||= sourceRef(stop) })
+    }
+    await sourceMessages(root, [readControlStore(root).stops[id].logMessageRef])
+    return readControlStore(root).stops[id]
+  }
+  if (stop.stopId || stop.chainId) throw gitError('UNAVAILABLE', 'Thiếu checkpoint của thẻ dừng; không cấp lại mù')
+  const index = await core.getLogIndex(root)
+  const continued = index.records.find(r => r.kind === 'chain-continue' && r.continuedFrom === stop.seq)
+  if (continued && !continued.childChainId) throw gitError('UNAVAILABLE', 'Không thể xác định chuỗi đã tiếp tục')
+  const pending = (stop.targets || []).map(agent => ({ agent, sourceRefs: [sourceRef(stop)], taskIds: [], uncertain: false }))
+  const chain = newChain(root, { id }); chain.pending = pending; chain.state = continued ? 'continued' : 'stopped'; chain.continuedTo = continued?.childChainId
+  chain.haltReason = { code: 'restart-interrupted', text: stop.text || 'Dừng chuỗi' }
+  saveStopRecord(root, chain, stop)
+  return readControlStore(root).stops[id]
+}
+
 function getChainView(root, chain) {
   const pending = (chain.pending || []).map(p => ({
     agent: p.agent,
@@ -1505,13 +1679,14 @@ function getChainView(root, chain) {
     runId: j.runId,
     phase: j.phase || 'running'
   }))
-  const isDraining = running.length > 0 && chain.state === 'halting'
+  const isDraining = (running.length > 0 || chain.reservedTurns > 0) && chain.state === 'halting'
   const isContinued = chain.state === 'continued'
   let phase = 'ready'
   if (isContinued) phase = 'continued'
   else if (isDraining) phase = 'draining'
   else if (chain.state === 'stopped' || chain.state === 'halting') phase = 'ready'
-  const canContinue = phase === 'ready' && pending.length > 0
+  if (phase === 'ready' && (pending.some(p => p.uncertain) || orphans.some(o => o.root === root))) phase = 'interrupted'
+  const canContinue = ['ready', 'interrupted'].includes(phase) && pending.some(p => !p.uncertain) && !orphans.some(o => o.root === root)
   return {
     stopId: chain.stopId || chain.id,
     chainId: chain.id,
@@ -1541,6 +1716,9 @@ function saveStopRecord(root, chain, lastMsg = null) {
       stopId,
       chainId: chain.id,
       state: view,
+      pending: structuredClone(chain.pending),
+      running: Array.from(chain.runningJobs.values()).map(j => ({ ...j })),
+      accountedRunIds: [...chain.accountedRuns],
       sourceRefs: chain.pending.flatMap(p => p.sourceRefs || []),
       logMessageRef: lastMsg ? { seq: lastMsg.seq, at: lastMsg.at, textHash: createHash('sha256').update(lastMsg.text || '').digest('hex') } : (store.stops[stopId]?.logMessageRef || null),
       at: new Date().toISOString()
@@ -1565,7 +1743,9 @@ async function haltChain(dir, chain, reason, targets) {
     }
   }
   const names = [...new Set(targets.map(agent => agent.name))]
-  const stopMsg = await post(dir, 'system', chain.haltReason.text, {
+  // Persist the checkpoint before publishing; recovery can finish a missing notification.
+  saveStopRecord(root, chain)
+  const stopMsg = await postOnce(dir, 'chain-stop:' + chain.stopId, 'system', chain.haltReason.text, {
     kind: 'chain-stop',
     canContinue: true,
     stopId: chain.stopId,
@@ -1609,13 +1789,15 @@ async function routeTargets(dir, msg, hops, chain) {
     let cleanText = (msg.text || '').replace(/```task-status[\s\S]*?```/g, '').replace(/```run-command[\s\S]*?```/g, '').replace(/```handoff[\s\S]*?```/g, '')
     cleanText = cleanText.replace(/\r\n/g, '\n').trim()
     const sortedTargetNames = targets.map(t => t.name.toLowerCase()).sort().join(',')
-    const contextKey = `${chain.currentContentKey || ''}\0${chain.seenProofs.size}`
+    const board = await core.taskBoardIndexed(root)
+    const definitions = board.error ? null : board.tasks.map(taskSemanticKey).sort().join(',')
+    const contextKey = `${chain.currentContentKey || ''}\0${definitions}\0${chain.seenProofs.size}`
     filteredTargets = []
     for (const target of targets) {
       const dedupeKey = createHash('sha256').update(
         `${chain.id}\0${msg.from.toLowerCase()}\0${target.name.toLowerCase()}\0${sortedTargetNames}\0${cleanText}\0${contextKey}`
       ).digest('hex')
-      if (chain.dispatchedKeys.has(dedupeKey)) {
+      if (chain.currentContentKey && definitions !== null && chain.dispatchedKeys.has(dedupeKey)) {
         continue
       }
       target._dedupeKey = dedupeKey
@@ -1701,8 +1883,12 @@ async function ask(dir, agent, hops, special = null, chain = null, trigger = nul
   const reason = !special && !retryContext && !grantRequestId && trigger?.from === 'user' && Number.isInteger(trigger.seq) ? trigger.seq : 'other'
   const waitingTurn = () => {
     if (special?.kind === 'summary' || retryContext || grantRequestId) return null
-    const waiting = jobs.find(job => job.key === runKey(root, agent.name) && !job.finished && job.phase === 'queued' && !job.kind)
-    if (waiting) waiting.reasons.add(reason)
+    const waiting = jobs.find(job => job.key === runKey(root, agent.name) && job.chain === chain
+      && !job.finished && job.phase === 'queued' && !job.kind)
+    if (waiting) {
+      waiting.reasons.add(reason)
+      if (trigger && !waiting.sourceRefs.some(r => r.seq === trigger.seq)) waiting.sourceRefs.push(sourceRef(trigger))
+    }
     return waiting
   }
   let waiting = waitingTurn()
@@ -1721,8 +1907,16 @@ async function ask(dir, agent, hops, special = null, chain = null, trigger = nul
   const scope = core.normalizeScope(agent, root)
   let workspace = { cwd: root, workspaceId: null, branch: null, worktree: false }
   if (special?.kind !== 'summary' && !setupError) try { workspace = await prepareWorkspace(root, agent) } catch (e) { setupError ||= e.message } // unconfirmed config creates no worktrees
-  let taskIds = []
-  if (special?.kind !== 'summary') try { taskIds = (await core.taskBoardIndexed(root)).tasks.filter(task => task.assignee === agent.name && task.status !== 'done').map(task => task.id) } catch {}
+  let taskIds = [], taskDefinitions = {}, taskSemanticKeys = {}
+  if (special?.kind !== 'summary') try {
+    const board = await core.taskBoardIndexed(root)
+    if (!board.error) for (const task of board.tasks) {
+      taskDefinitions[task.id] = task.definitionRevision
+      const key = taskSemanticKeys[task.id] = `${task.id}:${taskSemanticKey(task)}`
+      if (chain && !chain.milestones.has(key)) chain.milestones.set(key, TASK_MILESTONES[task.status] ?? 0)
+      if (task.assignee === agent.name && task.status !== 'done') taskIds.push(task.id)
+    }
+  } catch {}
   if (grantRequestId) {
     const grant = permissionReservations.get(permissionKey(root, agent.name))
     if (!grant || grant.id !== grantRequestId) throw gitError('CANCELLED', 'Thao tác cấp quyền đã bị huỷ')
@@ -1732,6 +1926,7 @@ async function ask(dir, agent, hops, special = null, chain = null, trigger = nul
   const capturedTrigger = trigger && typeof trigger.from === 'string' && typeof trigger.text === 'string' && Buffer.byteLength(trigger.text) <= 32768
     ? { from: trigger.from, text: trigger.text, ...(Number.isInteger(trigger.seq) ? { seq: trigger.seq } : {}) } : null
   const job = { dir, root, name: agent.name, key: runKey(root, agent.name), runId: randomUUID(), seq: sequence++, hops,
+    sourceRefs: trigger ? [sourceRef(trigger)] : [], taskDefinitions, taskSemanticKeys,
     agent: { ...agent, owns: core.ownsList(scope), readOnly: scope.readOnly, scopeNeedsReview: scope.scopeNeedsReview,
       allowedCommands: [...agent.allowedCommands], permissions: agent.permissions && typeof agent.permissions === 'object'
         ? { ...agent.permissions, allowTools: Array.isArray(agent.permissions.allowTools) ? [...agent.permissions.allowTools] : agent.permissions.allowTools } : agent.permissions,
@@ -1745,19 +1940,20 @@ async function ask(dir, agent, hops, special = null, chain = null, trigger = nul
     return waiting
   }
   if (chain) {
-    if (chain.state === 'halting' || chain.state === 'stopped') {
+    if (chain.state !== 'active') {
       chain.reservedTurns = Math.max(0, chain.reservedTurns - 1)
       let p = chain.pending.find(item => item.agent === agent.name)
       if (!p) {
         p = { agent: agent.name, sourceRefs: [], taskIds: [], uncertain: false }
         chain.pending.push(p)
       }
-      if (trigger) p.sourceRefs.push({ seq: trigger.seq, at: trigger.at, textHash: createHash('sha256').update(trigger.text || '').digest('hex') })
+      if (trigger) p.sourceRefs.push(sourceRef(trigger))
+      if (chain.stopPosted) saveStopRecord(root, chain)
       return null
     }
     chain.reservedTurns = Math.max(0, chain.reservedTurns - 1)
     chain.turns++
-    chain.runningJobs.set(job.runId, { agent: job.name, runId: job.runId, phase: job.phase })
+    chain.runningJobs.set(job.runId, { agent: job.name, runId: job.runId, phase: job.phase, sourceRefs: job.sourceRefs, taskIds })
   }
   jobs.push(job)
   if (heads().includes(job)) startHead(job)
@@ -1898,39 +2094,37 @@ function recordChainTurn(job, result, changed, metadataChanged, auditComplete, b
   if (chain.completedRuns.has(job.runId)) return
   if (result.outcome !== 'success') return
   chain.completedRuns.add(job.runId)
+  if (chain.state !== 'active') return // Late results retain cost, but cannot reset or grow a halted chain's tracking sets.
 
   let hasNewProof = false
+  const remember = proof => {
+    if (chain.seenProofs.has(proof) || chain.seenProofs.size >= 8192) return false
+    chain.seenProofs.add(proof)
+    return true
+  }
   // 1. Source changes
   if (auditComplete && !job.scope.readOnly && changed.length > 0 && afterContentKey && afterContentKey !== beforeContentKey) {
     if (!chain.seenContentKeys.has(afterContentKey)) {
       chain.seenContentKeys.add(afterContentKey)
       const proof = 'source:' + afterContentKey
-      if (!chain.seenProofs.has(proof)) {
-        chain.seenProofs.add(proof)
-        hasNewProof = true
-      }
+      if (remember(proof)) hasNewProof = true
     }
   }
   // 2. Task changes
   if (result.taskUpdates?.length) {
     for (const update of result.taskUpdates) {
       const ms = TASK_MILESTONES[update.status] ?? -1
-      const currentMs = chain.milestones.get(update.id) ?? -1
+      const taskKey = job.taskSemanticKeys?.[update.id] || update.id
+      const currentMs = chain.milestones.get(taskKey) ?? -1
       if (ms > currentMs) {
-        chain.milestones.set(update.id, ms)
-        const proof = `task:${update.id}:${ms}`
-        if (!chain.seenProofs.has(proof)) {
-          chain.seenProofs.add(proof)
-          hasNewProof = true
-        }
+        chain.milestones.set(taskKey, ms)
+        if (remember(`task:${taskKey}:${ms}`)) hasNewProof = true
       }
     }
   }
   // 3. Check records
   const allVerification = readVerificationRecords(job.root)
   const candidateCheckRecords = [
-    ...(job.checkRecords || []),
-    ...(result.checkRecords || []),
     ...allVerification.filter(r => r.kind === 'check' && (r.runId === job.runId || (chain.id && r.chainId === chain.id)))
   ]
   const seenRecordIds = new Set()
@@ -1943,16 +2137,16 @@ function recordChainTurn(job, result, changed, metadataChanged, auditComplete, b
   }
   if (checkRecords.length) {
     for (const rec of checkRecords) {
-      const proof = checkProofKey(rec)
-      if (proof && !chain.seenProofs.has(proof)) {
-        chain.seenProofs.add(proof)
-        hasNewProof = true
-      }
+      if (rec.checkPolicyHash !== checkPolicyHash(core.projectSettings(job.root).settings.mergeChecks || [])
+        || !rec.taskRefs?.every(t => job.taskDefinitions?.[t.id] === t.definitionRevision)) continue
+      const proof = checkProofKey(rec, job.taskSemanticKeys)
+      if (proof && remember(proof)) hasNewProof = true
     }
   }
 
   if (hasNewProof) {
     chain.idleStreak = 0
+    chain.idleRunIds = []
   } else {
     chain.idleStreak = (chain.idleStreak || 0) + 1
     if (!chain.idleRunIds) chain.idleRunIds = []
@@ -2023,7 +2217,7 @@ async function executeJob(job) {
             }
           }
         }
-        return { facts, taskVerification }
+        return { facts, taskVerification, continuationSources: job.continuationSources }
       },
       executeCommand: async (cmdReq) => {
         return await runCommandWithVerification(job, cmdReq)
@@ -2872,6 +3066,7 @@ ipcMain.handle('open', async (event, dir, chat = null) => {
   const root = knownProject(dir)
   if (chat != null && chat !== core.chatName(root)) switchBox(root, chat) // no chat = stay in the open box (refreshes)
   core.init(root); loadOrphans(root)
+  await recoverChainControl(root).catch(e => console.error('Không khôi phục được điều phối:', e.message))
   try { migrateTaskScope(root) } catch (e) { console.error('Không migrate được quyền task:', e) }
   await core.recoverSummary(root).catch(e => console.error('Không khôi phục được summary.md:', e))
   const history = await core.logPage(root), index = await core.getLogIndex(root), config = core.projectSettings(root)
@@ -3048,215 +3243,90 @@ ipcMain.handle('files', (event, dir) => { validSender(event); return core.files(
 ipcMain.handle('continueChain', (event, dir, request) => {
   validSender(event)
   return apiCall(async () => {
-    const root = knownProject(dir), id = request?.messageId
-    let stop = null
-    if (Number.isInteger(id) && id >= 0) stop = (await core.logPage(root, { around: id, limit: 1 })).messages[0]
-    else if (typeof id === 'string' && id) {
-      let before
-      do {
-        const page = await core.logPage(root, { ...(before == null ? {} : { before }), limit: 100 })
-        stop = page.messages.find(message => message.stopId === id || message.chainId === id || message.runId === id)
-        before = page.hasBefore ? page.start : null
-      } while (!stop && before != null)
-    }
-    if (!stop || stop.kind !== 'chain-stop')
-      throw gitError('INVALID_ARGUMENT', 'Không tìm thấy chuỗi có thể tiếp tục')
-    const stopId = stop.stopId || stop.chainId || stop.runId || String(stop.seq)
-    const store = readControlStore(root)
-    if (store.corrupted) throw gitError('CONFIG_ERROR', 'File điều phối hỏng hoặc không đọc được')
-
-    const originChain = activeChains.get(stop.chainId || stopId)
-    const stopRecord = store.stops[stopId]
-    if (originChain) {
-      const view = getChainView(root, originChain)
-      if (view.phase === 'draining' || (view.running && view.running.length > 0)) {
-        throw gitError('INVALID_STATE', 'Chuỗi đang trong trạng thái chờ các tiến trình kết thúc (draining)')
+    const root = knownProject(dir)
+    return withChainOperation(root, async () => {
+      loadOrphans(root)
+      await recoverChainControl(root)
+      const stop = await findChainStop(root, request?.messageId), stopId = stopKey(stop), claimKey = 'continue:' + stopId
+      const record = await chainStopRecord(root, stop)
+      const prior = readControlStore(root).claims[claimKey]
+      if (prior || record.state.phase === 'continued') {
+        const childId = prior?.childChainId || record.state.continuedTo
+        if (!childId) throw gitError('UNAVAILABLE', 'Không thể xác định chuỗi đã tiếp tục')
+        return { chainId: childId, alreadyContinued: true, state: record.state }
       }
-    } else if (stopRecord?.state?.phase === 'draining' || (stopRecord?.state?.running && stopRecord.state.running.length > 0)) {
-      throw gitError('INVALID_STATE', 'Chuỗi đang trong trạng thái chờ các tiến trình kết thúc (draining)')
-    }
-
-    const claimKey = 'continue:' + stopId
-    const legacyKey = `${stop.seq}:${stop.runId || ''}`
-
-    const existingClaim = store.claims[claimKey]
-    const logIndex = await core.getLogIndex(root)
-    const continueRecord = logIndex.records.find(r => r.kind === 'chain-continue' && (r.continuedFrom === stop.seq || r.stopId === stopId))
-    let childFromRaw = null
-    if (continueRecord && !continueRecord.childChainId && Number.isInteger(continueRecord.continuedFrom)) {
-      const page = await core.logPage(root, { around: continueRecord.continuedFrom, limit: 10 }).catch(() => null)
-      const rawRec = page?.messages?.find(m => m.kind === 'chain-continue' && (m.continuedFrom === stop.seq || m.stopId === stopId))
-      if (rawRec?.childChainId) childFromRaw = rawRec.childChainId
-    }
-    const resolvedChildId = existingClaim?.childChainId
-      || continuedChains.get(legacyKey)
-      || store.stops[stopId]?.state?.continuedTo
-      || originChain?.continuedTo
-      || continueRecord?.childChainId
-      || childFromRaw
-
-    if (resolvedChildId) {
-      const existingChain = activeChains.get(resolvedChildId)
-      return {
-        chainId: resolvedChildId,
-        alreadyContinued: true,
-        state: existingChain ? getChainView(root, existingChain) : (store.stops[stopId]?.state || null)
+      const origin = activeChains.get(record.chainId)
+      const view = origin ? getChainView(root, origin) : record.state
+      if (!view.canContinue || view.phase === 'draining' || orphans.some(o => o.root === root)) throw gitError('INVALID_STATE', 'Chưa thể tiếp tục: đang chờ lượt hoặc khóa cũ, hay thiếu dữ kiện nguồn')
+      const pending = origin ? structuredClone(origin.pending) : storedPending(record)
+      const targets = []
+      for (const p of pending.filter(p => !p.uncertain)) {
+        const agent = core.team(root).find(a => a.name === p.agent)
+        if (!agent) throw gitError('CONFIG_ERROR', 'Agent cần tiếp tục không còn trong nhóm: ' + p.agent)
+        targets.push({ agent, pending: p, sources: await sourceMessages(root, p.sourceRefs) })
       }
-    }
-    if (continuedChains.has(legacyKey) || continueRecord) {
-      throw gitError('UNAVAILABLE', 'Không thể xác định chuỗi đã tiếp tục')
-    }
-
-    const pendingList = originChain?.pending?.length ? originChain.pending
-      : (stopRecord?.state?.pending?.length ? stopRecord.state.pending : null)
-    const targetNames = pendingList?.length ? [...new Set(pendingList.map(p => p.agent))] : (Array.isArray(stop.targets) ? stop.targets : [])
-    if (!targetNames.length) throw gitError('INVALID_ARGUMENT', 'Không tìm thấy người nhận để tiếp tục')
-    const members = core.team(root)
-    const targets = targetNames.map(name => members.find(agent => agent.name.toLowerCase() === String(name).toLowerCase()))
-    if (targets.some(target => !target)) throw gitError('CONFIG_ERROR', 'Agent cần tiếp tục không còn trong nhóm')
-
-    let childChainId = null, alreadyContinued = false, claim = null
-    updateControlStore(root, s => {
-      const existing = s.claims[claimKey]
-      if (existing) {
-        childChainId = existing.childChainId
-        alreadyContinued = true
-        claim = existing
-        return
-      }
-      childChainId = randomUUID()
-      claim = {
-        kind: 'continue',
-        stopId,
-        childChainId,
-        at: new Date().toISOString(),
-        dispatches: targets.map(t => ({ agent: t.name, state: 'reserved', runId: null }))
-      }
-      s.claims[claimKey] = claim
-      if (s.stops[stopId]) {
-        s.stops[stopId].state = {
-          ...s.stops[stopId].state,
-          phase: 'continued',
-          canContinue: false,
-          continuedTo: childChainId
+      if (!targets.length) throw gitError('UNAVAILABLE', 'Không có công việc chắc chắn chưa chạy; hãy kiểm tra log và gửi yêu cầu mới')
+      // Recheck after source IO, before the one atomic claim and any side effect.
+      const concurrentClaim = readControlStore(root).claims[claimKey]
+      if (concurrentClaim) return { chainId: concurrentClaim.childChainId, alreadyContinued: true, state: readControlStore(root).stops[stopId].state }
+      if ((origin && !getChainView(root, origin).canContinue) || orphans.some(o => o.root === root)) throw gitError('INVALID_STATE', 'Chuỗi chưa sẵn sàng')
+      let created = false
+      const claim = updateControlStore(root, store => {
+        if (store.claims[claimKey]) return store.claims[claimKey]
+        const c = { kind: 'continue', stopId, childChainId: randomUUID(), at: new Date().toISOString(),
+          dispatches: targets.map(t => ({ agent: t.agent.name, sourceRefs: t.pending.sourceRefs, taskIds: t.pending.taskIds, state: 'reserved', runId: null })) }
+        store.claims[claimKey] = c
+        const saved = store.stops[stopId]
+        saved.state = { ...saved.state, phase: 'continued', canContinue: false, continuedTo: c.childChainId, revision: String(Number(saved.state.revision || 0) + 1) }
+        created = true
+        return c
+      })
+      if (!created) return { chainId: claim.childChainId, alreadyContinued: true, state: readControlStore(root).stops[stopId].state }
+      if (origin) { origin.state = 'continued'; origin.continuedTo = claim.childChainId; origin.revision = Number(readControlStore(root).stops[stopId].state.revision) }
+      const child = newChain(root, { id: claim.childChainId })
+      child.pending = pending.filter(p => p.uncertain)
+      try {
+        await postOnce(root, 'continue:' + stopId, 'system', `Tiếp tục chuỗi với ${targets.map(t => '@' + t.agent.name).join(' ')}.`,
+          { kind: 'chain-continue', continuedFrom: stop.seq, stopId, childChainId: child.id, targets: targets.map(t => t.agent.name) })
+        for (const target of targets) {
+          if (child.state !== 'active' || child.turns + child.reservedTurns >= child.chainLimit) {
+            child.state = 'halting'; child.haltReason ||= { code: 'turn-limit', text: `Dừng sau ${child.chainLimit} lượt agent liên tiếp.` }
+            mergePending(child.pending, target.pending)
+            continue
+          }
+          const runId = randomUUID()
+          updateControlStore(root, s => { const d = s.claims[claimKey].dispatches.find(d => d.agent === target.agent.name); d.state = 'dispatching'; d.runId = runId })
+          child.reservedTurns++
+          try {
+            const job = await ask(root, target.agent, 0, { runId, sourceRefs: target.pending.sourceRefs, continuationSources: target.sources }, child, target.sources[0])
+            updateControlStore(root, s => { const d = s.claims[claimKey].dispatches.find(d => d.agent === target.agent.name); d.state = job ? 'admitted' : 'reserved'; d.runId = job?.runId || null })
+            if (!job) mergePending(child.pending, target.pending)
+          } catch (e) {
+            child.reservedTurns = Math.max(0, child.reservedTurns - 1)
+            mergePending(child.pending, target.pending)
+            updateControlStore(root, s => { const d = s.claims[claimKey].dispatches.find(d => d.agent === target.agent.name); d.state = 'reserved'; d.runId = null })
+          }
         }
-      }
+        if (child.pending.length && !child.stopPosted) await haltChain(root, child,
+          child.haltReason || { code: 'restart-interrupted', text: 'Còn công việc chưa cấp hoặc chưa rõ kết quả; kiểm tra trước khi tiếp tục.' }, child.pending.map(p => ({ name: p.agent })))
+      } catch (e) { activeChains.delete(child.id); await recoverChainControl(root); throw e }
+      const state = readControlStore(root).stops[stopId].state
+      win?.webContents.send('chain-changed', root, state)
+      return { chainId: child.id, alreadyContinued: false, state }
     })
-
-    if (alreadyContinued) {
-      const existingChain = activeChains.get(childChainId)
-      return {
-        chainId: childChainId,
-        alreadyContinued: true,
-        state: existingChain ? getChainView(root, existingChain) : (store.stops[stopId]?.state || null)
-      }
-    }
-
-    continuedChains.set(legacyKey, childChainId)
-    if (originChain) {
-      originChain.state = 'continued'
-      originChain.continuedTo = childChainId
-      saveStopRecord(root, originChain)
-    }
-
-    const childChain = newChain(root, { id: childChainId, stopId: childChainId })
-    await postOnce(root, 'continue:' + stopId, 'system', `Tiếp tục chuỗi với ${targets.map(target => `@${target.name}`).join(' ')}.`,
-      { kind: 'chain-continue', continuedFrom: stop.seq, stopId, childChainId, targets: targets.map(t => t.name) })
-
-    for (const target of targets) {
-      updateControlStore(root, s => {
-        const c = s.claims[claimKey]
-        const d = c?.dispatches?.find(x => x.agent === target.name)
-        if (d) d.state = 'dispatching'
-      })
-      const triggerMsg = { from: 'system', text: `Tiếp tục chuỗi với @${target.name}.`, seq: stop.seq }
-      const job = await ask(root, target, 0, null, childChain, triggerMsg)
-      updateControlStore(root, s => {
-        const c = s.claims[claimKey]
-        const d = c?.dispatches?.find(x => x.agent === target.name)
-        if (d) {
-          d.state = 'admitted'
-          d.runId = job?.runId || null
-        }
-      })
-    }
-    return { chainId: childChain.id, alreadyContinued: false, state: getChainView(root, childChain) }
   })
 })
 ipcMain.handle('chainState', (event, dir, request) => {
   validSender(event)
   return apiCall(async () => {
-    const root = knownProject(dir), id = request?.messageId
-    let stop = null
-    if (Number.isInteger(id) && id >= 0) stop = (await core.logPage(root, { around: id, limit: 1 })).messages[0]
-    else if (typeof id === 'string' && id) {
-      let before
-      do {
-        const page = await core.logPage(root, { ...(before == null ? {} : { before }), limit: 100 })
-        stop = page.messages.find(message => message.stopId === id || message.chainId === id || message.runId === id)
-        before = page.hasBefore ? page.start : null
-      } while (!stop && before != null)
-    }
-    if (!stop || stop.kind !== 'chain-stop') throw gitError('INVALID_ARGUMENT', 'Không tìm thấy thẻ dừng')
-    const stopId = stop.stopId || stop.chainId || stop.runId || String(stop.seq)
-    const store = readControlStore(root)
-    if (store.corrupted) {
-      return {
-        state: {
-          stopId,
-          chainId: stop.chainId || stopId,
-          box: core.chatName(root),
-          revision: '0',
-          phase: 'unavailable',
-          reason: { code: 'restart-interrupted', text: 'File điều phối hỏng' },
-          threshold: 3,
-          idleRunIds: [],
-          turns: 0,
-          limit: 12,
-          costUsd: 0,
-          costIncomplete: false,
-          pending: [],
-          running: [],
-          canContinue: false,
-          continuedTo: null
-        }
-      }
-    }
-    const chain = activeChains.get(stop.chainId || stopId)
-    if (chain) {
-      return { state: getChainView(root, chain) }
-    }
-    const saved = store.stops[stopId]
-    if (saved) {
-      const claim = store.claims['continue:' + stopId]
-      const view = { ...saved.state }
-      if (claim) {
-        view.phase = 'continued'
-        view.canContinue = false
-        view.continuedTo = claim.childChainId
-      }
-      return { state: view }
-    }
-    const continued = (await core.getLogIndex(root)).records.some(r => r.kind === 'chain-continue' && (r.continuedFrom === stop.seq || r.stopId === stopId))
-    const view = {
-      stopId,
-      chainId: stop.chainId || stopId,
-      box: core.chatName(root),
-      revision: '1',
-      phase: continued ? 'continued' : 'ready',
-      reason: { code: 'no-progress', text: stop.text || 'Dừng chuỗi' },
-      threshold: 3,
-      idleRunIds: [],
-      turns: 0,
-      limit: 12,
-      costUsd: stop.costUsd || 0,
-      costIncomplete: !!stop.costIncomplete,
-      pending: (stop.targets || []).map(agent => ({ agent, sourceSeqs: [stop.seq], taskIds: [], uncertain: false })),
-      running: [],
-      canContinue: !continued,
-      continuedTo: null
-    }
-    return { state: view }
+    const root = knownProject(dir)
+    return withChainOperation(root, async () => {
+      loadOrphans(root)
+      await recoverChainControl(root)
+      const stop = await findChainStop(root, request?.messageId)
+      const record = await chainStopRecord(root, stop), chain = activeChains.get(record.chainId)
+      return { state: chain ? getChainView(root, chain) : record.state }
+    })
   })
 })
 ipcMain.handle('send', async (event, dir, text) => {

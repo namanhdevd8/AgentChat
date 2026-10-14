@@ -2432,6 +2432,21 @@ async function rendererT56Checks() {
   console.log('ok (T56 task board stale IPC)')
 }
 
+// ---- T52 (QA): one chain-changed event is handled once (preload exposes both onChainChanged and the generic on) ----
+async function rendererT52Checks() {
+  const ui = fs.readFileSync(path.join(__dirname, 'renderer.js'), 'utf8'), vm = require('vm')
+  const from = ui.indexOf('function handleChainChanged'), to = ui.indexOf('\n// ----', from)
+  const channel = new Set(), applied = []
+  const preloadLike = { // same shape as preload.js: both register on the one ipc channel
+    onChainChanged: fn => { const h = (...a) => fn(...a); channel.add(h); return () => channel.delete(h) },
+    on: (name, fn) => { const h = (...a) => fn(...a); if (name === 'chain-changed') channel.add(h); return () => channel.delete(h) } }
+  const ctx = vm.createContext({ api: preloadLike, dir: '/box', openingDir: null, pendingEvents: [], activeChainUnbinds: [], applyChainViewUpdate: st => applied.push(st) })
+  vm.runInContext(ui.slice(from, to), ctx)
+  for (const h of channel) h('/box', { stopId: 's1', revision: '2', phase: 'ready' }) // one event from main reaches every listener on the channel
+  assert.strictEqual(applied.length, 1, `T53: một event chain-changed bị xử lý ${applied.length} lần (renderer đăng ký cả onChainChanged lẫn on('chain-changed'))`)
+  console.log('ok (T52 chain-changed listener)')
+}
+
 // ---- Sprint 6 H + J through the real main.js: Electron stubbed, a sample git repo, a fake codex. Own process: main.js registers IPC globally ----
 function mainChecks() {
   const r = require('child_process').spawnSync(process.execPath, [__filename, '--main'], { encoding: 'utf8', timeout: 300000,
@@ -2510,6 +2525,13 @@ async function mainHarness() {
     protocol, session }
   const load = Module._load
   Module._load = function (request, ...rest) { return request === 'electron' ? electron : load.call(this, request, ...rest) }
+  // Instrument only this test process: seed scheduler state without a production IPC or thousands of CLI turns.
+  const loadMain = () => {
+    const file = require.resolve('./main'), m = new Module(file, module)
+    m.filename = file; m.paths = module.paths; require.cache[file] = m
+    m._compile(fs.readFileSync(file, 'utf8') + '\nmodule.exports = { newChain, ask, jobs, orphans, activeChains, recordChainTurn, route, getChainView, saveStopRecord, sourceRef, checkPolicyHash, appendVerificationRecord };', file)
+    return m.exports
+  }
 
   // fake codex: agent name from the prompt; FAKE_EDITS {agent: [[file, line, text]]}, FAKE_REPLY {agent: text}, FAKE_PROGRESS → touch a file
   const mbin = fs.mkdtempSync(path.join(os.tmpdir(), 'fake-main-'))
@@ -2519,7 +2541,11 @@ if (process.argv[2] === 'sandbox') { // codex sandbox … -C <dir> -- <cmd…> (
   const a = process.argv.slice(2), i = a.indexOf('--')
   process.exit(require('child_process').spawnSync(a[i + 1], a.slice(i + 2), { cwd: a[a.indexOf('-C') + 1], stdio: 'inherit' }).status ?? 1)
 }
-const p = last === '-' ? fs.readFileSync(0, 'utf8') : last, me = (/Bạn là @([\\w-]+)/.exec(p) || [])[1] || '?' // "-" = prompt over stdin
+const p = last === '-' ? fs.readFileSync(0, 'utf8') : last // "-" = prompt over stdin
+// who am I: the briefing names the agent; a resumed turn (the command result) only has the thread id → remembered per thread
+const rid = process.argv.includes('resume') ? process.argv.at(-2) : null, tid = rid || 'M' + process.pid, idFile = require('path').join(__dirname, 'thread-' + tid)
+const me = (/Bạn là @([\\w-]+)/.exec(p) || [])[1] || (rid && fs.existsSync(idFile) && fs.readFileSync(idFile, 'utf8')) || '?'
+if (!rid) fs.writeFileSync(idFile, me)
 const out = o => process.stdout.write(JSON.stringify(o) + '\\n')
 for (const [file, line, text] of JSON.parse(process.env.FAKE_EDITS || '{}')[me] || []) {
   const lines = fs.readFileSync(file, 'utf8').split('\\n'); lines[line] = text; fs.writeFileSync(file, lines.join('\\n'))
@@ -2529,9 +2555,18 @@ const mergeRef = JSON.parse(process.env.FAKE_MERGE || '{}')[me] // the agent mer
 if (mergeRef) require('child_process').execFileSync('git', ['-c', 'user.name=x', '-c', 'user.email=x@x', 'merge', '-q', '--no-edit', mergeRef])
 if (process.env.FAKE_PROGRESS) fs.appendFileSync('progress-' + me + '.txt', 'x')
 if (process.env.FAKE_SLOW_MS) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Number(process.env.FAKE_SLOW_MS))
-out({ type: 'thread.started', thread_id: 'M' + process.pid })
+out({ type: 'thread.started', thread_id: tid })
+const F3 = '\x60'.repeat(3), revOf = id => (new RegExp('"id":"' + id + '"[^{}]*?"revision":"([0-9a-f]{64})"').exec(p) || [])[1] || ''
+const agentTurn = (() => { const f = require('path').join(__dirname, 'turn-' + me); const n = (Number(fs.existsSync(f) && fs.readFileSync(f, 'utf8')) || 0) + 1; fs.writeFileSync(f, String(n)); return n })()
+const cmd = JSON.parse(process.env.FAKE_CMD || '{}')[me], cycle = JSON.parse(process.env.FAKE_TASK || '{}')[me]
+if (cmd && !p.includes('DỮ LIỆU KHÔNG TIN CẬY')) { // ask the app to run the check, linked to the task (the reply comes on the result prompt)
+  process.stdout.write(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'Chạy\\n' + F3 + 'run-command\\n' + JSON.stringify({ command: cmd.command, tasks: cmd.tasks.map(id => ({ id, expectedRevision: revOf(id) })) }) + '\\n' + F3 } }) + '\\n')
+  process.stdout.write(JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } }) + '\\n')
+  process.exit(0)
+}
+const taskBlock = cycle ? '\\n' + F3 + 'task-status\\n' + JSON.stringify([{ id: cycle.id, status: cycle.cycle[(agentTurn - 1) % cycle.cycle.length], expectedRevision: revOf(cycle.id) }]) + '\\n' + F3 : ''
 const turnNo = (() => { const f = require('path').join(__dirname, 'turn-counter'); const n = (Number(fs.existsSync(f) && fs.readFileSync(f, 'utf8')) || 0) + 1; fs.writeFileSync(f, String(n)); return n })()
-out({ type: 'item.completed', item: { type: 'agent_message', text: (JSON.parse(process.env.FAKE_REPLY || '{}')[me] || 'xong').replace('{n}', turnNo) } })
+out({ type: 'item.completed', item: { type: 'agent_message', text: (JSON.parse(process.env.FAKE_REPLY || '{}')[me] || 'xong').replace('{n}', turnNo) + taskBlock } })
 out({ type: 'turn.completed', usage: { input_tokens: Number(process.env.FAKE_IN || 1), output_tokens: 1 } })
 `, { mode: 0o755 })
   // fake claude: denies Bash(npm test) unless granted via --allowedTools or full; FAKE_CLAUDE=emptydeny|emptynodeny for the retry rules
@@ -2567,6 +2602,7 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
   fs.writeFileSync(at('a.txt'), Array.from({ length: 10 }, (_, i) => `l${i}`).join('\n'))
   fs.writeFileSync(at('package.json'), JSON.stringify({ name: 'fixture', private: true, scripts: { check: 'node chk.js' } }))
   fs.writeFileSync(at('chk.js'), 'if (process.env.CHECK_SLOW_MS) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Number(process.env.CHECK_SLOW_MS))\n'
+    + 'if (process.env.QA_FLIP_FILE) { const f = process.env.QA_FLIP_FILE, n = (Number(require("fs").existsSync(f) && require("fs").readFileSync(f, "utf8")) || 0) + 1; require("fs").writeFileSync(f, String(n)); if (n === 1) { console.error("lần đầu đỏ"); process.exit(1) } }\n'
     + 'if (require("fs").readFileSync("a.txt", "utf8").includes("RED")) { console.error("check đỏ"); process.exit(1) }')
   fs.writeFileSync(at('.gitignore'), '.chat/\nnode_modules/\n'); fs.mkdirSync(at('node_modules')); fs.writeFileSync(at('node_modules/.keep'), '')
   const git = (...args) => execFileSync('git', ['-C', root, '-c', 'user.name=QA', '-c', 'user.email=qa@local', ...args], { encoding: 'utf8' })
@@ -2574,7 +2610,7 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
   fs.writeFileSync(path.join(userData, 'projects.json'), JSON.stringify([root]))
   fs.writeFileSync(path.join(userData, 'window.json'), JSON.stringify({ x: 50, y: 50, width: 800, height: 600, maximized: true }))
 
-  require('./main'); await new Promise(r => setImmediate(r))
+  let internals = loadMain(); await new Promise(r => setImmediate(r))
   core.trustConfig(root, core.configTrust(root).texts) // the fixture team is the user's own: pin it as accepted
   const ev = { sender: webContents, senderFrame: mainFrame }, call = (name, ...args) => handlers[name](ev, ...args)
   await call('open', root)
@@ -2585,7 +2621,7 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
   const registryFile = path.join(userData, 'worktrees', require('crypto').createHash('sha256').update(root).digest('hex'), 'registry.chat.json')
   const queue = () => { try { return JSON.parse(fs.readFileSync(registryFile, 'utf8')).queue } catch { return [] } }
   const waitFor = async (what, test, ms = 60000) => {
-    for (const end = Date.now() + ms; Date.now() < end; await new Promise(r => setTimeout(r, 50))) { const v = test(); if (v) return v }
+    for (const end = Date.now() + ms; Date.now() < end; await new Promise(r => setTimeout(r, 50))) { const v = await test(); if (v) return v }
     throw new Error(`Hết giờ chờ: ${what}\n` + log().slice(-8).map(m => `[${m.from}] ${m.text}`).join('\n'))
   }
   const turns = from => log().slice(from).filter(m => /^dev-/.test(m.from)).length
@@ -2683,12 +2719,13 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
   process.env.FAKE_REPLY = pingPong
   mark = log().length; await call('send', root, '@dev-a bắt đầu')
   let stop = await waitFor('phanh chat qua lại', () => stops()[0])
+  await waitFor('thẻ dừng đã draining xong', async () => (await call('chainState', root, { messageId: stop.seq })).state?.canContinue)
   mark = log().length
   const [c1, c2] = await Promise.all([
     call('continueChain', root, { messageId: stop.seq }),
     call('continueChain', root, { messageId: stop.seq })
   ])
-  assert.ok(c1.ok && c2.ok, 'both concurrent continueChain calls must return ok')
+  assert.ok(c1.ok && c2.ok, 'both concurrent continueChain calls must return ok: ' + JSON.stringify([c1, c2]))
   assert.strictEqual(c1.chainId, c2.chainId, 'both concurrent calls share the same childChainId')
   assert.ok((c1.alreadyContinued && !c2.alreadyContinued) || (!c1.alreadyContinued && c2.alreadyContinued), 'exactly one call claims continuation')
   stop = await waitFor('phanh lần 2 sau Tiếp tục', () => stops()[1]); assert.strictEqual(turns(mark), 3)
@@ -3483,7 +3520,84 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
     assert.strictEqual(legacy.ok, false, 'Tiếp tục với stop legacy thiếu childChainId phải báo lỗi: ' + JSON.stringify(legacy))
     assert.strictEqual(legacy.error?.code, 'UNAVAILABLE', 'phải báo không khả dụng (UNAVAILABLE): ' + JSON.stringify(legacy))
     await sleep(1500); assert.strictEqual(log().filter(m => m.from === 'qa-a').length, qaBefore, 'stop legacy đã tiếp tục không được cấp lại')
+    // reducer through the real flow: box totals count exactly the terminal turns (agent answers + system error turns), no notes
+    const totals = (await core.getLogIndex(root)).totals, terminals = log().filter(m => m.outcome).length
+    assert.strictEqual(totals.turns, terminals, `tổng lượt của box ${totals.turns} ≠ số lượt thật ${terminals}`)
     console.log('ok (T52 S12 phanh/Tiếp tục/trùng/novelty)')
+  }
+
+  // T52 round 3 (QA): the contract §9 groups still missing — task milestones, check novelty, admission at the cap, publish failure,
+  // a crash between the Tiếp tục claim and the dispatch. Shared checkout (worktrees off) unless said otherwise.
+  {
+    const sleep = ms => new Promise(r => setTimeout(r, ms))
+    const quiet = async (from, ms = 2500) => { let n = -1; while (n !== log().length) { n = log().length; await sleep(ms) } return log().slice(from) }
+    const turnsOf = (from, names) => log().slice(from).filter(m => names.includes(m.from)).length
+    const stopIn = from => log().map((m, seq) => ({ ...m, seq })).slice(from).find(m => m.kind === 'chain-stop')
+    const tf = at('.chat/tasks.json'), now = new Date().toISOString(), cur = JSON.parse(fs.readFileSync(tf, 'utf8')).tasks
+    const mk = (id, assignee) => ({ id, title: 'QA ' + id, assignee, spec: 'reports/qa.md', createdAt: now, updatedAt: now, acceptance: 'code' })
+    fs.writeFileSync(tf, JSON.stringify({ version: 1, tasks: [...cur, mk('T907', 'qa-a'), mk('T908', 'qa-a')] }))
+    const task = async id => (await call('tasks', root)).tasks.find(t => t.id === id)
+    assert.strictEqual(git('status', '--porcelain'), '', 'cần thư mục chính sạch để check runner treeStable')
+    const pingPong = JSON.stringify({ 'qa-a': '@qa-b vòng {n}', 'qa-b': '@qa-a nhận {n}' })
+
+    // A. task milestones: doing (new) → review (new) → doing/review again (not new); qa-b only talks → stop after 6 turns
+    fs.rmSync(path.join(mbin, 'turn-qa-a'), { force: true }) // the cycle starts at its first status
+    process.env.FAKE_REPLY = pingPong; process.env.FAKE_TASK = JSON.stringify({ 'qa-a': { id: 'T907', cycle: ['doing', 'review'] } })
+    let mark = log().length; await call('send', root, '@qa-a T907 vòng doing/review')
+    await waitFor('A: chuỗi dừng', () => stopIn(mark), 90000); await quiet(mark)
+    delete process.env.FAKE_TASK
+    const notes = log().slice(mark).filter(m => m.kind === 'task-status-note').length
+    assert.ok(notes >= 3, `A: task-status phải được nhận (${notes} lần) để ca có nghĩa: ` + log().slice(mark).map(m => `[${m.from}] ${m.text.split('\n')[0]}`).join(' → '))
+    assert.strictEqual(turnsOf(mark, ['qa-a', 'qa-b']), 6, 'A: doing→review tính, doing↔review lặp lại không tính → dừng sau 6 lượt')
+
+    // B. check novelty: same task/tree/policy/result again is not progress; fail→pass is. qa-a runs the check (linked to T908) each turn
+    const flip = path.join(os.tmpdir(), `qa-flip-${process.pid}`); fs.rmSync(flip, { force: true })
+    process.env.QA_FLIP_FILE = flip; process.env.FAKE_CMD = JSON.stringify({ 'qa-a': { command: 'npm run check', tasks: ['T908'] } })
+    mark = log().length; await call('send', root, '@qa-a T908 chạy check')
+    const stopB = await waitFor('B: chuỗi dừng', () => stopIn(mark), 120000); await quiet(mark)
+    delete process.env.FAKE_CMD; delete process.env.QA_FLIP_FILE; delete process.env.FAKE_REPLY
+    const ev908 = await call('taskEvidence', root, { taskId: 'T908', expectedRevision: (await task('T908')).revision })
+    const outcomes = ev908.checks.filter(c => c.origin === 'run-command').sort((x, y) => x.finishedAt.localeCompare(y.finishedAt)).map(c => [c.outcome, c.treeStable])
+    assert.deepStrictEqual(outcomes.slice(0, 3), [['failed', true], ['passed', true], ['passed', true]], 'B: hồ sơ runner liên kết T908: ' + JSON.stringify(outcomes))
+    assert.strictEqual(turnsOf(mark, ['qa-a', 'qa-b']), 6, 'B: fail mới, fail→pass mới, pass lặp lại không tính → dừng sau 6 lượt')
+    s12.stopB = { seq: stopB.seq, stopId: stopB.stopId }
+
+    // C. admission at the cap: limit 2 and three recipients at once → exactly two jobs, the third kept as pending with its source
+    let cfg = await call('projectSettings', root)
+    assert.ok((await call('saveProjectSettings', root, { settings: { ...cfg.settings, chainLimit: 2 }, expectedRevision: cfg.revision })).ok)
+    mark = log().length; const ask3 = await call('send', root, '@qa-a @qa-b @qa-c ba người một lượt')
+    const stopC = await waitFor('C: dừng vì trần lượt', () => stopIn(mark)); await quiet(mark)
+    assert.strictEqual(turnsOf(mark, ['qa-a', 'qa-b', 'qa-c']), 2, 'C: trần 2 lượt chỉ cấp đúng 2 job')
+    const viewC = (await call('chainState', root, { messageId: stopC.seq })).state
+    assert.ok(viewC.reason.code === 'turn-limit' && viewC.pending.length === 1 && viewC.pending[0].sourceSeqs.includes(mark),
+      'C: người nhận chưa cấp phải còn trong pending kèm tin nguồn: ' + JSON.stringify(viewC.pending))
+    cfg = await call('projectSettings', root)
+    assert.ok((await call('saveProjectSettings', root, { settings: { ...cfg.settings, chainLimit: 12 }, expectedRevision: cfg.revision })).ok)
+
+    // D. publish fails after a passing check (main moved off the target branch during the check): one event, phase publish,
+    // the real candidate/check, no failing command; the retry merges and the old event is not posted again
+    cfg = await call('projectSettings', root)
+    let on3; for (let i = 0; i < 200 && (!on3 || on3.error?.code === 'BUSY'); i++) { if (on3) await sleep(50); on3 = await call('saveProjectSettings', root, { settings: { ...cfg.settings, worktreesEnabled: true }, expectedRevision: cfg.revision }) }
+    assert.ok(on3.ok, JSON.stringify(on3.error))
+    fs.writeFileSync(at('d12.txt'), 'x\n'); git('add', 'd12.txt'); git('commit', '-qm', 'seed D'); const qD = queue().length
+    process.env.CHECK_SLOW_MS = '3000'; process.env.FAKE_EDITS = JSON.stringify({ 'qa-c': [['d12.txt', 0, 'D']] }) // qa-c: workspace without unmerged commits
+    mark = log().length; await call('send', root, '@qa-c sửa d12')
+    await waitFor('D: đang kiểm', () => queue().slice(qD).some(e => e.state === 'checking'))
+    git('checkout', '-q', '-b', 'qa-detour'); delete process.env.CHECK_SLOW_MS; delete process.env.FAKE_EDITS
+    const failedD = await waitFor('D: lỗi publish', () => queue().slice(qD).find(e => e.mergeEvent))
+    git('checkout', '-q', 'main'); git('branch', '-q', '-D', 'qa-detour')
+    const evD = failedD.mergeEvent
+    assert.ok(evD.phase === 'publish' && evD.candidateSha && evD.checkIds.length === 1 && evD.commandResult === null && evD.code === 'TARGET_CHANGED',
+      'D: lỗi publish sau check đạt: ' + JSON.stringify({ phase: evD.phase, code: evD.code, candidate: !!evD.candidateSha, checkIds: evD.checkIds, cmd: evD.commandResult }))
+    assert.ok((await call('retryMerge', root, { queueId: failedD.id })).ok)
+    await waitFor('D: thử lại gộp được', () => queue().slice(qD).some(e => e.state === 'merged'), 60000)
+    await quiet(mark, 1500)
+    assert.strictEqual(log().filter(m => m.eventId === evD.eventId).length, 1, 'D: lỗi cũ chỉ một tin, không phát lại khi thử lại/thay thế')
+    assert.ok((await call('requestMergeRepair', root, { queueId: failedD.id })).ok === false, 'D: mục đã thay thế không nhận yêu cầu sửa')
+    cfg = await call('projectSettings', root)
+    let off3; for (let i = 0; i < 200 && (!off3 || off3.error?.code === 'BUSY'); i++) { if (off3) await sleep(50); off3 = await call('saveProjectSettings', root, { settings: { ...cfg.settings, worktreesEnabled: false }, expectedRevision: cfg.revision }) }
+    assert.ok(off3.ok, JSON.stringify(off3.error))
+    console.log('ok (T52 vòng 3: mốc task, độ mới check, trần lượt, lỗi publish)')
   }
 
   // T57: window maximized restoration and persistence
@@ -3519,10 +3633,204 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
   assert.strictEqual(themeListeners.length, 0, 'nativeTheme listener cleaned up on closed')
   assert.doesNotThrow(() => mockNativeTheme.emitUpdated(), 'emit updated after closed must not throw')
   console.log('ok (T57 nativeTheme lifecycle & maximized)')
+  // T52 E: the app died right after claiming Tiếp tục for stop B (claim written, nothing dispatched, no chain-continue posted)
+  const ctrl = path.join(userData, 'worktrees', require('crypto').createHash('sha256').update(root).digest('hex'), 'control.chat.json')
+  const store = JSON.parse(fs.readFileSync(ctrl, 'utf8')), crashedChild = require('crypto').randomUUID()
+  const waitingAgent = store.stops[s12.stopB.stopId]?.state?.pending?.[0]?.agent
+  assert.ok(waitingAgent, 'E: stop B phải có người nhận đang chờ: ' + JSON.stringify(store.stops[s12.stopB.stopId]?.state?.pending))
+  store.claims['continue:' + s12.stopB.stopId] = { kind: 'continue', stopId: s12.stopB.stopId, childChainId: crashedChild, at: new Date().toISOString(),
+    dispatches: [{ agent: waitingAgent, state: 'reserved', runId: null, sourceRefs: store.stops[s12.stopB.stopId].sourceRefs, taskIds: ['T908'] }] }
+  // The real write claims the action and marks the parent continued atomically.
+  store.stops[s12.stopB.stopId].state = { ...store.stops[s12.stopB.stopId].state, phase: 'continued', canContinue: false, continuedTo: crashedChild,
+    revision: String(Number(store.stops[s12.stopB.stopId].state.revision) + 1) }
+  fs.writeFileSync(ctrl, JSON.stringify(store))
+  const beforeRestart = log().length
   // T52: after a restart of main (fresh module state, same userData + log), Tiếp tục still answers with the same child chain
-  delete require.cache[require.resolve('./main')]; require('./main'); await new Promise(r => setImmediate(r))
+  internals = loadMain(); await new Promise(r => setImmediate(r))
   const again = await call('continueChain', root, { messageId: s12.stopSeq })
   assert.ok(again.ok && again.alreadyContinued && again.chainId === s12.childId, 'Tiếp tục sau restart phải trả cùng childChainId: ' + JSON.stringify(again))
+  // E: no replay of a claim whose dispatch never happened, but the recipient that was certainly not dispatched keeps a way out
+  const eAgain = await call('continueChain', root, { messageId: s12.stopB.seq })
+  await new Promise(r => setTimeout(r, 1500))
+  assert.ok(!log().slice(beforeRestart).some(m => m.from === waitingAgent), 'E: không tự cấp lại lượt sau crash')
+  const eView = (await call('chainState', root, { messageId: s12.stopB.seq })).state
+  const eStop = log().slice(beforeRestart).find(m => m.kind === 'chain-stop' && m.chainId === crashedChild)
+  assert.ok(eAgain.ok && eAgain.chainId === crashedChild && eAgain.alreadyContinued && eStop, JSON.stringify(eAgain))
+  assert.deepStrictEqual(eAgain.state, eView, 'response Tiếp tục và chainState phải cùng trạng thái cha')
+  assert.ok(eView.phase === 'continued' && !eView.canContinue)
+  const childView = (await call('chainState', root, { messageId: crashedChild })).state
+  assert.ok(childView.canContinue && childView.pending.some(p => p.agent === waitingAgent && !p.uncertain && p.sourceSeqs.length && p.taskIds.includes('T908')), JSON.stringify(childView))
+  await call('chainState', root, { messageId: crashedChild }); await call('continueChain', root, { messageId: s12.stopB.seq })
+  assert.strictEqual(log().filter(m => m.kind === 'chain-stop' && m.chainId === crashedChild).length, 1, 'không đăng lặp stop con')
+  const childMark = log().length, childAction = await call('continueChain', root, { messageId: crashedChild })
+  assert.ok(childAction.ok && !childAction.alreadyContinued, JSON.stringify(childAction))
+  await waitFor('E: công việc reserved chạy sau thao tác mới', () => log().slice(childMark).find(m => m.from === waitingAgent))
+
+  await waitFor('continuation đã hoàn tất', () => internals.jobs.length === 0)
+  // Seed only private fixture state; invoke the real scheduler/evaluator and IPC below.
+  {
+    const { newChain, ask, jobs, activeChains, recordChainTurn, sourceRef } = internals
+    const member = core.team(root).find(a => a.name === 'qa-a'), a = newChain(root), b = newChain(root)
+    const blocker = { root, key: root + '\0qa-a', name: 'qa-a', runId: 'blocker', phase: 'running', headStarted: true, finished: false }
+    jobs.push(blocker)
+    const trigger = { from: 'user', seq: 1, at: new Date().toISOString(), text: '@qa-a thứ nhất' }
+    try {
+      a.reservedTurns++; const one = await ask(root, member, 0, null, a, trigger)
+      a.reservedTurns++; const two = await ask(root, member, 0, null, a, { ...trigger, seq: 2, text: '@qa-a thứ hai' })
+      b.reservedTurns++; const other = await ask(root, member, 0, null, b, { ...trigger, seq: 3 })
+      assert.strictEqual(one, two, 'cùng chain/agent/type gộp vào một job chờ')
+      assert.notStrictEqual(one, other, 'khác chain không gộp, dù cùng agent')
+      assert.deepStrictEqual([a.turns, b.turns, a.reservedTurns, b.reservedTurns], [1, 1, 0, 0])
+      assert.deepStrictEqual(one.sourceRefs.map(r => r.seq), [1, 2], 'coalesce giữ đủ nguồn')
+    } finally { jobs.splice(0); activeChains.delete(a.id); activeChains.delete(b.id) }
+    const delayed = newChain(root); delayed.reservedTurns = 1
+    const boardReader = core.taskBoardIndexed
+    let entered, release; const arrived = new Promise(r => { entered = r }), gate = new Promise(r => { release = r })
+    core.taskBoardIndexed = async (...args) => { entered(); await gate; return boardReader(...args) }
+    try {
+      const admission = ask(root, member, 0, null, delayed, trigger)
+      await arrived; delayed.state = 'halting'; release()
+      assert.strictEqual(await admission, null, 'ask đang await gặp halt không thêm job')
+      assert.strictEqual(delayed.reservedTurns, 0)
+      assert.ok(delayed.pending.some(p => p.agent === 'qa-a' && p.sourceRefs.some(r => r.seq === 1)))
+    } finally { core.taskBoardIndexed = boardReader; activeChains.delete(delayed.id) }
+
+    const cap = newChain(root)
+    for (let i = 0; i < 8191; i++) cap.seenProofs.add('seed:' + i)
+    const job = { root, runId: 'cap', chain: cap, scope: { readOnly: false } }
+    recordChainTurn(job, { outcome: 'success', usage: { costUsd: 0 } }, ['a.txt'], [], true, 'before', 'new-source')
+    assert.deepStrictEqual([cap.state, cap.haltReason.code, cap.seenProofs.size], ['halting', 'tracking-limit', 8192])
+    recordChainTurn({ ...job, runId: 'late' }, { outcome: 'success', usage: { costUsd: 0.1 } }, ['a.txt'], [], true, 'new-source', 'late-source')
+    assert.ok(cap.state === 'halting' && cap.seenProofs.size === 8192 && cap.seenProofs.has('seed:0') && cap.costUsd === 0.1)
+    const routeSource = (await core.appendLogIndexed(root, { from: 'qa-a', text: '@qa-b giới hạn tracking', at: new Date().toISOString() })).message
+    await internals.route(root, routeSource, 0, cap)
+    assert.ok((await call('chainState', root, { messageId: cap.id })).state.pending.some(p => p.agent === 'qa-b' && p.sourceSeqs.includes(routeSource.seq)))
+    const milestones = newChain(root), msJob = { root, chain: milestones, scope: { readOnly: true }, taskSemanticKeys: { T908: 'T908:semantic1' } }
+    milestones.milestones.set('T908:semantic1', 2)
+    const progress = (id, status) => recordChainTurn({ ...msJob, runId: id }, { outcome: 'success', usage: { costUsd: 0 }, taskUpdates: [{ id: 'T908', status }] }, [], [], true)
+    progress('done1', 'done'); assert.strictEqual(milestones.idleStreak, 0)
+    progress('done2', 'done'); assert.strictEqual(milestones.idleStreak, 1, 'done lặp không là tiến triển mới')
+    msJob.taskSemanticKeys.T908 = 'T908:semantic2'; progress('new-definition', 'doing')
+    assert.strictEqual(milestones.idleStreak, 0, 'nội dung định nghĩa mới có milestone riêng')
+
+    const task908 = (await core.taskBoardIndexed(root)).tasks.find(t => t.id === 'T908')
+    const policy = internals.checkPolicyHash(core.projectSettings(root).settings.mergeChecks || []), source = git('rev-parse', 'HEAD').trim(), tree = git('rev-parse', 'HEAD^{tree}').trim()
+    const proofChain = newChain(root)
+    const proofJob = { root, chain: proofChain, scope: { readOnly: true }, taskDefinitions: { T908: task908.definitionRevision }, taskSemanticKeys: { T908: 'semantic-908' } }
+    const checkResult = (id, outcome, override = {}, chain = proofChain) => {
+      const rec = { version: 1, kind: 'check', id, runId: id, treeStable: true, sourceSha: source, treeSha: tree, checkPolicyHash: policy,
+        taskRefs: [{ id: 'T908', definitionRevision: task908.definitionRevision }], outcome,
+        commands: [{ command: 'npm run check', exitCode: outcome === 'passed' ? 0 : 1, signal: null }], ...override }
+      internals.appendVerificationRecord(root, rec)
+      recordChainTurn({ ...proofJob, chain, runId: id }, { outcome: 'success', usage: { costUsd: 0 } }, [], [], true)
+    }
+    checkResult('proof-fail', 'failed'); checkResult('proof-pass', 'passed'); assert.strictEqual(proofChain.idleStreak, 0)
+    checkResult('proof-pass-again', 'passed', { excerpt: 'different output', finishedAt: new Date().toISOString() }); assert.strictEqual(proofChain.idleStreak, 1)
+    checkResult('proof-fail-again', 'failed'); assert.strictEqual(proofChain.idleStreak, 2, 'fail/pass đã thấy không reset')
+    for (const [name, fields] of Object.entries({ tree: { treeSha: null }, policy: { checkPolicyHash: 'wrong' }, task: { taskRefs: [{ id: 'T908', definitionRevision: 'wrong' }] }, unstable: { treeStable: false }, timeout: { outcome: 'timeout' } })) {
+      const c = newChain(root); checkResult('invalid-' + name, 'passed', fields, c); assert.strictEqual(c.idleStreak, 1, 'không tính bằng chứng ' + name)
+    }
+    console.log('ok (T52 tracking-limit/coalesce/admission/done/check validity)')
+  }
+
+  {
+    const { newChain, saveStopRecord, sourceRef, activeChains, orphans } = internals
+    const append = async data => (await core.appendLogIndexed(root, { at: new Date().toISOString(), ...data })).message
+    const seed = async (state, { posted = false, finished = false, parentReady = false } = {}) => {
+      const source = await append({ from: 'user', text: '@qa-a @qa-b @qa-c công việc chưa xong' })
+      const c = newChain(root), childId = require('crypto').randomUUID(), runId = state === 'reserved' ? null : require('crypto').randomUUID()
+      c.state = 'stopped'; c.pending = [{ agent: 'qa-a', sourceRefs: [sourceRef(source)], taskIds: ['T908'], uncertain: false }]
+      const stop = await append({ from: 'system', text: 'Dừng fixture', kind: 'chain-stop', stopId: c.id, chainId: c.id, targets: ['qa-a'] })
+      saveStopRecord(root, c, stop); activeChains.delete(c.id)
+      const snapshot = JSON.parse(fs.readFileSync(ctrl, 'utf8'))
+      snapshot.claims['continue:' + c.id] = { kind: 'continue', stopId: c.id, childChainId: childId, at: new Date().toISOString(),
+        dispatches: [{ agent: 'qa-a', state, runId, sourceRefs: [sourceRef(source)], taskIds: ['T908'] }] }
+      if (!parentReady) snapshot.stops[c.id].state = { ...snapshot.stops[c.id].state, phase: 'continued', canContinue: false, continuedTo: childId, revision: '3' }
+      fs.writeFileSync(ctrl, JSON.stringify(snapshot))
+      if (posted) await append({ from: 'system', text: 'Tiếp tục', kind: 'chain-continue', stopId: c.id, childChainId: childId, continuedFrom: stop.seq, eventId: 'continue:' + c.id })
+      if (finished) await append({ from: 'qa-a', text: 'xong', outcome: 'success', runId, chainId: childId, usage: { inputTokens: 1, outputTokens: 1, costUsd: 0 } })
+      return { stop, source, childId, runId }
+    }
+    for (const [state, options] of [['reserved', {}], ['reserved', { posted: true, parentReady: true }], ['dispatching', {}], ['admitted', {}], ['uncertain', {}], ['admitted', { finished: true }]]) {
+      const f = await seed(state, options), before = log().filter(m => m.outcome).length
+      const r = await call('continueChain', root, { messageId: f.stop.seq })
+      assert.ok(r.ok && r.alreadyContinued && r.chainId === f.childId && r.state.phase === 'continued' && !r.state.canContinue, JSON.stringify(r))
+      assert.deepStrictEqual(r.state, (await call('chainState', root, { messageId: f.stop.seq })).state)
+      assert.strictEqual(log().filter(m => m.kind === 'chain-continue' && m.stopId === f.stop.stopId).length, 1)
+      if (options.finished) assert.ok(!log().some(m => m.kind === 'chain-stop' && m.chainId === f.childId), 'terminal đã có không cấp lại')
+      else {
+        const v = (await call('chainState', root, { messageId: f.childId })).state
+        assert.ok(v.pending.some(p => p.agent === 'qa-a' && p.sourceSeqs.includes(f.source.seq) && p.taskIds.includes('T908')))
+        assert.strictEqual(v.pending[0].uncertain, state !== 'reserved')
+        assert.strictEqual(v.canContinue, state === 'reserved')
+        await call('chainState', root, { messageId: f.childId })
+        assert.strictEqual(log().filter(m => m.kind === 'chain-stop' && m.chainId === f.childId).length, 1)
+        if (state !== 'reserved') assert.strictEqual((await call('continueChain', root, { messageId: f.childId })).ok, false)
+      }
+      assert.strictEqual(log().filter(m => m.outcome).length, before, 'đọc/retry claim cũ không tự spawn')
+    }
+    const blocked = await seed('reserved'), orphan = { root, name: 'qa-a', runId: require('crypto').randomUUID(), state: 'unknown' }
+    const uncheckpointed = await seed('admitted')
+    const referral = await append({ from: 'qa-a', text: '@qa-b công việc tiếp theo', outcome: 'success', runId: uncheckpointed.runId, chainId: uncheckpointed.childId,
+      usage: { inputTokens: 1, outputTokens: 1, costUsd: 0.1 } })
+    await call('chainState', root, { messageId: uncheckpointed.stop.seq })
+    const referralView = (await call('chainState', root, { messageId: uncheckpointed.childId })).state
+    assert.ok(referralView.pending.some(p => p.agent === 'qa-b' && p.uncertain && p.sourceSeqs.includes(referral.seq)), 'giữ việc terminal đã gọi nhưng chưa có checkpoint route')
+    assert.ok(!referralView.canContinue && referralView.costUsd === 0.1, 'không cấp lại referral chưa rõ đã chạy hay chưa')
+    // A stop is visible in the log before the append's promise returns to haltChain.
+    const publishing = newChain(root)
+    publishing.state = 'halting'; publishing.reservedTurns = 1
+    publishing.pending = [{ agent: 'qa-c', sourceRefs: [sourceRef(blocked.source)], taskIds: [], uncertain: false }]
+    saveStopRecord(root, publishing)
+    const visible = await append({ from: 'system', text: 'Đang hoàn tất dừng', kind: 'chain-stop', stopId: publishing.id, chainId: publishing.id, targets: ['qa-c'] })
+    const inFlight = await call('chainState', root, { messageId: visible.seq })
+    assert.ok(inFlight.ok && inFlight.state.phase === 'draining' && !inFlight.state.canContinue, JSON.stringify(inFlight))
+    assert.strictEqual((await call('continueChain', root, { messageId: visible.seq })).error?.code, 'INVALID_STATE')
+    publishing.reservedTurns = 0; saveStopRecord(root, publishing, visible)
+    assert.ok((await call('chainState', root, { messageId: visible.seq })).state.canContinue)
+    activeChains.delete(publishing.id)
+    orphans.push(orphan)
+    await call('chainState', root, { messageId: blocked.stop.seq })
+    assert.strictEqual((await call('continueChain', root, { messageId: blocked.childId })).ok, false, 'orphan chặn cấp claim con')
+    orphans.splice(orphans.indexOf(orphan), 1)
+    assert.ok((await call('chainState', root, { messageId: blocked.childId })).state.canContinue, 'giải phóng orphan mở đường xử lý phần chưa chạy')
+    const draining = newChain(root), runId = require('crypto').randomUUID(), finishedRun = require('crypto').randomUUID()
+    draining.state = 'halting'; draining.pending = [{ agent: 'qa-c', sourceRefs: [sourceRef(blocked.source)], taskIds: [], uncertain: false }]
+    draining.runningJobs.set(runId, { agent: 'qa-a', runId, phase: 'running', sourceRefs: [sourceRef(blocked.source)] })
+    draining.runningJobs.set(finishedRun, { agent: 'qa-b', runId: finishedRun, phase: 'running', sourceRefs: [sourceRef(blocked.source)] })
+    const stop = await append({ from: 'system', text: 'Draining', kind: 'chain-stop', stopId: draining.id, chainId: draining.id, targets: ['qa-c'] })
+    saveStopRecord(root, draining, stop); activeChains.delete(draining.id)
+    const lateTerminal = await append({ from: 'qa-b', text: '@qa-c kiểm kết quả muộn', runId: finishedRun, chainId: draining.id, outcome: 'success', usage: { inputTokens: 1, outputTokens: 1, costUsd: 0.25, partial: true } })
+    const live = { root, name: 'qa-a', runId, state: 'alive' }; orphans.push(live)
+    let v = (await call('chainState', root, { messageId: stop.seq })).state
+    assert.ok(v.phase === 'interrupted' && !v.canContinue && v.running.some(r => r.runId === runId))
+    assert.ok(v.pending.some(p => p.agent === 'qa-c' && p.sourceSeqs.includes(lateTerminal.seq)))
+    assert.ok(v.costUsd === 0.25 && v.costIncomplete, 'chi phí terminal chưa checkpoint vẫn được ghi nhận khi recovery')
+    orphans.splice(orphans.indexOf(live), 1)
+    v = (await call('chainState', root, { messageId: stop.seq })).state
+    assert.strictEqual(v.costUsd, 0.25, 'recovery lặp không cộng chi phí hai lần')
+    assert.ok(v.canContinue && !v.running.length && v.pending.some(p => p.agent === 'qa-a' && p.uncertain))
+    const mark = log().length, resumed = await call('continueChain', root, { messageId: stop.seq })
+    assert.ok(resumed.ok, JSON.stringify(resumed))
+    await waitFor('chỉ qa-c chạy khi tiếp tục phần chắc chắn chưa cấp', () => log().slice(mark).some(m => m.from === 'qa-c'))
+    await waitFor('công việc recovery hoàn tất', () => internals.jobs.length === 0)
+    assert.ok(!log().slice(mark).some(m => m.from === 'qa-a'), 'uncertain không được tự đổi thành chưa chạy')
+    const carried = (await call('chainState', root, { messageId: resumed.chainId })).state
+    assert.ok(carried.pending.some(p => p.agent === 'qa-a' && p.uncertain), 'uncertain được giữ trong stop con mới')
+
+    const badSource = await seed('reserved')
+    await call('retract', root, badSource.source.seq)
+    await call('chainState', root, { messageId: badSource.stop.seq })
+    const badView = await call('chainState', root, { messageId: badSource.childId })
+    assert.ok(badView.ok && badView.state.phase === 'unavailable' && !badView.state.canContinue)
+    assert.strictEqual((await call('continueChain', root, { messageId: badSource.childId })).ok, false)
+    const missing = await append({ from: 'system', text: 'missing', kind: 'chain-stop', stopId: require('crypto').randomUUID(), targets: ['qa-a'] })
+    assert.strictEqual((await call('continueChain', root, { messageId: missing.seq })).error?.code, 'UNAVAILABLE')
+    const backup = fs.readFileSync(ctrl, 'utf8')
+    try { fs.writeFileSync(ctrl, '{bad'); assert.strictEqual((await call('continueChain', root, { messageId: blocked.childId })).error?.code, 'UNAVAILABLE') }
+    finally { fs.writeFileSync(ctrl, backup) }
+    console.log('ok (T52 claim recovery reserved/dispatching/admitted/uncertain/terminal/draining/orphan/source validity)')
+  }
   console.log('ok (main harness end)') // mainChecks requires this line: a hung await empties the event loop and exits 0 silently
 }
 // Cài đặt › CLI Agent: a scan lists each real file once, PATH first and executables only; a check reads the version and
@@ -3589,7 +3897,7 @@ function appSettingsChecks() {
   console.log('ok (app settings search)')
 }
 
-logChecks().then(needsChecks).then(timelineChecks).then(taskChecks).then(auditChecks).then(viewerChecks).then(runChecks).then(cliPathChecks).then(appSettingsChecks).then(sprint7Checks).then(sprint8Checks).then(sprint9Checks).then(sprint11CoreChecks).then(sprint12CoreChecks).then(sprint6Checks).then(rendererChecks).then(rendererFileChecks).then(rendererS9Checks).then(rendererS10Checks).then(rendererS11Checks).then(rendererT56Checks).then(rendererS12Checks).then(mainChecks).then(() => console.log('ok'), e => { console.error(e); process.exit(1) })
+logChecks().then(needsChecks).then(timelineChecks).then(taskChecks).then(auditChecks).then(viewerChecks).then(runChecks).then(cliPathChecks).then(appSettingsChecks).then(sprint7Checks).then(sprint8Checks).then(sprint9Checks).then(sprint11CoreChecks).then(sprint12CoreChecks).then(sprint6Checks).then(rendererChecks).then(rendererFileChecks).then(rendererS9Checks).then(rendererS10Checks).then(rendererS11Checks).then(rendererT56Checks).then(rendererS12Checks).then(rendererT52Checks).then(mainChecks).then(() => console.log('ok'), e => { console.error(e); process.exit(1) })
 
 // PM creates a task and moves it in the same turn (no revision yet): "" is accepted only for PM on a todo task
 {

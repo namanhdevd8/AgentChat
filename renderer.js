@@ -5360,9 +5360,9 @@ if (typeof api !== 'undefined') {
   if (typeof api.onChainChanged === 'function') {
     const unsub = api.onChainChanged((d, state) => handleChainChanged(d, state))
     if (typeof unsub === 'function') activeChainUnbinds.push(unsub)
-  }
-  if (typeof api.on === 'function') {
-    api.on('chain-changed', (d, state) => handleChainChanged(d, state))
+  } else if (typeof api.on === 'function') {
+    const unsub = api.on('chain-changed', (d, state) => handleChainChanged(d, state))
+    if (typeof unsub === 'function') activeChainUnbinds.push(unsub)
   }
 }
 
