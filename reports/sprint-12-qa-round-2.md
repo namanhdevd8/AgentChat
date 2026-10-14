@@ -52,3 +52,21 @@ BE nhận patch này trên nền main mới nhất, đọc/kiểm áp dụng tr�
 4. Lần này không thay vòng đời cửa sổ/FE: giữ kết quả Electron đã ghi; QA chỉ mở lại kiểm liên quan khi có thay đổi hoặc nghi ngờ cụ thể. T56 không mở lại; T55 vẫn chờ bằng chứng mới và phản hồi box thật.
 
 PM chỉ lưu test dưới dạng tài liệu patch và ghi quyết định giao sửa; không áp dụng patch vào code sản phẩm hoặc chạy lại kiểm thay BE/QA.
+
+## Nhận bản sửa và giao T52 lần 3 — 2026-10-15
+
+**Bản cần nghiệm thu: main `c0efdd0885764e5267b5c213625e19307a30b2d3` (`c0efdd0`).** Nguồn `290f4bfca601eb3496999d6572ece884ad2ee1a0` đã gộp sau check đạt lúc 17:09:36 UTC ngày 14/10 (00:09:36 ngày 15/10 giờ Việt Nam).
+
+- PM xác minh queue `76b57494-f40a-4b82-8c9c-dfc039cd51fb` đã merged, không có lỗi. Check nguồn `87c4dd30-4169-44ae-bf62-a63c273facc4` đạt exit 0 trong 73.469 giây; check bản gộp **`8f6f2639-d855-42a3-97de-2a8a25fee33a`** đạt exit 0 trong 73.937 giây, treeStable=true, gắn đúng T51/T54/T57 và ba review hiện hành.
+- PM đọc diff: fallback legacy ném UNAVAILABLE; index giữ stopId/childChainId; chain-stop và chain-continue bỏ runId. Giữ test patch QA, siết ca legacy thành `ok:false` và `error.code=UNAVAILABLE`. Thêm kiểm reducer thật trước/sau tin điều phối, rebuild index và lượt lỗi system có partial cost. Chốt cuối harness còn sau ca restart.
+- PM chỉ đọc code/hồ sơ, chưa tự kiểm lại sản phẩm. Chưa đóng task code vì vẫn chờ QA độc lập trên bản này.
+
+### Việc QA cần hoàn tất
+
+1. Đồng bộ main `c0efdd0` vào nhánh QA. Hiện QA HEAD `1b9beb6`, chỉ `check.js` chưa commit; các ca đó đã được BE tích hợp và làm chặt. Giữ ca UNAVAILABLE/reducer mới, không đưa assertion legacy lỏng trở lại. Phần còn lại nằm đúng phạm vi QA, app có đường ghi nhận thay đổi trong phạm vi ở đầu lượt; nếu vẫn bị chặn trước CLI thì báo nguyên lỗi, không gọi lặp hoặc hoàn tác dữ liệu chung.
+2. Kiểm hai lỗi lần 2 trên code thật: legacy thiếu liên kết trả UNAVAILABLE và không cấp thêm việc; tổng lượt/token/chi phí/cờ completeness không đổi do tin điều phối. Kiểm rebuild index và chi phí lỗi G6 vẫn cộng đúng.
+3. Xác minh thẻ Tiếp tục/chainState với **payload BE mới không có runId**: tra đúng bằng stopId/chainId, lặp tuần tự/đồng thời/restart trả cùng childChainId; không biến lỗi unavailable thành nút được phép chạy. Giữ hồi quy repair không deadlock, tin trùng và chốt cuối harness.
+4. Đối chiếu mục 9 của contract và ghi rõ từng nhóm đã kiểm/chưa kiểm, nhất là pending/tin nguồn, nhánh đến muộn, claim qua crash/restart và merge attempt. Các ca nằm sau điểm dừng của lần 2 phải được chạy trên code thật; không dùng kết quả bản chẩn đoán vá tạm để đóng T52.
+5. Chạy `npm run check` một lần sau khi chuẩn bị ca kiểm; lưu SHA/exit/output và xác nhận harness tới cuối. Không cần lặp toàn bộ Electron bố cục/T57 đã đạt nếu các phần đó không đổi; nếu cần Electron để xác minh thẻ Tiếp tục vừa đổi payload thì kiểm đúng luồng đó, ghi rõ phạm vi. Lỗi/timeout thì báo; chỉ chạy lại sau thay đổi hay giả thuyết cụ thể.
+
+PM chuyển T52 sang Đang làm. QA xong gửi review cuối câu trả lời, kết luận và giới hạn rõ ràng. T56 giữ Xong; T51/T53/T54/T55/T57 giữ review. Sau nghiệm thu mới làm mới bằng chứng T53/T55; T55 vẫn còn phản hồi trên box thật của End-User.
