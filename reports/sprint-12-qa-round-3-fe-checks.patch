@@ -1,0 +1,34 @@
+diff --git a/check.js b/check.js
+--- a/check.js
++++ b/check.js
+@@ -2432,6 +2432,21 @@
+   console.log('ok (T56 task board stale IPC)')
+ }
+ 
++// ---- T52 (QA): one chain-changed event is handled once (preload exposes both onChainChanged and the generic on) ----
++async function rendererT52Checks() {
++  const ui = fs.readFileSync(path.join(__dirname, 'renderer.js'), 'utf8'), vm = require('vm')
++  const from = ui.indexOf('function handleChainChanged'), to = ui.indexOf('\n// ----', from)
++  const channel = new Set(), applied = []
++  const preloadLike = { // same shape as preload.js: both register on the one ipc channel
++    onChainChanged: fn => { const h = (...a) => fn(...a); channel.add(h); return () => channel.delete(h) },
++    on: (name, fn) => { const h = (...a) => fn(...a); if (name === 'chain-changed') channel.add(h); return () => channel.delete(h) } }
++  const ctx = vm.createContext({ api: preloadLike, dir: '/box', openingDir: null, pendingEvents: [], activeChainUnbinds: [], applyChainViewUpdate: st => applied.push(st) })
++  vm.runInContext(ui.slice(from, to), ctx)
++  for (const h of channel) h('/box', { stopId: 's1', revision: '2', phase: 'ready' }) // one event from main reaches every listener on the channel
++  assert.strictEqual(applied.length, 1, `T53: một event chain-changed bị xử lý ${applied.length} lần (renderer đăng ký cả onChainChanged lẫn on('chain-changed'))`)
++  console.log('ok (T52 chain-changed listener)')
++}
++
+ // ---- Sprint 6 H + J through the real main.js: Electron stubbed, a sample git repo, a fake codex. Own process: main.js registers IPC globally ----
+ function mainChecks() {
+   const r = require('child_process').spawnSync(process.execPath, [__filename, '--main'], { encoding: 'utf8', timeout: 300000,
+@@ -3589,7 +3604,7 @@
+   console.log('ok (app settings search)')
+ }
+ 
+-logChecks().then(needsChecks).then(timelineChecks).then(taskChecks).then(auditChecks).then(viewerChecks).then(runChecks).then(cliPathChecks).then(appSettingsChecks).then(sprint7Checks).then(sprint8Checks).then(sprint9Checks).then(sprint11CoreChecks).then(sprint12CoreChecks).then(sprint6Checks).then(rendererChecks).then(rendererFileChecks).then(rendererS9Checks).then(rendererS10Checks).then(rendererS11Checks).then(rendererT56Checks).then(rendererS12Checks).then(mainChecks).then(() => console.log('ok'), e => { console.error(e); process.exit(1) })
++logChecks().then(needsChecks).then(timelineChecks).then(taskChecks).then(auditChecks).then(viewerChecks).then(runChecks).then(cliPathChecks).then(appSettingsChecks).then(sprint7Checks).then(sprint8Checks).then(sprint9Checks).then(sprint11CoreChecks).then(sprint12CoreChecks).then(sprint6Checks).then(rendererChecks).then(rendererFileChecks).then(rendererS9Checks).then(rendererS10Checks).then(rendererS11Checks).then(rendererT56Checks).then(rendererS12Checks).then(rendererT52Checks).then(mainChecks).then(() => console.log('ok'), e => { console.error(e); process.exit(1) })
+ 
+ // PM creates a task and moves it in the same turn (no revision yet): "" is accepted only for PM on a todo task
+ {
