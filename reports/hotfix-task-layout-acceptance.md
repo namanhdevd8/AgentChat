@@ -41,3 +41,10 @@ Code được gộp trước khi task này tồn tại, nên check queue cũ kh�
 - Dev-fe T53 tiếp tục phần ChainView/Cần bạn/merge trên nền có hotfix; giữ bố cục task hai tầng và nút trạng thái mở bằng chứng. T53 không được khôi phục DOM/assertion bảng task cũ khi gộp. Mỗi bên giữ phần `check.js` của mình và giữ đầy đủ lời gọi suites.
 - Sau QA độc lập đạt, PM báo End-User Cmd+R để xem chính box thật ở cỡ cột họ dùng. Chưa có phản hồi thử tay thì ghi rõ phần còn chờ; không suy từ ảnh fixture rằng End-User đã nghiệm thu.
 - Sau khi đã đủ bằng chứng và nghiệm thu, PM đóng T55 bằng approval checks, T56 bằng approval manual và ghi kết quả tại đây. Hiện chưa đóng hai task.
+
+## Nhận hồ sơ kiểm T55 (2026-10-14)
+
+- Techlead đã chạy `npm run check` qua app, liên kết T55: nguồn `18a0b92`, exit 0, 55,6 giây; checkId `8265cd1b-eb0b-48fb-8c4f-28ea0d128cd8`, `verificationError: null` theo bàn giao.
+- Bảng task app cấp lúc 14:01 UTC xác nhận T55 ở `review`, verification `ready`, có đúng checkId trên. Đây là bằng chứng của T55; không dùng dòng “check gần nhất” trong worktree PM để suy trạng thái hotfix.
+- Giữ T55 Chờ duyệt; T56 đang được QA kiểm độc lập. Chưa có kết quả T56 hoặc phản hồi thử tay trên box thật, nên chưa đủ điều kiện đóng hotfix. Không gọi lại QA cho cùng việc đang chạy.
+- Cảnh báo `T49-nhan-queue-bi-chan` vẫn là backlog đã biết, không được ghi thành lỗi mới của bố cục. Khi đủ nghiệm thu, PM kiểm lại hiệu lực bằng chứng theo bảng task hiện hành trước khi gửi done.
