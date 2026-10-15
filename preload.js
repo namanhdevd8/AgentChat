@@ -16,6 +16,7 @@ if (process.isMainFrame !== false) {
     prepareGitInit: dir => ipcRenderer.invoke('prepareGitInit', dir),
     initGit: (dir, request) => ipcRenderer.invoke('initGit', dir, request),
     retryMerge: (dir, request) => ipcRenderer.invoke('retryMerge', dir, request),
+    replaceMergeSource: (dir, request) => ipcRenderer.invoke('replaceMergeSource', dir, request),
     stopMerge: (dir, request) => ipcRenderer.invoke('stopMerge', dir, request),
     requestMergeRepair: (dir, request) => ipcRenderer.invoke('requestMergeRepair', dir, request),
     files: dir => ipcRenderer.invoke('files', dir),

@@ -1216,6 +1216,14 @@ async function rendererChecks() {
   context.dir = '/other-box'; context.openSeq++
   finish({ ok: false, error: { message: 'stale error' } }); await pending
   assert.deepStrictEqual(notices, [], 'merge response from the previous box must be ignored')
+  context.dir = '/box'
+  context.api.replaceMergeSource = async () => ({ ok: false, error: { message: 'Chưa xác nhận' } })
+  context.renderMergeQueue([{ id: 'archived', state: 'replaced' }, { id: 'recover', agent: 'dev', state: 'conflict', canReplace: true }])
+  assert.strictEqual($('#merge-queue').children.length, 1, 'T58: lịch sử replaced không còn là lỗi cần xử lý')
+  const recoverBtn = all($('#merge-queue')).find(n => n.tag === 'button')
+  assert.strictEqual(recoverBtn.textContent, 'Lấy main (sao lưu nhánh)')
+  notices.length = 0; await recoverBtn.onclick()
+  assert.deepStrictEqual(notices, ['Chưa xác nhận'])
 }
 
 // File links: exercise the renderer's routing and viewer state, alongside the real main/core checks below.
@@ -2697,7 +2705,7 @@ async function mainHarness() {
   const loadMain = () => {
     const file = require.resolve('./main'), m = new Module(file, module)
     m.filename = file; m.paths = module.paths; require.cache[file] = m
-    m._compile(fs.readFileSync(file, 'utf8') + '\nmodule.exports = { newChain, ask, jobs, orphans, activeChains, recordChainTurn, route, getChainView, saveStopRecord, sourceRef, checkPolicyHash, appendVerificationRecord, withGitLock, mergeWorkers };', file)
+    m._compile(fs.readFileSync(file, 'utf8') + '\nmodule.exports = { newChain, ask, jobs, orphans, activeChains, recordChainTurn, route, getChainView, saveStopRecord, sourceRef, checkPolicyHash, appendVerificationRecord, withGitLock, mergeWorkers, prepareWorkspace, startWorkspace, commitWorkspace, finishWorkspaceBindings, processMerge };', file)
     return m.exports
   }
 
@@ -3269,8 +3277,9 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
   assert.strictEqual(repairMsg.initiatedBy, 'user')
   assert.strictEqual(log().filter(m => m.kind === 'merge-repair' && m.queueId === entries[0].id).length, 1, 'chỉ một tin yêu cầu sửa')
   assert.strictEqual(log().filter(m => m.from === 'dev-c' && m.runId === rep1.runId).length, 1)
-  // the repair turn (no change here) re-queues dev-c's still-red branch: let it settle before counting the next merges
-  await waitFor('hàng chờ ổn định sau lượt sửa', () => queue().every(done)); q0 = queue().length
+  // A read-only repair turn must not implicitly retry an unchanged, failed source.
+  await waitFor('lượt sửa hoàn tất', () => internals.jobs.length === 0)
+  assert.strictEqual(queue().length, q0, 'T58: lượt sửa không đổi source không được xếp thêm attempt')
 
   // two devs edit different lines of the same file in parallel → both merged automatically
   await edit({ 'dev-a': [['a.txt', 2, 'A2']], 'dev-b': [['a.txt', 8, 'B8']] }, '@dev-a @dev-b sửa a.txt')
@@ -4017,6 +4026,146 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
     try { fs.writeFileSync(ctrl, '{bad'); assert.strictEqual((await call('continueChain', root, { messageId: blocked.childId })).error?.code, 'UNAVAILABLE') }
     finally { fs.writeFileSync(ctrl, backup) }
     console.log('ok (T52 claim recovery reserved/dispatching/admitted/uncertain/terminal/draining/orphan/source validity)')
+  }
+  // T58: real Git/IPC, isolated from the box above. Never use user worktrees/tasks as fixtures.
+  {
+    const uuid = () => require('crypto').randomUUID()
+    const r = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'agent-queue-recovery-')))
+    const at58 = name => path.join(r, name)
+    const g = (cwd, ...args) => execFileSync('git', ['-C', cwd, '-c', 'user.name=QA', '-c', 'user.email=qa@local', ...args], { encoding: 'utf8' }).trim()
+    const commit = (cwd, name, text) => { fs.writeFileSync(path.join(cwd, name), text); g(cwd, 'add', name); g(cwd, 'commit', '-qm', 'fixture') }
+    core.init(r)
+    core.saveTeam(r, [{ name: 'queue-dev', cli: 'codex', owns: ['*.txt'], allowedCommands: ['npm run check'] }])
+    core.trustConfig(r, core.configTrust(r).texts)
+    fs.writeFileSync(at58('.gitignore'), '.chat/\nnode_modules/\n')
+    fs.writeFileSync(at58('a.txt'), 'base\n')
+    fs.writeFileSync(at58('package.json'), JSON.stringify({ scripts: { check: 'node -e "process.exit(0)"' } }))
+    fs.mkdirSync(at58('node_modules')); fs.writeFileSync(at58('node_modules/.keep'), '')
+    g(r, 'init', '-q', '-b', 'main'); g(r, 'add', '.gitignore', 'a.txt', 'package.json'); g(r, 'commit', '-qm', 'base')
+    fs.writeFileSync(path.join(userData, 'projects.json'), JSON.stringify([root, r]))
+    await call('open', r)
+    const cfg58 = core.projectSettings(r)
+    assert.ok((await call('saveProjectSettings', r, { settings: { ...cfg58.settings, worktreesEnabled: true }, expectedRevision: cfg58.revision })).ok)
+    await waitFor('T58 idle', () => !internals.mergeWorkers.has(r))
+    const [agent] = core.team(r), workspace = await internals.prepareWorkspace(r, agent), cwd = workspace.cwd
+    const registry58 = path.join(userData, 'worktrees', require('crypto').createHash('sha256').update(r).digest('hex'), 'registry.chat.json')
+    const read58 = () => JSON.parse(fs.readFileSync(registry58, 'utf8'))
+    const setAuto = enabled => { const c = core.projectSettings(r); core.writeProjectSettings(r, { ...c.settings, worktreesEnabled: enabled }, c.revision) }
+    const job = () => ({ root: r, name: agent.name, ...workspace, scope: core.normalizeScope(agent, r), baseSha: g(cwd, 'rev-parse', 'HEAD'), runId: uuid(), taskIds: [] })
+    const finish = async (j = job(), reviewIds = [], refs = []) => {
+      const w = await internals.commitWorkspace(j, { outcome: 'success', text: 'read only' }, [], true, [])
+      if (w.queuedEntryId) await internals.finishWorkspaceBindings(j, w, reviewIds, refs)
+      return w
+    }
+    commit(cwd, 'a.txt', 'private\n'); commit(r, 'a.txt', 'main\n')
+    const firstJob = job(), aRef = { id: 'fixture-task', definitionRevision: 'definition', requestedRevision: 'one' }
+    const first = await finish(firstJob, ['review-one'], [aRef])
+    assert.ok(first.queuedEntryId, 'T58: source tự commit, chưa từng enqueue vẫn phải vào queue')
+    await internals.processMerge(r, first.queuedEntryId)
+    const failed58 = read58().queue[0]
+    assert.strictEqual(failed58.state, 'conflict')
+    for (let i = 0; i < 2; i++) assert.strictEqual((await finish()).queuedEntryId, first.queuedEntryId)
+    assert.strictEqual(read58().queue.length, 1, 'T58: hai lượt mới cùng source conflict không được thêm attempt')
+    assert.deepStrictEqual(read58().queue[0].reviewIds, ['review-one'])
+    // Retry and finish race; a legacy duplicate with a second task binding must not be lost.
+    const legacy58 = read58(), duplicate = { ...failed58, id: uuid(), reviewIds: ['review-two'], taskRefs: [{ ...aRef, requestedRevision: 'two' }] }
+    legacy58.queue.push(duplicate); fs.writeFileSync(registry58, JSON.stringify(legacy58))
+    setAuto(false)
+    const raced = await Promise.all([call('retryMerge', r, { queueId: failed58.id }), finish(), call('retryMerge', r, { queueId: duplicate.id })])
+    assert.ok(raced[0].ok && raced[2].ok)
+    let queued58 = read58().queue.filter(e => !e.supersededBy && e.state === 'queued')
+    assert.strictEqual(queued58.length, 1, 'T58: retry trùng + finish chỉ tạo một attempt')
+    assert.deepStrictEqual(queued58[0].reviewIds.sort(), ['review-one', 'review-two'])
+    assert.strictEqual(queued58[0].taskRefs.length, 2)
+    setAuto(true); await internals.processMerge(r, queued58[0].id)
+    assert.strictEqual(read58().queue.at(-1).state, 'conflict')
+    // A genuinely new head is queued once in either lock ordering with an explicit retry of the old source.
+    setAuto(false)
+    commit(cwd, 'a.txt', 'main\n'); commit(cwd, 'new.txt', 'keep this new work\n')
+    let count58 = read58().queue.length
+    const [newFinish, newRetry] = await Promise.all([finish(job(), ['review-new'], [aRef]), call('retryMerge', r, { queueId: queued58[0].id })])
+    assert.ok(newRetry.ok && newFinish.queuedEntryId)
+    assert.strictEqual(read58().queue.length, count58 + 1, 'T58: commit mới + retry không tạo trùng')
+    setAuto(true); await internals.processMerge(r, newFinish.queuedEntryId)
+    assert.strictEqual(read58().queue.at(-1).state, 'merged')
+    assert.strictEqual(fs.readFileSync(at58('new.txt'), 'utf8'), 'keep this new work\n')
+    const vf = path.join(path.dirname(registry58), 'verification.chat.jsonl')
+    const checks58 = fs.readFileSync(vf, 'utf8').trim().split('\n').map(JSON.parse).filter(v => v.kind === 'check')
+    assert.ok(checks58.some(c => c.outcome === 'passed' && c.sourceSha === newFinish.headSha && c.reviewIds.includes('review-new') && c.taskRefs.some(t => t.id === aRef.id)), 'T58: source/task/review đúng khi check commit mới')
+    assert.ok(checks58.every(c => !c.reviewIds.includes('review-one')), 'T58: không gán bằng chứng source mới cho review cũ')
+
+    commit(cwd, 'a.txt', 'source to preserve\n'); commit(r, 'a.txt', 'new main\n')
+    const recoverySource = await finish(); await internals.processMerge(r, recoverySource.queuedEntryId)
+    const recoveryEntry = read58().queue.at(-1), priorRegistry = read58()
+    assert.strictEqual(recoveryEntry.state, 'conflict')
+    for (let i = 0; i < 7; i++) priorRegistry.queue.push({ ...recoveryEntry, id: uuid() })
+    fs.writeFileSync(registry58, JSON.stringify(priorRegistry))
+    const request58 = () => call('replaceMergeSource', r, { queueId: recoveryEntry.id })
+    const oldHead = g(cwd, 'rev-parse', 'HEAD'), targetHead = g(r, 'rev-parse', 'HEAD'), evidenceBefore = fs.readFileSync(vf, 'utf8')
+    const registryBefore = fs.readFileSync(registry58, 'utf8')
+    dialogAnswer = 0; assert.strictEqual((await request58()).error?.code, 'CANCELLED')
+    assert.strictEqual(fs.readFileSync(registry58, 'utf8'), registryBefore)
+    dialogAnswer = 1
+    const nativeConfirm = electron.dialog.showMessageBox
+    electron.dialog.showMessageBox = async () => ({ response: 1, checkboxChecked: false })
+    try { assert.strictEqual((await request58()).error?.code, 'CANCELLED') } finally { electron.dialog.showMessageBox = nativeConfirm }
+    for (const where of [r, cwd]) {
+      fs.writeFileSync(path.join(where, 'dirty.txt'), 'do not lose')
+      assert.strictEqual((await request58()).error?.code, 'DIRTY_ROOT')
+      assert.strictEqual(fs.readFileSync(path.join(where, 'dirty.txt'), 'utf8'), 'do not lose')
+      fs.rmSync(path.join(where, 'dirty.txt'))
+    }
+    for (const list of [internals.jobs, internals.orphans]) {
+      const busy = { root: r, workspaceId: workspace.workspaceId }; list.push(busy)
+      try { assert.strictEqual((await request58()).error?.code, 'BUSY') } finally { list.splice(list.indexOf(busy), 1) }
+    }
+    internals.mergeWorkers.add(r)
+    try { assert.strictEqual((await request58()).error?.code, 'BUSY') } finally { internals.mergeWorkers.delete(r) }
+    onDialog = () => fs.writeFileSync(path.join(cwd, 'dirty.txt'), 'edit during confirmation')
+    assert.strictEqual((await request58()).error?.code, 'DIRTY_ROOT'); onDialog = null
+    fs.rmSync(path.join(cwd, 'dirty.txt'))
+    assert.strictEqual(g(cwd, 'rev-parse', 'HEAD'), oldHead)
+    for (const [where, restore] of [[r, targetHead], [cwd, oldHead]]) {
+      onDialog = () => commit(where, 'race.txt', 'head changed during confirmation\n')
+      try { assert.strictEqual((await request58()).error?.code, 'TARGET_CHANGED') }
+      finally { onDialog = null; g(where, 'reset', '--hard', restore) } // only this isolated fixture
+    }
+    // Crash/write failure after Git moved: retain the intent and backup, block new turns, finish safely on retry.
+    const atomic = core.atomicWrite
+    core.atomicWrite = (file, data) => {
+      if (file === registry58 && JSON.parse(data).queue.some(e => e.state === 'replaced')) throw new Error('fixture disk interruption')
+      return atomic(file, data)
+    }
+    try { assert.strictEqual((await request58()).ok, false) } finally { core.atomicWrite = atomic }
+    assert.strictEqual(g(cwd, 'rev-parse', 'HEAD'), targetHead)
+    const intent = read58().agents[0].recoveryPending
+    assert.ok(intent && intent.sourceSha === oldHead)
+    assert.strictEqual(g(r, 'show', `${intent.backupRef}:a.txt`), 'source to preserve', 'T58: phần chưa tích hợp luôn còn trong nhánh sao lưu')
+    await assert.rejects(internals.startWorkspace(job()), e => e.code === 'BUSY')
+    assert.strictEqual((await call('retryMerge', r, { queueId: recoveryEntry.id })).error?.code, 'BUSY')
+    assert.ok((await request58()).ok, 'T58: hoàn tất intent sau gián đoạn')
+    const restored58 = read58(), resolution = restored58.queue.at(-1)
+    assert.strictEqual(resolution.state, 'replaced', 'T58: không báo giả là merged')
+    assert.strictEqual(restored58.queue.filter(e => e.supersededBy === resolution.id).length, 8)
+    assert.deepStrictEqual(restored58.agents[0].merged, priorRegistry.agents[0].merged, 'T58: không khai source đã được squash')
+    assert.strictEqual(fs.readFileSync(vf, 'utf8'), evidenceBefore)
+    const savedRegistry = JSON.parse(fs.readFileSync(path.join(path.dirname(registry58), 'recovery', resolution.snapshotId, 'registry.json')))
+    assert.deepStrictEqual(savedRegistry, priorRegistry, 'T58: snapshot giữ toàn bộ lỗi/bindings trước phục hồi')
+    for (const before of priorRegistry.queue) {
+      const after = { ...restored58.queue.find(e => e.id === before.id) }
+      if (after.supersededBy === resolution.id) delete after.supersededBy
+      assert.deepStrictEqual(after, before, 'T58: không sửa mất lịch sử lỗi')
+    }
+    assert.strictEqual(g(r, 'rev-parse', 'HEAD'), targetHead, 'T58: phục hồi không publish code hoặc bỏ cổng check')
+    count58 = restored58.queue.length
+    assert.ok((await request58()).ok)
+    assert.ok((await call('retryMerge', r, { queueId: recoveryEntry.id })).ok)
+    assert.strictEqual((await call('requestMergeRepair', r, { queueId: recoveryEntry.id })).ok, false)
+    assert.strictEqual((await finish()).queuedEntryId, null)
+    assert.strictEqual(read58().queue.length, count58, 'T58: đọc lại/retry cũ không sinh thêm attempt')
+    assert.strictEqual((await call('worktreeState', r)).state.queue.filter(e => e.canRetry || e.canRepair || e.canStop).length, 0)
+    dialogAnswer = 0
+    console.log('ok (T58 source dedupe, retry race, bindings, guarded recovery & preserved history)')
   }
   console.log('ok (main harness end)') // mainChecks requires this line: a hung await empties the event loop and exits 0 silently
 }

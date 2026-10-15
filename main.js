@@ -90,6 +90,25 @@ function updateRegistry(root, change) {
   return registry
 }
 
+const mergeSource = (registry, workspaceId, headSha) => registry.queue.findLast(entry =>
+  entry.workspaceId === workspaceId && entry.headSha === headSha && !entry.supersededBy && entry.state !== 'replaced')
+
+function bindMergeReviews(entry, reviews, taskRefs) {
+  entry.reviewIds = [...new Set([...(entry.reviewIds || []), ...reviews])]
+  entry.taskRefs = [...new Map([...(entry.taskRefs || []), ...taskRefs].map(ref => [JSON.stringify(ref), ref])).values()]
+}
+
+async function finishWorkspaceBindings(job, workspace, reviews = [], taskRefs = []) {
+  await withGitLock(job.root, async () => updateRegistry(job.root, latest => {
+    // Retry may have moved the entry while terminal() persisted the review. A running check keeps frozen evidence.
+    const entry = mergeSource(latest, workspace.id, workspace.headSha)
+    if (entry && (entry.state === 'queued' || RETRYABLE_MERGE_STATES.includes(entry.state))) {
+      if (entry.runId === job.runId) delete entry.bindingsPending
+      bindMergeReviews(entry, reviews, taskRefs)
+    }
+  }))
+}
+
 const verificationFile = root => path.join(worktreeBase(root), `verification${core.chatName(root)}.jsonl`)
 
 function readVerificationRecords(root) {
@@ -864,6 +883,7 @@ async function startWorkspace(job) {
     const probe = await repoProbe(job.root), registry = readWorktrees(job.root), record = registry.agents.find(item => item.id === job.workspaceId)
     if (registry.targetRef !== probe.branch) throw gitError('TARGET_CHANGED', 'Nhánh chính đã đổi ngoài app')
     if (!record) throw gitError('CONFIG_ERROR', 'Không tìm thấy workspace của agent')
+    if (record.recoveryPending) throw gitError('BUSY', 'Workspace đang phục hồi; hãy hoàn tất thao tác Lấy main trong hàng chờ')
     const cwd = await verifyWorkspace(job.root, record), files = await workspaceChanges(cwd)
     // Left by an earlier turn (cut off, failed the audit, or a merge the agent didn't finish). Refusing would block the
     // agent for good, so they are committed under the same scope rule as an audited turn.
@@ -885,7 +905,7 @@ async function startWorkspace(job) {
 function queueLabel(entry) {
   return ({ queued: 'Chờ gộp', merging: 'Đang gộp', checking: 'Đang kiểm tra', publishing: 'Đang xuất bản', merged: 'Đã gộp',
     conflict: 'Xung đột', 'check-failed': 'Check lỗi', 'blocked-dirty': 'Thư mục chính bẩn', 'blocked-config': 'Cấu hình đổi',
-    'needs-deps': 'Thiếu dependency', paused: 'Đã dừng', error: 'Lỗi' })[entry.state] || entry.state
+    'needs-deps': 'Thiếu dependency', paused: 'Đã dừng', error: 'Lỗi', replaced: 'Đã thay bằng main (có sao lưu)' })[entry.state] || entry.state
 }
 
 async function worktreeState(root) {
@@ -913,6 +933,7 @@ async function worktreeState(root) {
     const canRepair = ['conflict', 'check-failed'].includes(entry.state) && !hasClaim
     return { id: entry.id, agent: entry.agent, headSha: entry.headSha, state: entry.state, label: queueLabel(entry),
       error: entry.error || null, mergeEvent: entry.mergeEvent || null, canRetry: RETRYABLE_MERGE_STATES.includes(entry.state),
+      canReplace: RETRYABLE_MERGE_STATES.includes(entry.state),
       canRepair, canStop: ['queued', 'checking'].includes(entry.state) }
   }))
   return { revision: worktreeRevisions.get(root) || 0, enabled: settings.worktreesEnabled, available: !!probe, reason,
@@ -1052,7 +1073,9 @@ async function commitWorkspace(job, result, changed, auditComplete, outside) {
       subject ??= await turnSubject(job, result, nul((await git(cwd, ['diff', '--no-renames', '--name-only', '-z', job.baseSha, headSha])).stdout))
       const entryId = randomUUID()
       updateRegistry(job.root, latest => {
-        if (!latest.queue.some(entry => entry.runId === job.runId && entry.headSha === headSha)) {
+        const existing = mergeSource(latest, job.workspaceId, headSha)
+        if (existing) queuedEntryId = existing.id
+        else {
           latest.queue.push({ id: entryId, agent: job.name,
             runId: job.runId, chainId: job.chain?.id || null, workspaceId: job.workspaceId, headSha, subject, checks: [...settings.mergeChecks], state: 'queued',
             baseSha: probe.sha, candidateSha: null, error: null,
@@ -1109,6 +1132,78 @@ async function syncWorkspace(root, workspaceId, mainSha) {
   const cwd = await verifyWorkspace(root, record), head = await gitHead(cwd)
   if (head !== mainSha && !(await workspaceChanges(cwd)).length && await contained(root, head, record, mainSha))
     await git(cwd, ['reset', '-q', '--hard', mainSha])
+}
+
+// Explicit recovery for a source whose work was integrated/replaced elsewhere. This is not a successful merge.
+// Keep a Git ref and the full registry/evidence snapshot before moving a clean, idle workspace.
+async function replaceMergeSource(root, queueId) {
+  const registry = readWorktrees(root), old = registry.queue.find(entry => entry.id === queueId)
+  if (old?.supersededBy && registry.queue.some(entry => entry.id === old.supersededBy && entry.state === 'replaced')) return
+  if (!old || old.supersededBy || !RETRYABLE_MERGE_STATES.includes(old.state))
+    throw gitError('INVALID_ARGUMENT', 'Nguồn này không còn cần phục hồi')
+  const record = registry.agents.find(item => item.id === old.workspaceId)
+  if (!record) throw gitError('CONFIG_ERROR', 'Workspace không còn tồn tại')
+  const assertIdle = () => {
+    if (jobs.some(job => job.root === root && !job.finished) || orphans.some(job => job.root === root)
+      || mergeWorkers.has(root) || registry.queue.some(entry => ['queued', 'merging', 'checking', 'publishing'].includes(entry.state) && !entry.supersededBy))
+      throw gitError('BUSY', 'Chờ các lượt agent và hàng chờ đang chạy kết thúc trước khi lấy main')
+  }
+  assertIdle()
+  const cwd = await verifyWorkspace(root, record), probe = await repoProbe(root, { requireClean: true })
+  if (probe.branch !== registry.targetRef) throw gitError('TARGET_CHANGED', 'Nhánh chính đã đổi ngoài app')
+  const pending = record.recoveryPending
+  if (pending && (pending.sourceSha !== old.headSha || pending.targetSha !== probe.sha))
+    throw gitError('TARGET_CHANGED', 'Main hoặc nguồn đã đổi từ lần phục hồi trước; giữ bản sao lưu để đối chiếu')
+  const checkSource = async () => {
+    assertIdle()
+    const latest = await repoProbe(root, { requireClean: true }), source = await repoProbe(fs.realpathSync(cwd), { requireClean: true })
+    if (latest.sha !== probe.sha || latest.branch !== registry.targetRef || source.branch !== record.branch
+      || (source.sha !== old.headSha && !(pending && source.sha === pending.targetSha)))
+      throw gitError('TARGET_CHANGED', 'Main hoặc workspace đã đổi; hãy kiểm lại trước khi phục hồi')
+    return source.sha
+  }
+  await checkSource()
+  const diff = (await git(root, ['diff', '--stat', old.headSha, probe.sha])).stdout.trim()
+  const answer = await dialog.showMessageBox(win, {
+    type: 'warning', title: 'Lấy main và sao lưu nhánh',
+    message: `Thay nguồn của ${record.agent} bằng ${probe.branch}?`,
+    detail: `Nguồn ${old.headSha.slice(0, 12)} → main ${probe.sha.slice(0, 12)}.\nCác thay đổi riêng sẽ chỉ còn trong nhánh sao lưu. Đây không phải thao tác gộp; chỉ dùng sau khi đối chiếu phần cần giữ đã có trên main. Lịch sử lỗi và bằng chứng được giữ nguyên.\n\n${diff.slice(0, 6000)}`,
+    checkboxLabel: 'Tôi đã đối chiếu và đồng ý thay nguồn này bằng main', checkboxChecked: false,
+    buttons: ['Hủy', 'Sao lưu và lấy main'], defaultId: 0, cancelId: 0, noLink: true
+  })
+  if (answer.response !== 1 || !answer.checkboxChecked) throw gitError('CANCELLED', 'Đã hủy, workspace và hàng chờ giữ nguyên')
+  await checkSource()
+  const recovery = pending || { id: randomUUID(), sourceSha: old.headSha, targetSha: probe.sha, at: new Date().toISOString() }
+  if (!pending) {
+    recovery.backupRef = `refs/heads/agent-chat-backup/${record.id}/${recovery.id}`
+    const snapshotDir = managedPath(root, 'recovery', recovery.id)
+    fs.mkdirSync(path.dirname(snapshotDir), { recursive: true })
+    fs.mkdirSync(snapshotDir, { recursive: false })
+    fs.writeFileSync(path.join(snapshotDir, 'registry.json'), JSON.stringify(readWorktrees(root), null, 2), { flag: 'wx' })
+    for (const [name, file] of [['verification.jsonl', verificationFile(root)], ['locks.json', registryFile(root)], ['tasks.json', core.chat(root, 'tasks.json')]])
+      if (fs.existsSync(file)) fs.copyFileSync(file, path.join(snapshotDir, name), fs.constants.COPYFILE_EXCL)
+    fs.writeFileSync(path.join(snapshotDir, 'diff.patch'), (await git(root, ['diff', '--binary', probe.sha, old.headSha])).stdout, { flag: 'wx' })
+    await git(root, ['update-ref', recovery.backupRef, old.headSha, '0'.repeat(old.headSha.length)])
+    fs.writeFileSync(path.join(snapshotDir, 'recovery.json'), JSON.stringify(recovery, null, 2), { flag: 'wx' })
+    updateRegistry(root, latest => { latest.agents.find(item => item.id === record.id).recoveryPending = recovery })
+  }
+  // Revalidate the backup even when completing an interrupted operation. Never discard an unrecorded source.
+  if ((await git(root, ['rev-parse', '--verify', recovery.backupRef])).stdout.trim() !== old.headSha)
+    throw gitError('CONFIG_ERROR', 'Nhánh sao lưu không khớp nguồn cần giữ')
+  const head = await checkSource()
+  if (head !== probe.sha) await git(cwd, ['reset', '--keep', probe.sha])
+  if (await gitHead(cwd) !== probe.sha) throw gitError('TARGET_CHANGED', 'Không xác minh được nguồn sau phục hồi')
+  updateRegistry(root, latest => {
+    const at = new Date().toISOString()
+    latest.queue.push({ id: recovery.id, workspaceId: record.id, agent: record.agent, headSha: old.headSha,
+      state: 'replaced', replacementSha: probe.sha, backupRef: recovery.backupRef, snapshotId: recovery.id,
+      checks: [], createdAt: recovery.at, updatedAt: at, error: null })
+    for (const entry of latest.queue) if (entry.id !== recovery.id && entry.workspaceId === record.id
+      && entry.headSha === old.headSha && !entry.supersededBy && RETRYABLE_MERGE_STATES.includes(entry.state)) entry.supersededBy = recovery.id
+    delete latest.agents.find(item => item.id === record.id).recoveryPending
+  })
+  await post(root, 'system', `Đã sao lưu nguồn cũ của ${record.agent} và lấy main; các mục lỗi cùng nguồn đã được thay thế.`,
+    { kind: 'merge-recovery', workspaceId: record.id, sourceSha: old.headSha, replacementSha: probe.sha, backupRef: recovery.backupRef, snapshotId: recovery.id })
 }
 
 async function processMerge(root, id) {
@@ -2382,16 +2477,8 @@ async function executeJob(job) {
     taskError ||= result.taskError
 
     if (workspace?.queuedEntryId) {
-      updateRegistry(job.root, latest => {
-        const entry = latest.queue.find(item => item.id === workspace.queuedEntryId)
-        if (entry) {
-          delete entry.bindingsPending
-          if (result.taskUpdates?.length) {
-            entry.reviewIds = createdReviews.map(r => r.id)
-            entry.taskRefs = createdTaskRefs
-          }
-        }
-      })
+      await finishWorkspaceBindings(job, workspace, result.taskUpdates?.length ? createdReviews.map(r => r.id) : [],
+        result.taskUpdates?.length ? createdTaskRefs : [])
       pumpMerge(job.root).catch(e => console.error(e))
     } else if (core.projectSettings(job.root).settings.worktreesEnabled) {
       pumpMerge(job.root).catch(e => console.error(e))
@@ -3130,21 +3217,43 @@ ipcMain.handle('retryMerge', (event, dir, request) => {
         && await contained(root, old.headSha, registry.agents.find(item => item.id === old.workspaceId), probe.sha)) return
       const workspace = registry.agents.find(item => item.id === old.workspaceId)
       if (!workspace) throw gitError('CONFIG_ERROR', 'Workspace không còn tồn tại')
+      if (workspace.recoveryPending) throw gitError('BUSY', 'Hãy hoàn tất thao tác Lấy main trước khi thử gộp lại')
       const headSha = await gitHead(await verifyWorkspace(root, workspace)), settings = core.projectSettings(root).settings
       const id = randomUUID()
       updateRegistry(root, latest => {
         const current = latest.queue.find(entry => entry.id === old.id)
         if (!current || current.supersededBy || !RETRYABLE_MERGE_STATES.includes(current.state)) return // changed while we waited
         const sameHead = headSha === current.headSha
-        latest.queue.push({ ...current, id, runId: randomUUID(), headSha, checks: [...settings.mergeChecks], state: 'queued',
+        // An automatic finish may already have queued the new head. A double retry of legacy duplicates must also
+        // converge on one attempt, without changing the evidence of a check already in flight.
+        let next = latest.queue.find(entry => entry.workspaceId === old.workspaceId && entry.headSha === headSha
+          && !entry.supersededBy && ['queued', 'merging', 'checking', 'publishing'].includes(entry.state))
+        if (!next) {
+          next = { ...current, id, runId: randomUUID(), headSha, checks: [...settings.mergeChecks], state: 'queued',
           baseSha: probe.sha, candidateSha: null, error: null, pgid: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
           reviewIds: sameHead ? (current.reviewIds ? [...current.reviewIds] : []) : [],
           taskRefs: sameHead ? (current.taskRefs ? [...current.taskRefs] : []) : [],
-          bindingsPending: false })
-        current.supersededBy = id
+          retryOf: current.id, attemptNo: 0, bindingsPending: false }
+          delete next.mergeEvent; delete next.attemptId
+          latest.queue.push(next)
+        }
+        for (const previous of latest.queue) {
+          if (previous.id === next.id || previous.supersededBy || previous.workspaceId !== current.workspaceId
+            || ![current.headSha, headSha].includes(previous.headSha) || !RETRYABLE_MERGE_STATES.includes(previous.state)) continue
+          if (previous.headSha === headSha && next.state === 'queued') bindMergeReviews(next, previous.reviewIds || [], previous.taskRefs || [])
+          previous.supersededBy = next.id
+        }
       })
     })
     pumpMerge(root).catch(e => console.error(e))
+    return { state: await emitWorktreeState(root) }
+  })
+})
+ipcMain.handle('replaceMergeSource', (event, dir, request) => {
+  validSender(event)
+  return apiCall(async () => {
+    const root = knownProject(dir)
+    await withGitLock(root, () => replaceMergeSource(root, request?.queueId))
     return { state: await emitWorktreeState(root) }
   })
 })

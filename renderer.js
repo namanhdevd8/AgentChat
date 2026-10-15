@@ -2634,7 +2634,7 @@ function renderWorktreeUI() {
     sec.hidden = !worktreeState?.reason && !worktreeLoadError
     return
   }
-  const queue = (worktreeState.queue || []).filter(item => item.state !== 'merged' || item.error)
+  const queue = (worktreeState.queue || []).filter(item => !['merged', 'replaced'].includes(item.state) || item.error)
   const hasItems = queue.length > 0
   const hasError = !!(worktreeLoadError || worktreeState.reason)
   if (!hasItems && !hasError) {
@@ -2682,7 +2682,7 @@ async function runMergeAction(action, queueId, button, successMessage = '') {
 }
 
 function renderMergeQueue(queue) {
-  queue = queue.filter(item => item.state !== 'merged')
+  queue = queue.filter(item => !['merged', 'replaced'].includes(item.state))
   const listEl = $('#merge-queue')
   const emptyEl = $('#merge-empty')
   const countEl = $('#merge-count')
@@ -2755,6 +2755,14 @@ function renderMergeQueue(queue) {
       stopBtn.type = 'button'
       stopBtn.onclick = () => runMergeAction('stopMerge', item.id, stopBtn)
       actions.append(stopBtn)
+    }
+
+    if (item.canReplace) {
+      const replaceBtn = el('button', 'box press btn sm', 'Lấy main (sao lưu nhánh)')
+      replaceBtn.type = 'button'
+      replaceBtn.title = 'Dùng khi phần cần giữ đã có trên main; xác nhận trước khi thay nguồn'
+      replaceBtn.onclick = () => runMergeAction('replaceMergeSource', item.id, replaceBtn)
+      actions.append(replaceBtn)
     }
 
     if (actions.children.length > 0) card.append(actions)

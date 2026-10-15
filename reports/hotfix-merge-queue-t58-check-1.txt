@@ -1,0 +1,67 @@
+
+> agent-chat@0.9.0 check
+> node check.js
+
+ok (task revision)
+ok (claude cache tokens)
+ok (exclusions persist)
+ok (windows args)
+ok (cmd shims)
+ok (model label)
+ok (argv values)
+ok (svg & image types)
+ok (images)
+ok (retract)
+ok (cli paths)
+ok (app settings search)
+ok (sprint 9 R7/R4)
+ok (sprint 11 core G1-G6)
+ok (sprint 12 core S1-S3 & T54)
+ok (file links and viewer)
+ok (sprint 9 FE R2/R3/T39)
+ok (sprint 10 FE V1/V2/V3)
+ok (sprint 11 FE task verification & evidence)
+ok (T56 task board stale IPC)
+ok (sprint 12 FE chain-stop & merge details)
+ok (T52 chain-changed listener)
+AssertionError [ERR_ASSERTION]: main.js (chuỗi agent / worktree / merge) lỗi:
+ok (T41 file scope)
+ok (sprint 10 BE IPC & protocol)
+ok (T45 V2/V3 scope)
+ok (boxes)
+ok (sprint 11 BE IPC & verification)
+BUG T49-nhan-queue-bi-chan: queue của bàn giao đang blocked-dirty nhưng badge là "Chưa có bằng chứng" (contract mục 5: queue bị chặn/paused vẫn là pending kèm lý do)
+ok (T49 sprint 11 end to end)
+ok (T52 S12 phanh/Tiếp tục/trùng/novelty)
+ok (T52 vòng 3: mốc task, độ mới check, trần lượt, lỗi publish)
+ok (T57 nativeTheme lifecycle & maximized)
+ok (sprint 12 FE chain-stop & merge details)
+ok (T52 tracking-limit/coalesce/admission/done/check validity)
+ok (T52 claim recovery reserved/dispatching/admitted/uncertain/terminal/draining/orphan/source validity)
+AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
++ actual - expected
+
++ 'UNSUPPORTED_REPO'
+- 'CANCELLED'
+
+    at mainHarness (/Users/namanh/Library/Application Support/Agent Chat/worktrees/3ced195b5bc66b7d24fda40a16c70bf6b7a031d998ce9c9b359432e9ff40815e/agents/aa434505-5ad9-44f8-8f65-2a9b8aed19c9/check.js:4102:30)
+    at process.processTicksAndRejections (node:internal/process/task_queues:104:5) {
+  generatedMessage: true,
+  code: 'ERR_ASSERTION',
+  actual: 'UNSUPPORTED_REPO',
+  expected: 'CANCELLED',
+  operator: 'strictEqual',
+  diff: 'simple'
+}
+
+
+1 !== 0
+
+    at mainChecks (/Users/namanh/Library/Application Support/Agent Chat/worktrees/3ced195b5bc66b7d24fda40a16c70bf6b7a031d998ce9c9b359432e9ff40815e/agents/aa434505-5ad9-44f8-8f65-2a9b8aed19c9/check.js:2626:10) {
+  generatedMessage: false,
+  code: 'ERR_ASSERTION',
+  actual: 1,
+  expected: 0,
+  operator: 'strictEqual',
+  diff: 'simple'
+}

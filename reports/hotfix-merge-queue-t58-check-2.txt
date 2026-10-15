@@ -1,0 +1,28 @@
+
+> agent-chat@0.9.0 check
+> node check.js
+
+ok (task revision)
+ok (claude cache tokens)
+ok (exclusions persist)
+ok (windows args)
+ok (cmd shims)
+ok (model label)
+ok (argv values)
+ok (svg & image types)
+ok (images)
+ok (retract)
+ok (cli paths)
+ok (app settings search)
+ok (sprint 9 R7/R4)
+ok (sprint 11 core G1-G6)
+ok (sprint 12 core S1-S3 & T54)
+ok (file links and viewer)
+ok (sprint 9 FE R2/R3/T39)
+ok (sprint 10 FE V1/V2/V3)
+ok (sprint 11 FE task verification & evidence)
+ok (T56 task board stale IPC)
+ok (sprint 12 FE chain-stop & merge details)
+ok (T52 chain-changed listener)
+BUG T49-nhan-queue-bi-chan: queue của bàn giao đang blocked-dirty nhưng badge là "Chưa có bằng chứng" (contract mục 5: queue bị chặn/paused vẫn là pending kèm lý do)
+ok

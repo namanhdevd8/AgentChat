@@ -1,0 +1,74 @@
+{
+  "at": "2026-10-15T14:53:55.035990+00:00",
+  "operation": "read-only; live queue not changed",
+  "mainSha": "132f01c87ecac3577f80c23cdff7b9afbc1093d9",
+  "mainDirty": "",
+  "sourceSha": "2c6ae36185d8c5a55f7848c85b3e3044b571321c",
+  "sourceDirty": "",
+  "workspaceId": "25b6a92f-5c62-4660-a978-504f62131432",
+  "historicalCount": 149,
+  "historicalStates": {
+    "blocked-dirty": 12,
+    "merged": 117,
+    "needs-deps": 3,
+    "conflict": 14,
+    "check-failed": 3
+  },
+  "qaUnresolved": [
+    {
+      "id": "d49db75c-b0b5-47e5-82e4-063794d5d7f8",
+      "state": "conflict",
+      "headSha": "2c6ae36185d8c5a55f7848c85b3e3044b571321c",
+      "reviewIds": [
+        "769cfc37-b033-4f58-8e8b-7371544560a3"
+      ]
+    },
+    {
+      "id": "2044663f-fced-443f-87c9-132c52e722a8",
+      "state": "conflict",
+      "headSha": "2c6ae36185d8c5a55f7848c85b3e3044b571321c",
+      "reviewIds": [
+        "9086f724-bfb3-40bd-a34d-dfd544885844"
+      ]
+    },
+    {
+      "id": "7cbfd5d1-5684-44ca-a0dd-5d8a9a01507d",
+      "state": "conflict",
+      "headSha": "2c6ae36185d8c5a55f7848c85b3e3044b571321c",
+      "reviewIds": []
+    },
+    {
+      "id": "ab7837b5-564c-437b-87b3-3facd9d5dbdc",
+      "state": "conflict",
+      "headSha": "2c6ae36185d8c5a55f7848c85b3e3044b571321c",
+      "reviewIds": [
+        "4c904d73-6bd9-4c82-a122-1df76e131228"
+      ]
+    },
+    {
+      "id": "48bea8eb-2640-4d32-99a9-0110e98ca06d",
+      "state": "conflict",
+      "headSha": "2c6ae36185d8c5a55f7848c85b3e3044b571321c",
+      "reviewIds": []
+    },
+    {
+      "id": "829ae9de-68e3-4305-b118-665d8accc8dd",
+      "state": "conflict",
+      "headSha": "2c6ae36185d8c5a55f7848c85b3e3044b571321c",
+      "reviewIds": []
+    },
+    {
+      "id": "adc2e957-b641-44ad-bc6c-653281fb2ff9",
+      "state": "conflict",
+      "headSha": "2c6ae36185d8c5a55f7848c85b3e3044b571321c",
+      "reviewIds": []
+    },
+    {
+      "id": "14f94606-258d-4080-9b3b-2a8d6f1e2216",
+      "state": "conflict",
+      "headSha": "2c6ae36185d8c5a55f7848c85b3e3044b571321c",
+      "reviewIds": []
+    }
+  ],
+  "activeWorkers": []
+}
