@@ -1,0 +1,26 @@
+{
+  "source": "72b737a3fbb0672e38540b01d28a454734be27b3",
+  "startedAt": "2026-10-15T02:41:51.213Z",
+  "durationMs": 1098,
+  "binary": "/Users/namanh/Library/Application Support/Agent Chat/worktrees/3ced195b5bc66b7d24fda40a16c70bf6b7a031d998ce9c9b359432e9ff40815e/agents/aa434505-5ad9-44f8-8f65-2a9b8aed19c9/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron",
+  "realBinary": "/Users/namanh/Library/Application Support/Agent Chat/worktrees/3ced195b5bc66b7d24fda40a16c70bf6b7a031d998ce9c9b359432e9ff40815e/agents/aa434505-5ad9-44f8-8f65-2a9b8aed19c9/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron",
+  "electronPackage": "44.4.5",
+  "node": "v26.8.1",
+  "platform": "darwin",
+  "arch": "arm64",
+  "shellOverride": "/nonexistent",
+  "timeoutMs": 60000,
+  "permissionContext": "techlead / danger-full-access (existing permissions)",
+  "exitCode": 1,
+  "signal": null,
+  "error": null,
+  "enteredJavaScript": true,
+  "enteredFixture": true,
+  "result": {
+    "electron": "44.4.5",
+    "chrome": "152.0.7977.130",
+    "results": [],
+    "errors": [],
+    "error": "Error: An object could not be cloned.\n    at IpcRendererInternal.send (node:electron/js2c/sandbox_bundle:2:93706)\n    at IpcRendererInternal.<anonymous> (node:electron/js2c/sandbox_bundle:2:93414)"
+  }
+}
