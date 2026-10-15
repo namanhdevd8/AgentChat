@@ -834,98 +834,23 @@ async function sprint9Checks() {
 async function sprint11CoreChecks() {
   const d = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-chat-s11-')); core.init(d)
   const at = '2026-10-14T12:00:00.000Z'
-  const tasksFile = path.join(d, '.chat', 'tasks.json')
-  const T = (id, x = {}) => ({ id, title: `Task ${id}`, assignee: 'dev', spec: 'reports/s.md', createdAt: at, updatedAt: at, ...x })
-
-  // 1. Acceptance parsing & defaults
-  const rawTasks = [
-    T('T1', { acceptance: 'code' }),
-    T('T2', { acceptance: 'manual' }),
-    T('T3') // defaults to code
-  ]
-  const defs = core.parseTaskDefinitions(JSON.stringify({ version: 1, tasks: rawTasks }), d)
-  assert.strictEqual(defs[0].acceptance, 'code')
-  assert.strictEqual(defs[1].acceptance, 'manual')
-  assert.strictEqual(defs[2].acceptance, 'code')
-  assert.strictEqual(defs[2].rawAcceptance, null)
-  fs.writeFileSync(tasksFile, JSON.stringify({ version: 1, tasks: rawTasks }))
-
-  const b1 = await core.taskBoardIndexed(d)
-  assert.strictEqual(b1.tasks[0].acceptance, 'code')
-  assert.strictEqual(b1.tasks[1].acceptance, 'manual')
-  assert.strictEqual(b1.tasks[2].acceptance, 'code')
-  assert.ok(b1.tasks[0].definitionRevision)
-
-  // 2. Acceptance update bumps revision and definitionRevision
-  const defsMod = [
-    T('T1', { acceptance: 'manual', updatedAt: '2026-10-14T13:00:00.000Z' }),
-    T('T2', { acceptance: 'manual' }),
-    T('T3')
-  ]
-  fs.writeFileSync(tasksFile, JSON.stringify({ version: 1, tasks: defsMod }))
-  const b2 = await core.taskBoardIndexed(d)
-  assert.notStrictEqual(b2.tasks[0].definitionRevision, b1.tasks[0].definitionRevision)
-  assert.notStrictEqual(b2.tasks[0].revision, b1.tasks[0].revision)
-
-  // 3. validateTaskChanges gate
-  assert.throws(() => core.validateTaskChanges(b2, [{ id: 'T1', status: 'done', expectedRevision: b2.tasks[0].revision }], 'dev'), /Chỉ PM/)
-  assert.throws(() => core.validateTaskChanges(b2, [{ id: 'T1', status: 'done', expectedRevision: b2.tasks[0].revision, approval: { kind: 'manual', reason: 'done' } }], 'dev'), /Chỉ PM/)
-
-  const bare = core.validateTaskChanges(b2, [{ id: 'T1', status: 'done', expectedRevision: b2.tasks[0].revision }], 'pm') // no evidence needed
-  assert.deepStrictEqual([bare[0].status, bare[0].approval.kind, bare[0].approval.reviewer], ['done', 'manual', 'pm'])
-
-  const approved = core.validateTaskChanges(b2, [{ id: 'T1', status: 'done', expectedRevision: b2.tasks[0].revision, approval: { kind: 'manual', reason: 'đã nghiệm thu' } }], 'pm')
-  assert.strictEqual(approved.length, 1)
-  assert.strictEqual(approved[0].status, 'done')
-  assert.strictEqual(approved[0].approval.kind, 'manual')
-  assert.strictEqual(approved[0].approval.reviewer, 'pm')
-
-  // 4. parseTaskStatusBlock
+  fs.writeFileSync(path.join(d, '.chat', 'tasks.json'), JSON.stringify({ version: 1,
+    tasks: [{ id: 'T1', title: 'Task T1', assignee: 'dev', spec: 'reports/s.md', createdAt: at, updatedAt: at, acceptance: 'code' }] }))
+  const board = await core.taskBoardIndexed(d), rev = board.tasks[0].revision
+  // only the PM closes a task, and needs no evidence; approval/reviewId from the removed gate still parse and are ignored
+  assert.throws(() => core.validateTaskChanges(board, [{ id: 'T1', status: 'done', expectedRevision: rev }], 'dev'), /Chỉ PM/)
+  const closed = core.validateTaskChanges(board, [{ id: 'T1', status: 'done', expectedRevision: rev, approval: { kind: 'checks', checkIds: ['x'] }, reviewId: 'y' }], 'pm')
+  assert.deepStrictEqual(Object.keys(closed[0]).sort(), ['assignee', 'createdAt', 'eventId', 'id', 'status'])
   const blk = j => '```task-status\n' + j + '\n```'
-  const pDoneValid = core.parseTaskStatusBlock('Xong\n' + blk('[{"id":"T1","status":"done","expectedRevision":"r","approval":{"kind":"checks","checkIds":["00000000-0000-4000-8000-000000000001"],"note":"note"}}]'))
-  assert.strictEqual(pDoneValid.error, null)
-  assert.strictEqual(pDoneValid.changes[0].approval.kind, 'checks')
-  assert.deepStrictEqual(pDoneValid.changes[0].approval.checkIds, ['00000000-0000-4000-8000-000000000001'])
-
-  const pDoneNoApproval = core.parseTaskStatusBlock('Xong\n' + blk('[{"id":"T1","status":"done","expectedRevision":"r"}]'))
-  assert.ok(!pDoneNoApproval.error && pDoneNoApproval.changes[0].approval === undefined) // closing needs no evidence
-
-  // 5. parseRunCommandBlock with tasks array
-  const cmdBlk = j => '```run-command\n' + j + '\n```'
-  const pCmdValid = core.parseRunCommandBlock('Chạy\n' + cmdBlk('{"command":"npm test","tasks":[{"id":"T1","expectedRevision":"r1"}]}'))
-  assert.strictEqual(pCmdValid.requested, true)
-  assert.strictEqual(pCmdValid.command, 'npm test')
-  assert.deepStrictEqual(pCmdValid.tasks, [{ id: 'T1', expectedRevision: 'r1' }])
-
-  const pCmdTooManyTasks = core.parseRunCommandBlock('Chạy\n' + cmdBlk(JSON.stringify({ command: 'npm test', tasks: Array.from({ length: 21 }, (_, i) => ({ id: `T${i + 1}`, expectedRevision: 'r' })) })))
-  assert.ok(pCmdTooManyTasks.error)
-
-  // 6. PM prompt contains work distribution rules
+  assert.ok(!core.parseTaskStatusBlock('Xong\n' + blk('[{"id":"T1","status":"done","expectedRevision":"r"}]')).error)
+  assert.ok(core.parseTaskStatusBlock('Xong\n' + blk('[{"id":"T1","status":"done","expectedRevision":"r","x":1}]')).error)
+  // PM rules: agents hand off directly, no approval protocol
   const pmPrompt = await core.promptIndexed(d, { name: 'pm', role: 'PM' }, null)
-  assert.ok(pmPrompt.text.includes('Luật chia việc cho PM:'))
-  assert.ok(pmPrompt.text.includes('để các agent gọi thẳng nhau') && !pmPrompt.text.includes('"approval"'))
-
+  assert.ok(pmPrompt.text.includes('Luật chia việc cho PM:') && pmPrompt.text.includes('để các agent gọi thẳng nhau') && !pmPrompt.text.includes('approval'))
   const devPrompt = await core.promptIndexed(d, { name: 'dev', role: 'Dev' }, null)
-  assert.ok(!devPrompt.text.includes('Luật chia việc cho PM:'))
-  assert.ok(devPrompt.text.includes('Chỉ PM được đóng task (done).'))
-
-  // 7. formatAppFacts & prompt app context
-  const facts = {
-    version: 1,
-    capturedAt: '2026-10-14T12:00:00.000Z',
-    source: 'worktree',
-    branch: 'feat',
-    headSha: '0123456789abcdef0123456789abcdef01234567',
-    diff: { files: 2, insertions: 10, deletions: 2, untracked: 1, binary: 0, paths: ['a.js', 'b.js'], truncated: false },
-    latestCheck: { outcome: 'passed', finishedAt: '2026-10-14T11:59:00.000Z', current: true }
-  }
-  const promptWithFacts = await core.promptIndexed(d, { name: 'dev', role: 'Dev' }, null, { appContext: { facts } })
-  assert.ok(promptWithFacts.text.includes('Dữ kiện hiện tại do app cung cấp'))
-  assert.ok(promptWithFacts.text.includes('HEAD: 0123456789'))
-  assert.ok(promptWithFacts.text.includes('Diff: 2 file, +10 -2, 1 file mới'))
-  assert.ok(promptWithFacts.text.includes('Check gần nhất: passed'))
-
-  console.log('ok (sprint 11 core G1-G6)')
+  assert.ok(!devPrompt.text.includes('Luật chia việc cho PM:') && devPrompt.text.includes('Chỉ PM được đóng task (done).'))
+  assert.ok(devPrompt.text.includes('gọi thẳng người làm bước kế') && !devPrompt.text.includes('definitionRevision'))
+  console.log('ok (task rules: PM closes, direct hand-offs)')
 }
 
 // ---- Sprint 12 S1-S3: progress tracking, eventId deduplication, selective continuation, and validTaskSpec ----
@@ -971,16 +896,6 @@ async function sprint12CoreChecks() {
   ny = await core.needsYou(d)
   assert.strictEqual(ny.length, 0)
 
-  // 4. validateTaskChanges with manual approval report
-  const b = await core.taskBoardIndexed(d)
-  fs.writeFileSync(path.join(d, '.chat', 'tasks.json'), JSON.stringify({
-    version: 1,
-    tasks: [{ id: 'T100', title: 'Task manual test', assignee: 'qa', acceptance: 'manual', spec: 'reports/test.md', createdAt: at, updatedAt: at }]
-  }))
-  const bMan = await core.taskBoardIndexed(d)
-  assert.throws(() => core.validateTaskChanges(bMan, [{ id: 'T100', status: 'done', expectedRevision: bMan.tasks[0].revision, approval: { kind: 'manual', reason: 'ok', report: '../bad.md' } }], 'pm'), /report/)
-  const okMan = core.validateTaskChanges(bMan, [{ id: 'T100', status: 'done', expectedRevision: bMan.tasks[0].revision, approval: { kind: 'manual', reason: 'ok', report: 'reports/test.md' } }], 'pm')
-  assert.strictEqual(okMan[0].approval.report, 'reports/test.md')
   // 5. Reducer check: coordination messages do not change turns/tokens/cost or toggle completeness flags
   const d2 = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-chat-s12-reducer-')); core.init(d2)
   await core.appendLogIndexed(d2, { from: 'dev-a', text: 'turn 1', at, usage: { inputTokens: 100, outputTokens: 50, costUsd: 0.005 } })
@@ -1575,29 +1490,17 @@ async function rendererS10Checks() {
   console.log('ok (sprint 10 FE V1/V2/V3)')
 }
 
-// ---- Sprint 11 FE: task verification badges, test change warning, evidence panel, chain cost incomplete ----
+// ---- task row (spec link, assignee only) and chain cost incomplete notice ----
 async function rendererS11Checks() {
   const ui = fs.readFileSync(path.join(__dirname, 'renderer.js'), 'utf8'), vm = require('vm')
   const html = fs.readFileSync(path.join(__dirname, 'index.html'), 'utf8')
 
   // 1. Static HTML & CSS contract assertions
-  assert.ok(html.includes('.tree-task-badge'), 'CSS: thiếu .tree-task-badge')
-  assert.ok(html.includes('.tree-task-badge-ready') && html.includes('.tree-task-badge-approved'), 'CSS: thiếu badge ready/approved')
-  assert.ok(html.includes('.tree-task-badge-failed') && html.includes('.tree-task-badge-stale'), 'CSS: thiếu badge failed/stale')
-  assert.ok(html.includes('.tree-task-badge-pending') && html.includes('.tree-task-badge-manual'), 'CSS: thiếu badge pending/manual')
-  assert.ok(html.includes('.tree-task-badge-legacy') && html.includes('.tree-task-badge-unavailable'), 'CSS: thiếu badge legacy/unavailable')
-  assert.ok(html.includes('.tree-task-warn-badge'), 'CSS: thiếu .tree-task-warn-badge')
-  assert.ok(html.includes('.tree-task-evidence-btn'), 'CSS: thiếu .tree-task-evidence-btn')
-  assert.ok(html.includes('.tree-task-evidence-panel'), 'CSS: thiếu .tree-task-evidence-panel')
-  assert.ok(html.includes('.check-excerpt'), 'CSS: thiếu .check-excerpt')
   assert.ok(html.includes('.tree-task-spec-link'), 'CSS: thiếu .tree-task-spec-link')
   assert.ok(html.includes('.chain-cost-notice'), 'CSS: thiếu .chain-cost-notice')
 
   // UI strings in renderer.js
-  assert.ok(ui.includes('taskEvidence'), 'renderer: thiếu gọi api.taskEvidence')
-  assert.ok(ui.includes('getTaskVerificationBadge'), 'renderer: thiếu getTaskVerificationBadge')
-  assert.ok(ui.includes('renderTaskEvidencePanel'), 'renderer: thiếu renderTaskEvidencePanel')
-  assert.ok(ui.includes('renderEvidenceContent'), 'renderer: thiếu renderEvidenceContent')
+  assert.ok(!/evidence|Verification/i.test(ui) && !/evidence/.test(html), 'panel Bằng chứng đã gỡ: không còn code/CSS của nó')
   assert.ok(ui.includes('Chi phí chuỗi chưa đủ dữ liệu'), 'renderer: thiếu thông báo Chi phí chuỗi chưa đủ dữ liệu')
 
   // 2. VM DOM & functional tests
@@ -1699,7 +1602,7 @@ async function rendererS11Checks() {
     return nodes.get(key)
   }
 
-  let evidenceCalls = [], viewerCalls = [], copiedTexts = []
+  const viewerCalls = []
   const ctx = vm.createContext({
     $, el: (tag, cls = '', txt = '') => {
       const node = el(tag, cls, txt)
@@ -1708,76 +1611,16 @@ async function rendererS11Checks() {
     },
     dir: '/test-dir', box: '.chat', openSeq: 1,
     document: { activeElement: null },
-    navigator: { clipboard: { writeText: async txt => copiedTexts.push(txt) } },
     showToast: () => {},
     openFileViewer: (href, from) => viewerCalls.push({ href, from }),
     getAgentAvatar: () => ({ color: '#3b82f6' }),
     hhmm: () => '12:00',
     STATUS_MAP: { doing: 'Đang chạy', review: 'Chờ duyệt', todo: 'Cần làm', done: 'Xong' },
-    api: {
-      tasks: async () => ({ tasks: [] }),
-      taskEvidence: async (d, opts) => {
-        evidenceCalls.push({ d, opts })
-        return {
-          ok: true,
-          taskId: opts.taskId,
-          revision: opts.expectedRevision,
-          verification: {
-            state: 'ready',
-            reason: null,
-            warnings: { files: [{ path: 'check.js', reason: 'test' }], total: 1, truncated: false },
-            approval: null
-          },
-          review: {
-            workspaceId: 'ws-dev',
-            at: '2026-10-14T09:00:00Z',
-            sourceSha: '0123456789abcdef0123456789abcdef01234567',
-            baseSha: 'fedcba9876543210fedcba9876543210fedcba98'
-          },
-          checks: [
-            {
-              origin: 'merge',
-              outcome: 'passed',
-              finishedAt: '2026-10-14T09:05:00Z',
-              candidateSha: 'abcdef0123456789abcdef0123456789abcdef01',
-              sourceSha: '0123456789abcdef0123456789abcdef01234567',
-              commands: [
-                {
-                  command: 'npm run check',
-                  exitCode: 0,
-                  durationMs: 1200,
-                  excerpt: 'All 42 checks passed',
-                  truncated: false
-                }
-              ]
-            }
-          ],
-          total: 1,
-          truncated: false
-        }
-      }
-    }
+    api: { tasks: async () => ({ tasks: [] }) }
   })
 
   vm.runInContext(part('let currentTasks', '// ---- "Cần bạn"'), ctx)
   vm.runInContext(part('function getRunDetailText', 'const QUIET_MS'), ctx)
-
-  // Test 1: getTaskVerificationBadge mapping
-  assert.strictEqual(ctx.getTaskVerificationBadge({ status: 'todo' }).label, 'Chưa có dữ liệu kiểm')
-  assert.strictEqual(ctx.getTaskVerificationBadge({ status: 'todo' }).state, 'none')
-  assert.strictEqual(ctx.getTaskVerificationBadge({ status: 'doing', verification: { state: 'pending' } }).label, 'Chờ kiểm')
-  assert.strictEqual(ctx.getTaskVerificationBadge({ status: 'review', verification: { state: 'ready' } }).label, 'Đã kiểm · chờ PM duyệt')
-  assert.strictEqual(ctx.getTaskVerificationBadge({ status: 'review', verification: { state: 'stale', reason: 'code đổi' } }).label, 'Cần kiểm lại')
-  assert.strictEqual(ctx.getTaskVerificationBadge({ status: 'review', verification: { state: 'stale', reason: 'code đổi' } }).reason, 'code đổi')
-  assert.strictEqual(ctx.getTaskVerificationBadge({ status: 'review', verification: { state: 'failed' } }).label, 'Kiểm tra lỗi')
-  assert.strictEqual(ctx.getTaskVerificationBadge({ status: 'review', verification: { state: 'manual' } }).label, 'Cần nghiệm thu')
-  assert.strictEqual(ctx.getTaskVerificationBadge({ status: 'review', verification: { state: 'legacy' } }).label, 'Lịch sử cũ')
-  assert.strictEqual(ctx.getTaskVerificationBadge({ status: 'review', verification: { state: 'unavailable' } }).label, 'Chưa xác minh được')
-  assert.strictEqual(ctx.getTaskVerificationBadge({ status: 'review', verification: { state: 'none' } }).label, 'Chưa có bằng chứng')
-  assert.strictEqual(ctx.getTaskVerificationBadge({ status: 'done', verification: { approval: { reviewer: 'pm', kind: 'checks' } } }).label, 'Đã duyệt')
-  assert.strictEqual(ctx.getTaskVerificationBadge({ status: 'done', verification: { approval: { reviewer: 'pm', kind: 'checks' } } }).state, 'approved')
-  assert.strictEqual(ctx.getTaskVerificationBadge({ status: 'done', verification: { state: 'legacy' } }).label, 'Lịch sử cũ')
-  assert.strictEqual(ctx.getTaskVerificationBadge({ status: 'done' }).label, 'Lịch sử cũ')
 
   // Test 2: renderTreeTaskRow separation of controls & spec link
   const taskWithSpec = { id: 'T48', title: 'Task FE', assignee: 'dev-fe', status: 'doing', spec: 'reports/sprint-11.md', revision: 'rev1' }
@@ -1792,70 +1635,9 @@ async function rendererS11Checks() {
   assert.strictEqual(viewerCalls.length, 1)
   assert.strictEqual(viewerCalls[0].href, 'reports/sprint-11.md')
 
-  // Test 3: Test warning badge on row
-  const taskWithWarn = {
-    id: 'T47', title: 'Task BE', assignee: 'dev-be', status: 'review', revision: 'rev2',
-    verification: { state: 'ready', warnings: { total: 1, files: [{ path: 'check.js', reason: 'test' }] } }
-  }
-  const warnItem = ctx.renderTreeTaskRow(taskWithWarn)
-  const warnBadge = warnItem.querySelector('.tree-task-warn-badge')
-  assert.ok(warnBadge, 'row must render warning badge when warnings.total > 0')
-  assert.strictEqual(warnBadge.textContent, '⚠️ Đổi test')
-  assert.ok(warnBadge.title.includes('check.js'), 'warn tooltip must include modified check/test file')
-
-  // Test 4: Evidence button toggle & api.taskEvidence panel
-  const evBtn = itemEl.querySelector('.tree-task-evidence-btn')
-  assert.ok(evBtn, 'task row must have evidence button')
-  assert.strictEqual(evBtn.textContent, 'Chưa có dữ liệu kiểm', 'verification state doubles as evidence trigger')
-  assert.strictEqual(evBtn.attrs['aria-label'], 'Bằng chứng T48: Chưa có dữ liệu kiểm')
-  assert.strictEqual(evBtn.attrs['aria-expanded'], 'false')
-  evBtn.onclick({ stopPropagation() {} })
-  assert.strictEqual(evBtn.attrs['aria-expanded'], 'true')
-  assert.strictEqual(evidenceCalls.length, 1)
-  assert.strictEqual(evidenceCalls[0].opts.taskId, 'T48')
-
-  // Wait for taskEvidence resolution
-  await new Promise(r => setImmediate(r))
-  const panel = itemEl.querySelector('.tree-task-evidence-panel')
-  assert.ok(panel, 'evidence panel must be rendered')
-  assert.ok(panel.textContent.includes('Hàng chờ merge'), 'panel must render check origin')
-  assert.ok(panel.textContent.includes('npm run check'), 'panel must render command')
-  const excerptPre = panel.querySelector('.check-excerpt')
-  assert.ok(excerptPre, 'panel must have .check-excerpt')
-  assert.strictEqual(excerptPre.textContent, 'All 42 checks passed', 'excerpt must be inert textContent')
-
-  // Escape closes panel and returns focus to button
-  let escPrevented = false
-  itemEl.onkeydown({ key: 'Escape', target: panel, preventDefault() { escPrevented = true }, stopPropagation() {} })
-  assert.ok(escPrevented, 'Escape must be handled')
-  assert.strictEqual(evBtn.attrs['aria-expanded'], 'false')
-  assert.strictEqual(ctx.document.activeElement, evBtn, 'Escape must restore focus to evidence button')
-  assert.strictEqual(itemEl.querySelector('.tree-task-evidence-panel'), null, 'panel must be removed after close')
-
-  // Escape from the trigger also closes while IPC is pending, without closing another task.
-  const otherBtn = warnItem.querySelector('.tree-task-evidence-btn')
-  otherBtn.onclick({ stopPropagation() {} })
-  evBtn.onclick({ stopPropagation() {} })
-  evBtn.focus()
-  let triggerEscPrevented = false, triggerEscStopped = false
-  itemEl.onkeydown({ key: 'Escape', target: evBtn, preventDefault() { triggerEscPrevented = true }, stopPropagation() { triggerEscStopped = true } })
-  assert.ok(triggerEscPrevented && triggerEscStopped, 'trigger Escape must be consumed when its panel is open')
-  assert.strictEqual(evBtn.attrs['aria-expanded'], 'false')
-  assert.strictEqual(ctx.document.activeElement, evBtn)
-  assert.strictEqual(itemEl.querySelector('.tree-task-evidence-panel'), null)
-  assert.strictEqual(otherBtn.attrs['aria-expanded'], 'true', 'Escape must not close another task')
-  assert.ok(warnItem.querySelector('.tree-task-evidence-panel'))
-  await new Promise(r => setImmediate(r))
-  assert.strictEqual(itemEl.querySelector('.tree-task-evidence-panel'), null, 'late IPC must not reopen a panel closed by Escape')
-  itemEl.onkeydown({ key: 'Escape', preventDefault() { assert.fail('closed task must not consume Escape') }, stopPropagation() {} })
-
-  // Test 5: Conflict error triggers loadTasks refresh
-  let loadTasksCalled = false
-  ctx.api.tasks = async () => { loadTasksCalled = true; return { tasks: [] } }
-  ctx.api.taskEvidence = async () => ({ ok: false, error: { code: 'CONFLICT', message: 'Task revision changed' } })
-  evBtn.onclick({ stopPropagation() {} })
-  await new Promise(r => setImmediate(r))
-  assert.strictEqual(loadTasksCalled, true, 'CONFLICT must trigger loadTasks()')
+  // the row's status is its group and icon: no badge/button, the meta line is just the assignee
+  const metaEl = rowEl.children.find(c => (c.className || '').includes('tree-task-meta'))
+  assert.deepStrictEqual(metaEl.children.map(c => c.textContent), ['@dev-fe'])
 
   // Test 6: Cost incomplete in getRunDetailText
   const run1 = { label: 'Task run', chain: { turns: 3, limit: 12, costIncomplete: true } }
@@ -1863,7 +1645,7 @@ async function rendererS11Checks() {
   const run2 = { label: 'Task run', chain: { turns: 3, limit: 12, costIncomplete: false } }
   assert.ok(!ctx.getRunDetailText(run2).includes('Chi phí chuỗi chưa đủ dữ liệu'), 'getRunDetailText must not include warning when cost is complete')
 
-  console.log('ok (sprint 11 FE task verification & evidence)')
+  console.log('ok (task row & chain cost notice)')
 }
 
 async function rendererS12Checks(recovered = null) {
@@ -2042,7 +1824,6 @@ async function rendererS12Checks(recovered = null) {
     commandResult: { command: 'git merge dev', exitCode: 1, signal: null },
     candidateSha: '0123456789abcdef0123456789abcdef01234567',
     sourceSha: 'fedcba9876543210fedcba9876543210fedcba98',
-    checkIds: ['check-1', 'check-2'],
     excerpt: 'CONFLICT (content): Merge conflict in core.js'
   }
   const detailsNode = ctx.renderMergeDetails(sampleMergeEv)
@@ -2054,7 +1835,6 @@ async function rendererS12Checks(recovered = null) {
   assert.ok(textContent.includes('core.js') && textContent.includes('renderer.js'), 'details must include files')
   assert.ok(textContent.includes('git merge dev') && textContent.includes('1'), 'details must include command and exitCode')
   assert.ok(textContent.includes('0123456') && textContent.includes('fedcba9'), 'details must include shortened candidateSha and sourceSha')
-  assert.ok(textContent.includes('check-1, check-2'), 'details must include checkIds')
   const pre = detailsNode.querySelector('.merge-err-log')
   assert.ok(pre, 'must render pre.merge-err-log')
   assert.strictEqual(pre.textContent, sampleMergeEv.excerpt, 'excerpt must be inert textContent')
@@ -2436,7 +2216,7 @@ function qaElectronEntry() { // runs inside Electron, serialized by electronChec
     await js(`document.head.append(Object.assign(document.createElement('link'), { rel: 'stylesheet', href: 'https://fonts.googleapis.com/css2?family=Inter&qa=' + Date.now() }))`); await sleep(3000)
     check('font Google của UI chính không bị cổng preview huỷ (kể cả khi preview đang mở)', fonts.length > 0 && !fonts.includes('net::ERR_BLOCKED_BY_CLIENT'), JSON.stringify(fonts))
     await js(`closeViewer()`)
-    // ---- T56: task board hotfix (2-tier rows, status = evidence button) on the real renderer/CSS ----
+    // ---- T56: task board (2-tier rows) on the real renderer/CSS ----
     const { nativeTheme, screen } = require('electron')
     win.setSize(Math.min(2400, screen.getPrimaryDisplay().workAreaSize.width), Math.min(1100, screen.getPrimaryDisplay().workAreaSize.height))
     win.webContents.setZoomFactor(0.6) // 635px needs a ≥1905 CSS px wide window: zoom out instead of a huge screen
@@ -2454,74 +2234,31 @@ function qaElectronEntry() { // runs inside Electron, serialized by electronChec
     const specOpen = await js(`[document.querySelector('#viewer').open, document.querySelector('#viewer-path')?.textContent || document.querySelector('#viewer-title')?.textContent]`)
     await press('Escape')
     for (let i = 0; i < 20 && !(await js(`document.activeElement?.classList.contains('tree-task-title')`)); i++) await sleep(100) // focus comes back after the dialog closes
-    const specBack = await js(`[document.querySelector('#viewer').open, document.activeElement?.classList.contains('tree-task-title'), document.querySelector('.tree-task-item[data-task-id="T1"] .tree-task-evidence-btn').getAttribute('aria-expanded')]`)
-    check('T56 Enter trên tên mở spec (không mở bằng chứng), Esc đóng và trả focus', specOpen[0] && /s\.md/.test(specOpen[1]) && !specBack[0] && specBack[1] && specBack[2] === 'false', JSON.stringify([specOpen, specBack]))
-    // Enter/Space on the status button: opens the evidence (real taskEvidence IPC); Esc closes, focus back on the button
-    const btn = id => `document.querySelector('.tree-task-item[data-task-id="${id}"] .tree-task-evidence-btn')`
-    await js(`${btn('T1')}.focus()`); await press('Enter')
-    const kb1 = await js(`[${btn('T1')}.getAttribute('aria-expanded'), !!document.querySelector('#task-evidence-T1'), document.querySelector('#task-evidence-T1')?.textContent.slice(0, 80), ${btn('T1')}.getAttribute('aria-label'), document.querySelector('#viewer').open]`)
-    await press('Escape') // focus is still on the button
-    const kbEscOnBtn = await js(`[${btn('T1')}.getAttribute('aria-expanded'), !!document.querySelector('#task-evidence-T1'), document.activeElement === ${btn('T1')}]`)
-    await js(`${btn('T2')}.focus()`); await press('Space')
-    const kb3 = await js(`[${btn('T2')}.getAttribute('aria-expanded'), document.querySelector('#task-evidence-T2')?.textContent.slice(0, 60), ${btn('T2')}.textContent]`)
-    await press('Escape') // no Tab into the panel after Space either
-    const kbEscAfterSpace = await js(`[${btn('T2')}.getAttribute('aria-expanded'), !!document.querySelector('#task-evidence-T2'), document.activeElement === ${btn('T2')}]`)
-    check('T56 Enter/Space mở bằng chứng (IPC thật, aria-expanded, tên truy cập)', kb1[0] === 'true' && kb1[1] && !/Lỗi/.test(kb1[2]) && kb1[3] === 'Bằng chứng T1: Chưa có bằng chứng' && !kb1[4]
-      && kb3[0] === 'true' && !/Lỗi/.test(kb3[1]) && kb3[2] === 'Cần nghiệm thu', JSON.stringify([kb1, kb3]))
-    check('T55 Enter → Esc ngay: đóng panel, aria=false, giữ focus nút', kbEscOnBtn[0] === 'false' && !kbEscOnBtn[1] && kbEscOnBtn[2], JSON.stringify(kbEscOnBtn))
-    check('T55 Space → Esc ngay: đóng panel, aria=false, giữ focus nút', kbEscAfterSpace[0] === 'false' && !kbEscAfterSpace[1] && kbEscAfterSpace[2], JSON.stringify(kbEscAfterSpace))
-    await js(`${btn('T1')}.focus()`); await press('Enter')
-    await js(`${btn('T2')}.focus()`); await press('Space')
-    await js(`document.querySelector('#task-evidence-T2 .tree-task-evidence-close').focus()`); await press('Escape')
-    const kbInside = await js(`[${btn('T2')}.getAttribute('aria-expanded'), !!document.querySelector('#task-evidence-T2'), document.activeElement === ${btn('T2')}, ${btn('T1')}.getAttribute('aria-expanded'), !!document.querySelector('#task-evidence-T1')]`)
-    check('T55 Esc trong panel: đóng đúng task, trả focus, giữ panel khác', kbInside[0] === 'false' && !kbInside[1] && kbInside[2] && kbInside[3] === 'true' && kbInside[4], JSON.stringify(kbInside))
-    // layout: fixtures for all 8 states + done/approved, very long title/assignee/error, test-change warning; panels open
+    const specBack = await js(`[document.querySelector('#viewer').open, document.activeElement?.classList.contains('tree-task-title')]`)
+    check('T56 Enter trên tên mở spec, Esc đóng và trả focus', specOpen[0] && /s\.md/.test(specOpen[1]) && !specBack[0] && specBack[1], JSON.stringify([specOpen, specBack]))
+    // layout: very long title/assignee, every status group
     const longWord = 'x'.repeat(260)
     const fx = await js(`(() => {
-      const v = (state, reason, extra = {}) => ({ state, reason, reviewId: null, checkIds: [], warnings: { files: [], total: 0, truncated: false }, approval: null, ...extra })
-      const T = (id, status, verification, x = {}) => ({ id, title: 'Task ' + id + ' ' + 'nội dung khá dài để thử xuống dòng '.repeat(3), assignee: 'dev', spec: 'reports/s.md', status,
-        revision: 'r' + id, definitionRevision: 'd' + id, acceptance: 'code', createdAt: '2026-10-14T00:00:00.000Z', verification, ...x })
-      const warn = { files: [{ path: 'check.js', reason: 'check-script' }, { path: 'test/a.test.js', reason: 'test' }], total: 2, truncated: false }
-      currentTasks = [T('T501', 'review', v('ready', 'Đã kiểm · chờ PM duyệt', { warnings: warn })), T('T502', 'review', v('failed', 'Lệnh kiểm tra lỗi: ${longWord}')),
-        T('T503', 'review', v('stale', 'Cần kiểm lại')), T('T504', 'doing', v('pending', 'Chờ kiểm')), T('T505', 'todo', v('none', 'Chưa có bằng chứng'), { assignee: 'agent-ten-rat-dai-khong-co-khoang-trang-xxxxxxxxxxxxxxxxxxxx' }),
-        T('T506', 'review', v('manual', 'Cần nghiệm thu'), { acceptance: 'manual', title: '${longWord}' }), T('T507', 'review', v('unavailable', 'Chưa xác minh được')),
-        T('T508', 'review', v('legacy', 'Lịch sử trước Sprint 11')), T('T509', 'done', v('ready', 'Đã duyệt', { approval: { kind: 'checks', reviewer: 'pm', at: '2026-10-14T00:00:00.000Z', checkIds: ['c'], note: 'ok' } }))]
-      taskEvidenceOpenStates.clear(); renderBoard()
-      const sha = 'a'.repeat(40)
-      for (const t of currentTasks.filter(t => t.status !== 'done')) {
-        const item = document.querySelector('.tree-task-item[data-task-id="' + t.id + '"]'), b = item.querySelector('.tree-task-evidence-btn')
-        const panel = el('div', 'tree-task-evidence-panel'); panel.id = 'task-evidence-' + t.id; item.append(panel); b.setAttribute('aria-expanded', 'true')
-        renderEvidenceContent(panel, t, { ok: true, taskId: t.id, revision: t.revision, verification: t.verification, total: 1, truncated: false,
-          review: { version: 1, kind: 'review', id: 'rv', at: '2026-10-14T00:00:00.000Z', task: { id: t.id }, runId: 'run', workspaceId: 'ws', sourceSha: sha, baseSha: sha, checkPolicyHash: 'h',
-            artifactPaths: ['src/' + 'rat-dai-'.repeat(20) + '.js'], pathsComplete: true, warnings: t.verification.warnings },
-          checks: [{ version: 1, kind: 'check', id: 'c-' + t.id, origin: 'merge', runId: 'run', queueId: 'q', workspaceId: 'ws', taskRefs: [], reviewIds: ['rv'], sourceSha: sha, baseSha: sha, candidateSha: sha,
-            checkPolicyHash: 'h', startedAt: '2026-10-14T00:00:00.000Z', finishedAt: '2026-10-14T00:01:00.000Z', outcome: t.verification.state === 'failed' ? 'failed' : 'passed', treeStable: true,
-            commands: [{ command: 'npm run check', exitCode: 1, signal: null, durationMs: 1200, error: null, excerpt: '<script>alert(1)</script> ' + '${longWord}', truncated: false }] }] }, b)
-      }
+      const T = (id, status, x = {}) => ({ id, title: 'Task ' + id + ' ' + 'nội dung khá dài để thử xuống dòng '.repeat(3), assignee: 'dev', spec: 'reports/s.md', status,
+        revision: 'r' + id, createdAt: '2026-10-14T00:00:00.000Z', ...x })
+      currentTasks = [T('T501', 'review'), T('T502', 'review', { title: '${longWord}' }), T('T504', 'doing'),
+        T('T505', 'todo', { assignee: 'agent-ten-rat-dai-khong-co-khoang-trang-xxxxxxxxxxxxxxxxxxxx' }), T('T509', 'done')]
+      renderBoard()
       return currentTasks.length
     })()`)
     const measure = () => js(`(() => {
       const aside = document.querySelector('body > aside'), tree = document.querySelector('#tasks-tree'), ar = aside.getBoundingClientRect()
-      const ov = (x, y) => x && y && x.left < y.right - 0.5 && y.left < x.right - 0.5 && x.top < y.bottom - 0.5 && y.top < x.bottom - 0.5
       const inside = r => r.left >= ar.left - 0.5 && r.right <= ar.right + 0.5
       const out = { asideW: Math.round(ar.width), dark: matchMedia('(prefers-color-scheme: dark)').matches, hScroll: aside.scrollWidth > aside.clientWidth + 1 || tree.scrollWidth > tree.clientWidth + 1, bad: [] , scripts: document.querySelectorAll('#tasks-tree script').length }
       for (const item of tree.querySelectorAll('.tree-task-item')) {
         if (!item.offsetParent) continue
         const id = item.dataset.taskId, q = c => item.querySelector(c), r = c => q(c)?.getBoundingClientRect()
-        const t = r('.tree-task-title'), m = r('.tree-task-meta'), b = r('.tree-task-evidence-btn'), a = r('.tree-task-assignee'), wb = r('.tree-task-warn-badge')
+        const t = r('.tree-task-title'), m = r('.tree-task-meta'), a = r('.tree-task-assignee')
         const lines = Math.round(t.height / parseFloat(getComputedStyle(q('.tree-task-title')).lineHeight))
         if (lines > 2 || t.width < 60) out.bad.push(id + ': tên ' + lines + ' dòng, rộng ' + Math.round(t.width))
         if (m.top < t.bottom - 1) out.bad.push(id + ': meta không nằm dưới tên')
-        if (!inside(b) || !inside(a) || (wb && !inside(wb))) out.bad.push(id + ': nút/người nhận/cảnh báo tràn khỏi cột')
-        if (ov(a, b) || ov(b, wb)) out.bad.push(id + ': chồng người nhận/nút/cảnh báo')
-        const p = q('.tree-task-evidence-panel')
-        if (p) {
-          const pr = p.getBoundingClientRect(), c = p.querySelector('.tree-task-evidence-close')?.getBoundingClientRect(), hb = p.querySelector('.evidence-header .tree-task-badge')?.getBoundingClientRect()
-          if (p.scrollWidth > p.clientWidth + 1 || !inside(pr)) out.bad.push(id + ': panel tràn ngang')
-          if (!c || c.right > pr.right + 0.5 || ov(hb, c)) out.bad.push(id + ': nút đóng panel bị che/tràn')
-        }
+        if (!inside(a)) out.bad.push(id + ': người nhận tràn khỏi cột')
       }
-      out.warnShown = !!tree.querySelector('.tree-task-item[data-task-id="T501"] .tree-task-warn-badge')
       out.doneCollapsed = [...tree.querySelectorAll('details.task-group')].some(d => !d.open && d.textContent.includes('T509'))
       return out
     })()`)
@@ -2533,10 +2270,10 @@ function qaElectronEntry() { // runs inside Electron, serialized by electronChec
         layouts.push({ theme, width, ...(await measure()) })
       }
     }
-    check('T56 bố cục 240/300/635px × sáng/tối: tên ≤2 dòng, meta dưới tên, không tràn/chồng, 8 trạng thái panel không che nút đóng',
-      fx === 9 && layouts.every(l => Math.abs(l.asideW - l.width) <= 1 && !l.hScroll && !l.bad.length && l.warnShown && l.doneCollapsed && !l.scripts) && layouts.some(l => l.dark),
-      JSON.stringify(layouts.map(l => [l.theme, l.width, l.asideW, l.dark, l.hScroll, l.bad.length, l.warnShown, l.doneCollapsed])) + ' lỗi: '
-        + JSON.stringify(layouts.filter(l => Math.abs(l.asideW - l.width) > 1 || l.hScroll || l.bad.length || !l.warnShown || !l.doneCollapsed || l.scripts).slice(0, 3)))
+    check('T56 bố cục 240/300/635px × sáng/tối: tên ≤2 dòng, meta dưới tên, không tràn',
+      fx === 5 && layouts.every(l => Math.abs(l.asideW - l.width) <= 1 && !l.hScroll && !l.bad.length && l.doneCollapsed && !l.scripts) && layouts.some(l => l.dark),
+      JSON.stringify(layouts.map(l => [l.theme, l.width, l.asideW, l.dark, l.hScroll, l.bad.length, l.doneCollapsed])) + ' lỗi: '
+        + JSON.stringify(layouts.filter(l => Math.abs(l.asideW - l.width) > 1 || l.hScroll || l.bad.length || !l.doneCollapsed || l.scripts).slice(0, 3)))
     nativeTheme.themeSource = 'system'; win.webContents.setZoomFactor(1)
     // ---- T57: maximized restored at start; theme changes after the window is closed must not throw ----
     check('T57 mở app khôi phục cửa sổ phóng to (window.json maximized:true)', startedMax)
@@ -2553,7 +2290,7 @@ function qaElectronEntry() { // runs inside Electron, serialized by electronChec
   setTimeout(() => { console.log('E2E ' + JSON.stringify({ timeout: true, results })); app.exit(2) }, 60000)
 }
 
-// ---- T56 (QA): the task board never shows a previous box's tasks or evidence when its IPC answers late ----
+// ---- T56 (QA): the task board never shows a previous box's tasks when its IPC answers late ----
 async function rendererT56Checks() {
   const ui = fs.readFileSync(path.join(__dirname, 'renderer.js'), 'utf8'), vm = require('vm'), nodes = new Map()
   const part = (from, to) => ui.slice(ui.indexOf(from), ui.indexOf(to, ui.indexOf(from)))
@@ -2574,29 +2311,14 @@ async function rendererT56Checks() {
   const later = () => new Promise(resolve => pending.push(resolve))
   const ctx = vm.createContext({ $, el, dir: '/a', box: '.chat', openSeq: 1, document: { activeElement: null }, showToast() {}, openFileViewer() {},
     getAgentAvatar: () => null, hhmm: () => '12:00', navigator: { clipboard: { writeText: async () => {} } },
-    api: { tasks: () => later(), taskEvidence: () => later() } })
+    api: { tasks: () => later() } })
   vm.runInContext(part('const STATUS_MAP', '// ---- "Cần bạn"'), ctx)
-  const task = (id, title) => ({ id, title, assignee: 'dev', spec: null, status: 'review', revision: 'r', definitionRevision: 'd', acceptance: 'code',
-    verification: { state: 'ready', reason: null, reviewId: null, checkIds: [], warnings: { files: [], total: 0, truncated: false }, approval: null } })
+  const task = (id, title) => ({ id, title, assignee: 'dev', spec: null, status: 'review', revision: 'r' })
   const shown = () => all($('#tasks-tree')).filter(n => has(n, 'tree-task-item')).map(n => n.dataset.taskId)
   // a slow tasks reply for box A lands after switching to box B (same folder): ignored
   ctx.loadTasks(); ctx.box = '.chat2'; ctx.openSeq++
   pending.shift()({ tasks: [task('T7', 'của box cũ')], error: null }); await new Promise(r => setImmediate(r))
   assert.deepStrictEqual(shown(), [], 'T56: danh sách task của box cũ hiện ở box mới')
-  // evidence opened, then the box changes (or the board reloads) before the reply: the old evidence never appears
-  vm.runInContext("currentTasks = [" + JSON.stringify(task('T8', 'box mới')) + "]; renderBoard()", ctx)
-  for (const change of [() => { ctx.box = '.chat3'; ctx.openSeq++ }, () => { ctx.loadTasks() }]) {
-    vm.runInContext('taskEvidenceOpenStates.clear(); renderBoard()', ctx)
-    const btn = all($('#tasks-tree')).find(n => has(n, 'tree-task-evidence-btn'))
-    btn.onclick({ stopPropagation() {} })
-    assert.ok(all($('#tasks-tree')).some(n => has(n, 'tree-task-evidence-loading')), 'panel bằng chứng phải đang chờ IPC')
-    const evidenceReply = pending.pop(); change()
-    evidenceReply({ ok: true, taskId: 'T8', revision: 'r', verification: { state: 'failed', reason: 'BẰNG CHỨNG CŨ' }, review: null, checks: [], total: 0, truncated: false })
-    await new Promise(r => setImmediate(r))
-    assert.ok(!JSON.stringify(all($('#tasks-tree')).map(n => n.textContent)).includes('BẰNG CHỨNG CŨ'), 'T56: bằng chứng trả về muộn hiện sau khi đổi box/tải lại')
-    while (pending.length) pending.pop()({ tasks: [task('T8', 'box mới')], error: null })
-    await new Promise(r => setImmediate(r))
-  }
   console.log('ok (T56 task board stale IPC)')
 }
 
@@ -2706,7 +2428,7 @@ async function mainHarness() {
   const loadMain = () => {
     const file = require.resolve('./main'), m = new Module(file, module)
     m.filename = file; m.paths = module.paths; require.cache[file] = m
-    m._compile(fs.readFileSync(file, 'utf8') + '\nmodule.exports = { newChain, ask, jobs, orphans, activeChains, recordChainTurn, route, getChainView, saveStopRecord, sourceRef, checkPolicyHash, appendVerificationRecord, withGitLock, mergeWorkers, prepareWorkspace, startWorkspace, commitWorkspace, finishWorkspaceBindings, processMerge };', file)
+    m._compile(fs.readFileSync(file, 'utf8') + '\nmodule.exports = { newChain, ask, jobs, orphans, activeChains, recordChainTurn, route, getChainView, saveStopRecord, sourceRef, withGitLock, mergeWorkers, prepareWorkspace, startWorkspace, commitWorkspace, processMerge };', file)
     return m.exports
   }
 
@@ -3478,39 +3200,9 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
     console.log('ok (boxes)')
   }
 
-  // Sprint 11 G1-G6: verification records, tasks IPC with verification, taskEvidence IPC
-  {
-    const boardRes = await call('tasks', root)
-    assert.ok(Array.isArray(boardRes.tasks))
-    for (const t of boardRes.tasks) {
-      assert.ok(t.verification, `task ${t.id} missing verification`)
-      assert.ok(typeof t.verification.state === 'string')
-    }
-
-    if (boardRes.tasks.length > 0) {
-      const firstTask = boardRes.tasks[0]
-      const evidence = await call('taskEvidence', root, { taskId: firstTask.id, expectedRevision: firstTask.revision })
-      assert.strictEqual(evidence.ok, true)
-      assert.strictEqual(evidence.taskId, firstTask.id)
-      assert.strictEqual(evidence.revision, firstTask.revision)
-      assert.ok(evidence.verification)
-      assert.ok(Array.isArray(evidence.checks))
-
-      const conflictEvidence = await call('taskEvidence', root, { taskId: firstTask.id, expectedRevision: 'wrong-rev' })
-      assert.strictEqual(conflictEvidence.ok, false)
-      assert.strictEqual(conflictEvidence.error.code, 'CONFLICT')
-    }
-
-    const badEvidence = await call('taskEvidence', root, {})
-    assert.strictEqual(badEvidence.ok, false)
-    assert.strictEqual(badEvidence.error.code, 'INVALID_ARGUMENT')
-    console.log('ok (sprint 11 BE IPC & verification)')
-  }
-
-  // T49 (QA, independent): Sprint 11 end to end through executeJob + merge queue — gate, evidence binding, freshness, manual, G6
+  // task flow through executeJob + merge queue (worktrees on): only the PM closes and needs no evidence; G6 failed-turn cost
   {
     const sleep = ms => new Promise(r => setTimeout(r, ms))
-    const xfail = async (id, fn) => { try { await fn(); console.log(`ĐÃ SỬA ${id}: bỏ xfail trong check.js`) } catch (e) { console.log(`BUG ${id}: ${e.message.split('\n')[0]}`) } }
     // fresh agents (clean worktrees) + pm; worktrees on again
     let cfg = await call('projectSettings', root)
     let on2
@@ -3526,9 +3218,9 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
     const tf = at('.chat/tasks.json'), now = new Date().toISOString()
     let existing = []; try { existing = JSON.parse(fs.readFileSync(tf, 'utf8')).tasks } catch {}
     const mk = (id, assignee, acceptance) => ({ id, title: 'QA ' + id, assignee, spec: 'reports/qa.md', createdAt: now, updatedAt: now, acceptance })
-    fs.writeFileSync(tf, JSON.stringify({ version: 1, tasks: [...existing, mk('T901', 'qa-a', 'code'), mk('T902', 'qa-b', 'code'), mk('T903', 'qa-c', 'manual'), mk('T904', 'qa-a', 'code')] }))
-    for (const id of ['t901', 't902', 't903', 't904']) fs.writeFileSync(at(`${id}.txt`), Array.from({ length: 10 }, (_, i) => `${id}-${i}`).join('\n'))
-    git('add', 't901.txt', 't902.txt', 't903.txt', 't904.txt'); git('commit', '-qm', 'một file riêng cho mỗi task QA') // evidence is per file
+    fs.writeFileSync(tf, JSON.stringify({ version: 1, tasks: [...existing, mk('T901', 'qa-a', 'code'), mk('T903', 'qa-c', 'manual')] }))
+    fs.writeFileSync(at('t901.txt'), Array.from({ length: 10 }, (_, i) => `t901-${i}`).join('\n'))
+    git('add', 't901.txt'); git('commit', '-qm', 'file cho task QA')
     const tasks = async () => Object.fromEntries((await call('tasks', root)).tasks.map(t => [t.id, t]))
     const block = arr => 'xong\n```task-status\n' + JSON.stringify(arr) + '\n```'
     const turn = async (agent, text, edits = {}) => {
@@ -3538,14 +3230,7 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
       delete process.env.FAKE_REPLY; delete process.env.FAKE_EDITS
       return log().slice(m)
     }
-    const until = async (what, fn, ms = 30000) => { for (const end = Date.now() + ms; Date.now() < end; await sleep(100)) { const v = await fn(); if (v) return v } throw new Error('Hết giờ chờ: ' + what) }
-    const review = async (agent, id, line, text) => {
-      const t = await tasks(), said = await turn(agent, block([{ id, status: 'review', expectedRevision: t[id].revision }]), { [agent]: [[`${id.toLowerCase()}.txt`, line, text]] })
-      assert.strictEqual((await tasks())[id].status, 'review', `${agent} gửi review ${id} không được nhận: ` + JSON.stringify(said.map(m => `[${m.from}] ${m.text}`)))
-      await settle(1, `merge ${agent} ${id}`)
-      return until(`${id} có kết quả kiểm`, async () => { const v = (await tasks())[id]; return v.verification.state !== 'pending' && v })
-    }
-    const approve = async (id, approval) => { const t = await tasks(); return turn('pm', block([{ id, status: 'done', expectedRevision: t[id].revision, approval }])) }
+    const approve = async (id, extra = {}) => { const t = await tasks(); return turn('pm', block([{ id, status: 'done', expectedRevision: t[id].revision, ...extra }])) }
 
     // G6: a failed turn's cost counts toward the chain ceiling (worktrees on: dev-p and qa-a run side by side, qa-a routes last)
     cfg = await call('projectSettings', root)
@@ -3565,64 +3250,18 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
     cfg = await call('projectSettings', root)
     assert.ok((await call('saveProjectSettings', root, { settings: { ...cfg.settings, costCeiling: null }, expectedRevision: cfg.revision })).ok)
 
-    // non-PM done is refused even with an approval; manual task closes only through the PM with a reason (no review needed)
+    // an agent's done is refused (its reply kept); the owner's hand-off merges; the PM closes with no evidence, an old approval is ignored
     let out, t = await tasks()
-    out = await turn('qa-c', block([{ id: 'T903', status: 'done', expectedRevision: t.T903.revision, approval: { kind: 'manual', reason: 'tự đóng' } }]))
-    assert.ok((await tasks()).T903.status !== 'done' && out.some(m => m.from === 'qa-c' && m.text.startsWith('xong')), 'agent tự đóng task (kể cả manual) phải bị chặn, lời trả lời giữ nguyên')
-    // review → queue → check: ready with exactly the check of that hand-off. Everything below needs an owner's review to land.
-    const r1 = await review('qa-a', 'T901', 2, 'S11-A')
-    const r2 = await review('qa-b', 'T902', 8, 'S11-B')
-    assert.deepStrictEqual([r1.status, r1.verification.state, r1.verification.checkIds.length, r2.verification.state], ['review', 'ready', 1, 'ready'], JSON.stringify([r1.verification, r2.verification]))
-    const [X] = r1.verification.checkIds, [Y] = r2.verification.checkIds
-    const ev = await call('taskEvidence', root, { taskId: 'T901', expectedRevision: r1.revision })
-    assert.ok(ev.ok && ev.checks.some(c => c.id === X && c.outcome === 'passed' && c.candidateSha) && !JSON.stringify(ev).includes(userData), 'taskEvidence: hồ sơ đúng task, không lộ đường dẫn nội bộ')
-    // a model can't claim a hand-off id: reviewId in the block is refused, nothing recorded
-    out = await turn('qa-b', block([{ id: 'T902', status: 'review', expectedRevision: r2.revision, reviewId: r1.verification.reviewId }]))
-    assert.ok((await tasks()).T902.verification.reviewId === r2.verification.reviewId && out.some(m => m.from === 'system' && /reviewId/.test(m.text)), 'agent tự khai reviewId phải bị từ chối')
-    // non-PM done with a check approval on its own code task
-    out = await turn('qa-a', block([{ id: 'T901', status: 'done', expectedRevision: r1.revision, approval: { kind: 'checks', checkIds: [X] } }]))
-    assert.ok((await tasks()).T901.status === 'review' && out.some(m => m.from === 'qa-a' && m.text.startsWith('xong')), 'agent tự done phải bị chặn')
-    // PM cites another task's passing check
-    out = await approve('T901', { kind: 'checks', checkIds: [Y] })
-    assert.strictEqual((await tasks()).T901.status, 'review', 'PM đóng được T901 bằng check của T902 (approval.checkIds không bị kiểm thuộc đúng task/bàn giao)')
-    if ((await tasks()).T901.status === 'review') { out = await approve('T901', { kind: 'checks', checkIds: [X] }) }
-    const d1 = (await tasks()).T901
-    assert.deepStrictEqual([d1.status, d1.verification.approval?.reviewer], ['done', 'pm'], 'PM đóng được bằng đúng check của task: ' + JSON.stringify(out.map(m => `[${m.from}] ${m.text}`)))
-
-    // reopen + new hand-off whose merge is blocked before any check: the old pass must not make it ready
-    t = await tasks(); await turn('pm', block([{ id: 'T902', status: 'doing', expectedRevision: t.T902.revision }]))
-    fs.writeFileSync(at('dirty.tmp'), 'x')
-    t = await tasks(); await turn('qa-b', block([{ id: 'T902', status: 'review', expectedRevision: t.T902.revision }]), { 'qa-b': [['t902.txt', 8, 'S11-B2']] })
-    await settle(1, 'merge qa-b bị chặn vì thư mục bẩn')
-    const v2 = (await tasks()).T902
-    assert.notStrictEqual(v2.verification.state, 'ready', `bàn giao mới chưa được kiểm (queue ${queue().at(-1).state}) nhưng vẫn "ready" nhờ check ${v2.verification.checkIds} của lần trước`)
-    await xfail('T49-nhan-queue-bi-chan', async () => assert.strictEqual(v2.verification.state, 'pending',
-      `queue của bàn giao đang ${queue().at(-1).state} nhưng badge là "${v2.verification.reason}" (contract mục 5: queue bị chặn/paused vẫn là pending kèm lý do)`))
-    await approve('T902', { kind: 'checks', checkIds: v2.verification.checkIds.length ? v2.verification.checkIds : [Y] })
-    assert.strictEqual((await tasks()).T902.status, 'review', 'PM đóng được T902 khi code mới chưa từng chạy check')
-    fs.rmSync(at('dirty.tmp'))
-
-    // manual task: a green merge never closes it; only the PM with a reason
-    const r3 = await review('qa-c', 'T903', 9, 'S11-C')
-    // T54: PM manual approval with report outside scope fails; with valid report succeeds in real main harness
-    await approve('T903', { kind: 'manual', reason: 'Đã nghiệm thu tay theo spec', report: '../outside.md' })
-    assert.strictEqual((await tasks()).T903.status, 'review', 'PM không được đóng task manual với report ngoài phạm vi')
-    await approve('T903', { kind: 'manual', reason: 'Đã nghiệm thu tay theo spec', report: 'reports/sprint-11.md' })
-    const d3 = (await tasks()).T903
-    assert.deepStrictEqual([d3.status, d3.verification.approval?.kind, d3.verification.approval?.reviewer, d3.verification.approval?.report], ['done', 'manual', 'pm', 'reports/sprint-11.md'])
-
-    // freshness: main changes the hand-off's file after the check → stale, PM refused
-    const r4 = await review('qa-a', 'T904', 3, 'S11-D')
-    assert.strictEqual(r4.verification.state, 'ready', JSON.stringify(r4.verification))
-    const L = fs.readFileSync(at('t904.txt'), 'utf8').split('\n'); L[3] = 'main sửa sau check'; fs.writeFileSync(at('t904.txt'), L.join('\n'))
-    git('commit', '-qam', 'main đổi file của T904')
-    const s4 = (await tasks()).T904
-    assert.strictEqual(s4.verification.state, 'stale', 'code của bàn giao đổi trên main sau check phải thành stale')
-    await approve('T904', { kind: 'checks', checkIds: r4.verification.checkIds })
-    assert.strictEqual((await tasks()).T904.status, 'review', 'PM đóng được task có bằng chứng đã cũ')
-    // legacy: the log is still readable and old done events keep their state
+    out = await turn('qa-c', block([{ id: 'T903', status: 'done', expectedRevision: t.T903.revision }]))
+    assert.ok((await tasks()).T903.status !== 'done' && out.some(m => m.from === 'qa-c' && m.text.startsWith('xong')), 'agent tự đóng task phải bị chặn, lời trả lời giữ nguyên')
+    t = await tasks(); out = await turn('qa-a', block([{ id: 'T901', status: 'review', expectedRevision: t.T901.revision }]), { 'qa-a': [['t901.txt', 2, 'S11-A']] })
+    assert.strictEqual((await tasks()).T901.status, 'review', 'qa-a gửi review T901 không được nhận: ' + JSON.stringify(out.map(m => `[${m.from}] ${m.text}`)))
+    await settle(1, 'merge qa-a T901'); assert.strictEqual(queue().findLast(e => e.agent === 'qa-a').state, 'merged')
+    await approve('T901'); await approve('T903', { approval: { kind: 'manual', reason: 'thói quen cũ' }, reviewId: 'x' })
+    t = await tasks()
+    assert.deepStrictEqual([t.T901.status, t.T903.status, 'verification' in t.T901], ['done', 'done', false])
     assert.ok((await call('logPage', root)).page.messages.length > 0)
-    console.log('ok (T49 sprint 11 end to end)')
+    console.log('ok (task flow: PM closes without evidence, G6)')
   }
 
   let s12 = null
@@ -3689,8 +3328,8 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
       assert.ok(ev.files.length <= 50 && ev.excerpt.length <= 8192 && ev.message.length <= 2000, where)
       assert.ok(!JSON.stringify(ev).includes(managed) && !JSON.stringify(ev).includes(userData), `${where}: lộ đường dẫn nội bộ`)
       assert.ok(!ev.files.some(f => path.isAbsolute(f) || f.split('/').includes('..')), `${where}: path tuyệt đối/đi ra ngoài`)
-      if (['prepare', 'merge', 'dependencies'].includes(ev.phase)) assert.deepStrictEqual([ev.checkIds, ev.commandResult], [[], null], `${where}: chặn trước check không có check/lệnh`)
-      if (ev.code === 'CHECK_FAILED') assert.ok(ev.commandResult && ev.commandResult.exitCode !== 0 && ev.checkIds.length === 1, `${where}: phải có lệnh lỗi + check`)
+      if (['prepare', 'merge', 'dependencies'].includes(ev.phase)) assert.strictEqual(ev.commandResult, null, `${where}: chặn trước check không có lệnh`)
+      if (ev.code === 'CHECK_FAILED') assert.ok(ev.commandResult && ev.commandResult.exitCode !== 0, `${where}: phải có lệnh lỗi`)
       assert.strictEqual(log().filter(m => m.eventId === ev.eventId).length, 1, `${where}: đúng một tin cho một lỗi`)
     }
     // coordination notes are not turns: no runId/usage (the box totals reducer counts a system message with runId as a turn)
@@ -3735,16 +3374,15 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
     assert.ok(notes >= 3, `A: task-status phải được nhận (${notes} lần) để ca có nghĩa: ` + log().slice(mark).map(m => `[${m.from}] ${m.text.split('\n')[0]}`).join(' → '))
     assert.strictEqual(turnsOf(mark, ['qa-a', 'qa-b']), 6, 'A: doing→review tính, doing↔review lặp lại không tính → dừng sau 6 lượt')
 
-    // B. check novelty: same task/tree/policy/result again is not progress; fail→pass is. qa-a runs the check (linked to T908) each turn
+    // B. an app-run check alone is not progress (the merge queue is the gate): qa-a runs one each turn, old-style task link ignored
     const flip = path.join(os.tmpdir(), `qa-flip-${process.pid}`); fs.rmSync(flip, { force: true })
     process.env.QA_FLIP_FILE = flip; process.env.FAKE_CMD = JSON.stringify({ 'qa-a': { command: 'npm run check', tasks: ['T908'] } })
     mark = log().length; await call('send', root, '@qa-a T908 chạy check')
     const stopB = await waitFor('B: chuỗi dừng', () => stopIn(mark), 120000); await quiet(mark)
     delete process.env.FAKE_CMD; delete process.env.QA_FLIP_FILE; delete process.env.FAKE_REPLY
-    const ev908 = await call('taskEvidence', root, { taskId: 'T908', expectedRevision: (await task('T908')).revision })
-    const outcomes = ev908.checks.filter(c => c.origin === 'run-command').sort((x, y) => x.finishedAt.localeCompare(y.finishedAt)).map(c => [c.outcome, c.treeStable])
-    assert.deepStrictEqual(outcomes.slice(0, 3), [['failed', true], ['passed', true], ['passed', true]], 'B: hồ sơ runner liên kết T908: ' + JSON.stringify(outcomes))
-    assert.strictEqual(turnsOf(mark, ['qa-a', 'qa-b']), 6, 'B: fail mới, fail→pass mới, pass lặp lại không tính → dừng sau 6 lượt')
+    const ran = log().slice(mark).flatMap(m => m.commandResults || []).map(c => c.exitCode)
+    assert.deepStrictEqual(ran.slice(0, 2), [1, 0], 'B: lệnh vẫn chạy và trả kết quả thật: ' + JSON.stringify(ran))
+    assert.strictEqual(turnsOf(mark, ['qa-a', 'qa-b']), 3, 'B: chỉ chạy check, không đổi code/task → dừng sau 3 lượt')
     s12.stopB = { seq: stopB.seq, stopId: stopB.stopId }
 
     // C. admission at the cap: limit 2 and three recipients at once → exactly two jobs, the third kept as pending with its source
@@ -3790,8 +3428,8 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
     await waitFor('D: publish/cleanup/emit hoàn tất trước khi checkout về main', () => !internals.mergeWorkers.has(root))
     await internals.withGitLock(root, async () => { git('checkout', '-q', 'main'); git('branch', '-q', '-D', 'qa-detour') })
     const evD = failedD.mergeEvent
-    assert.ok(evD.phase === 'publish' && evD.candidateSha && evD.checkIds.length === 1 && evD.commandResult === null && evD.code === 'TARGET_CHANGED',
-      'D: lỗi publish sau check đạt: ' + JSON.stringify({ phase: evD.phase, code: evD.code, candidate: !!evD.candidateSha, checkIds: evD.checkIds, cmd: evD.commandResult }))
+    assert.ok(evD.phase === 'publish' && evD.candidateSha && evD.commandResult === null && evD.code === 'TARGET_CHANGED',
+      'D: lỗi publish sau check đạt: ' + JSON.stringify({ phase: evD.phase, code: evD.code, candidate: !!evD.candidateSha, cmd: evD.commandResult }))
     assert.ok((await call('retryMerge', root, { queueId: failedD.id })).ok)
     await waitFor('D: thử lại gộp được', () => queue().slice(qD).some(e => e.state === 'merged'), 60000)
     await quiet(mark, 1500)
@@ -3917,24 +3555,7 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
     msJob.taskSemanticKeys.T908 = 'T908:semantic2'; progress('new-definition', 'doing')
     assert.strictEqual(milestones.idleStreak, 0, 'nội dung định nghĩa mới có milestone riêng')
 
-    const task908 = (await core.taskBoardIndexed(root)).tasks.find(t => t.id === 'T908')
-    const policy = internals.checkPolicyHash(core.projectSettings(root).settings.mergeChecks || []), source = git('rev-parse', 'HEAD').trim(), tree = git('rev-parse', 'HEAD^{tree}').trim()
-    const proofChain = newChain(root)
-    const proofJob = { root, chain: proofChain, scope: { readOnly: true }, taskDefinitions: { T908: task908.definitionRevision }, taskSemanticKeys: { T908: 'semantic-908' } }
-    const checkResult = (id, outcome, override = {}, chain = proofChain) => {
-      const rec = { version: 1, kind: 'check', id, runId: id, treeStable: true, sourceSha: source, treeSha: tree, checkPolicyHash: policy,
-        taskRefs: [{ id: 'T908', definitionRevision: task908.definitionRevision }], outcome,
-        commands: [{ command: 'npm run check', exitCode: outcome === 'passed' ? 0 : 1, signal: null }], ...override }
-      internals.appendVerificationRecord(root, rec)
-      recordChainTurn({ ...proofJob, chain, runId: id }, { outcome: 'success', usage: { costUsd: 0 } }, [], [], true)
-    }
-    checkResult('proof-fail', 'failed'); checkResult('proof-pass', 'passed'); assert.strictEqual(proofChain.idleStreak, 0)
-    checkResult('proof-pass-again', 'passed', { excerpt: 'different output', finishedAt: new Date().toISOString() }); assert.strictEqual(proofChain.idleStreak, 1)
-    checkResult('proof-fail-again', 'failed'); assert.strictEqual(proofChain.idleStreak, 2, 'fail/pass đã thấy không reset')
-    for (const [name, fields] of Object.entries({ tree: { treeSha: null }, policy: { checkPolicyHash: 'wrong' }, task: { taskRefs: [{ id: 'T908', definitionRevision: 'wrong' }] }, unstable: { treeStable: false }, timeout: { outcome: 'timeout' } })) {
-      const c = newChain(root); checkResult('invalid-' + name, 'passed', fields, c); assert.strictEqual(c.idleStreak, 1, 'không tính bằng chứng ' + name)
-    }
-    console.log('ok (T52 tracking-limit/coalesce/admission/done/check validity)')
+    console.log('ok (T52 tracking-limit/coalesce/admission/done)')
   }
 
   {
@@ -4060,47 +3681,35 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
     const read58 = () => JSON.parse(fs.readFileSync(registry58, 'utf8'))
     const setAuto = enabled => { const c = core.projectSettings(r); core.writeProjectSettings(r, { ...c.settings, worktreesEnabled: enabled }, c.revision) }
     const job = () => ({ root: r, name: agent.name, ...workspace, scope: core.normalizeScope(agent, r), baseSha: g(cwd, 'rev-parse', 'HEAD'), runId: uuid(), taskIds: [] })
-    const finish = async (j = job(), reviewIds = [], refs = []) => {
-      const w = await internals.commitWorkspace(j, { outcome: 'success', text: 'read only' }, [], true, [])
-      if (w.queuedEntryId) await internals.finishWorkspaceBindings(j, w, reviewIds, refs)
-      return w
-    }
+    const finish = (j = job()) => internals.commitWorkspace(j, { outcome: 'success', text: 'read only' }, [], true, [])
     commit(cwd, 'a.txt', 'private\n'); commit(r, 'a.txt', 'main\n')
-    const firstJob = job(), aRef = { id: 'fixture-task', definitionRevision: 'definition', requestedRevision: 'one' }
-    const first = await finish(firstJob, ['review-one'], [aRef])
+    const first = await finish()
     assert.ok(first.queuedEntryId, 'T58: source tự commit, chưa từng enqueue vẫn phải vào queue')
     await internals.processMerge(r, first.queuedEntryId)
     const failed58 = read58().queue[0]
     assert.strictEqual(failed58.state, 'conflict')
     for (let i = 0; i < 2; i++) assert.strictEqual((await finish()).queuedEntryId, first.queuedEntryId)
     assert.strictEqual(read58().queue.length, 1, 'T58: hai lượt mới cùng source conflict không được thêm attempt')
-    assert.deepStrictEqual(read58().queue[0].reviewIds, ['review-one'])
-    // Retry and finish race; a legacy duplicate with a second task binding must not be lost.
-    const legacy58 = read58(), duplicate = { ...failed58, id: uuid(), reviewIds: ['review-two'], taskRefs: [{ ...aRef, requestedRevision: 'two' }] }
+    // Retry and finish race, plus a legacy duplicate of the same source: one attempt
+    const legacy58 = read58(), duplicate = { ...failed58, id: uuid() }
     legacy58.queue.push(duplicate); fs.writeFileSync(registry58, JSON.stringify(legacy58))
     setAuto(false)
     const raced = await Promise.all([call('retryMerge', r, { queueId: failed58.id }), finish(), call('retryMerge', r, { queueId: duplicate.id })])
     assert.ok(raced[0].ok && raced[2].ok)
     let queued58 = read58().queue.filter(e => !e.supersededBy && e.state === 'queued')
     assert.strictEqual(queued58.length, 1, 'T58: retry trùng + finish chỉ tạo một attempt')
-    assert.deepStrictEqual(queued58[0].reviewIds.sort(), ['review-one', 'review-two'])
-    assert.strictEqual(queued58[0].taskRefs.length, 2)
     setAuto(true); await internals.processMerge(r, queued58[0].id)
     assert.strictEqual(read58().queue.at(-1).state, 'conflict')
     // A genuinely new head is queued once in either lock ordering with an explicit retry of the old source.
     setAuto(false)
     commit(cwd, 'a.txt', 'main\n'); commit(cwd, 'new.txt', 'keep this new work\n')
     let count58 = read58().queue.length
-    const [newFinish, newRetry] = await Promise.all([finish(job(), ['review-new'], [aRef]), call('retryMerge', r, { queueId: queued58[0].id })])
+    const [newFinish, newRetry] = await Promise.all([finish(), call('retryMerge', r, { queueId: queued58[0].id })])
     assert.ok(newRetry.ok && newFinish.queuedEntryId)
     assert.strictEqual(read58().queue.length, count58 + 1, 'T58: commit mới + retry không tạo trùng')
     setAuto(true); await internals.processMerge(r, newFinish.queuedEntryId)
     assert.strictEqual(read58().queue.at(-1).state, 'merged')
     assert.strictEqual(fs.readFileSync(at58('new.txt'), 'utf8'), 'keep this new work\n')
-    const vf = path.join(path.dirname(registry58), 'verification.chat.jsonl')
-    const checks58 = fs.readFileSync(vf, 'utf8').trim().split('\n').map(JSON.parse).filter(v => v.kind === 'check')
-    assert.ok(checks58.some(c => c.outcome === 'passed' && c.sourceSha === newFinish.headSha && c.reviewIds.includes('review-new') && c.taskRefs.some(t => t.id === aRef.id)), 'T58: source/task/review đúng khi check commit mới')
-    assert.ok(checks58.every(c => !c.reviewIds.includes('review-one')), 'T58: không gán bằng chứng source mới cho review cũ')
 
     commit(cwd, 'a.txt', 'source to preserve\n'); commit(r, 'a.txt', 'new main\n')
     const recoverySource = await finish(); await internals.processMerge(r, recoverySource.queuedEntryId)
@@ -4109,7 +3718,7 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
     for (let i = 0; i < 7; i++) priorRegistry.queue.push({ ...recoveryEntry, id: uuid() })
     fs.writeFileSync(registry58, JSON.stringify(priorRegistry))
     const request58 = () => call('replaceMergeSource', r, { queueId: recoveryEntry.id })
-    const oldHead = g(cwd, 'rev-parse', 'HEAD'), targetHead = g(r, 'rev-parse', 'HEAD'), evidenceBefore = fs.readFileSync(vf, 'utf8')
+    const oldHead = g(cwd, 'rev-parse', 'HEAD'), targetHead = g(r, 'rev-parse', 'HEAD')
     const registryBefore = fs.readFileSync(registry58, 'utf8')
     dialogAnswer = 0; assert.strictEqual((await request58()).error?.code, 'CANCELLED')
     assert.strictEqual(fs.readFileSync(registry58, 'utf8'), registryBefore)
@@ -4156,9 +3765,8 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
     assert.strictEqual(resolution.state, 'replaced', 'T58: không báo giả là merged')
     assert.strictEqual(restored58.queue.filter(e => e.supersededBy === resolution.id).length, 8)
     assert.deepStrictEqual(restored58.agents[0].merged, priorRegistry.agents[0].merged, 'T58: không khai source đã được squash')
-    assert.strictEqual(fs.readFileSync(vf, 'utf8'), evidenceBefore)
     const savedRegistry = JSON.parse(fs.readFileSync(path.join(path.dirname(registry58), 'recovery', resolution.snapshotId, 'registry.json')))
-    assert.deepStrictEqual(savedRegistry, priorRegistry, 'T58: snapshot giữ toàn bộ lỗi/bindings trước phục hồi')
+    assert.deepStrictEqual(savedRegistry, priorRegistry, 'T58: snapshot giữ toàn bộ lỗi trước phục hồi')
     for (const before of priorRegistry.queue) {
       const after = { ...restored58.queue.find(e => e.id === before.id) }
       if (after.supersededBy === resolution.id) delete after.supersededBy
@@ -4173,7 +3781,7 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
     assert.strictEqual(read58().queue.length, count58, 'T58: đọc lại/retry cũ không sinh thêm attempt')
     assert.strictEqual((await call('worktreeState', r)).state.queue.filter(e => e.canRetry || e.canRepair || e.canStop).length, 0)
     dialogAnswer = 0
-    console.log('ok (T58 source dedupe, retry race, bindings, guarded recovery & preserved history)')
+    console.log('ok (T58 source dedupe, retry race, guarded recovery & preserved history)')
   }
   console.log('ok (main harness end)') // mainChecks requires this line: a hung await empties the event loop and exits 0 silently
 }
