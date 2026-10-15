@@ -1,0 +1,53 @@
+{
+  "source": "fa626c1d84768086f0953a7bd23dbadc65a49886",
+  "startedAt": "2026-10-15T02:58:44.822Z",
+  "durationMs": 1354,
+  "binary": "/Users/namanh/Library/Application Support/Agent Chat/worktrees/3ced195b5bc66b7d24fda40a16c70bf6b7a031d998ce9c9b359432e9ff40815e/agents/aa434505-5ad9-44f8-8f65-2a9b8aed19c9/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron",
+  "realBinary": "/Users/namanh/Library/Application Support/Agent Chat/worktrees/3ced195b5bc66b7d24fda40a16c70bf6b7a031d998ce9c9b359432e9ff40815e/agents/aa434505-5ad9-44f8-8f65-2a9b8aed19c9/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron",
+  "electronPackage": "44.4.5",
+  "node": "v26.8.1",
+  "platform": "darwin",
+  "arch": "arm64",
+  "shellOverride": "/nonexistent",
+  "timeoutMs": 60000,
+  "permissionContext": "techlead / danger-full-access (existing permissions)",
+  "exitCode": 0,
+  "signal": null,
+  "error": null,
+  "enteredJavaScript": true,
+  "enteredFixture": true,
+  "result": {
+    "electron": "44.4.5",
+    "chrome": "152.0.7977.130",
+    "results": [
+      {
+        "name": "Cần bạn embedded: giữ lỗi qua event khác chuỗi, xác minh đúng mở lại",
+        "ok": true,
+        "info": {
+          "seq": 3,
+          "stopId": "probe-embedded",
+          "chainId": "probe-embedded",
+          "unrelatedStopId": "other-embedded",
+          "unrelatedChainId": "other-chain-embedded",
+          "lockedAfterUnrelatedEvent": true,
+          "enabledAfterVerification": true
+        }
+      },
+      {
+        "name": "Cần bạn fallback: giữ lỗi qua event khác chuỗi, xác minh đúng mở lại",
+        "ok": true,
+        "info": {
+          "seq": 3,
+          "stopId": "probe-fallback",
+          "chainId": "probe-fallback",
+          "unrelatedStopId": "other-fallback",
+          "unrelatedChainId": "other-chain-fallback",
+          "lockedAfterUnrelatedEvent": true,
+          "enabledAfterVerification": true
+        }
+      }
+    ],
+    "errors": [],
+    "error": null
+  }
+}
