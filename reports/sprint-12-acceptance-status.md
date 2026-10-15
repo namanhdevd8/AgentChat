@@ -89,3 +89,18 @@ Techlead tiếp tục hỗ trợ T52, giữ phạm vi probe/bằng chứng trong
 5. Gặp lỗi/timeout thì lưu output và dừng lượt kiểm; phân loại lỗi probe hay sản phẩm theo bằng chứng. PM nhận kết quả rồi giao QA đánh giá độc lập; không cần QA chạy lại phép đối chứng chỉ để xác nhận đã nhận báo cáo.
 
 T52 vẫn Đang làm; T53/T55 giữ Chờ duyệt. Bằng chứng khởi tạo Electron không thay thế thử UI hoặc box thật. Lượt PM chỉ cập nhật điều phối; không chạy lại kiểm sản phẩm và không thay trạng thái task.
+
+### Bàn giao QA đánh giá Electron lượt 2 — 2026-10-15, 09:50 ICT
+
+PM đã đối chiếu [báo cáo lượt 2](sprint-12-electron-comparison-round-2.md) với JSON: nguồn thử `b2fd221`, Electron 44.4.5, exit 1 sau 1.346 giây, signal null; 8 nhóm `ok:true`, nhóm embedded/fallback `ok:false`. Assertion đỏ ở bước mở lại nút embedded sau Kiểm tra lại; nhánh fallback phía sau chưa chạy. Tám nhóm xanh là kết quả quan sát được, chưa thay thế quyết định nghiệm thu độc lập của QA hoặc kết quả toàn probe.
+
+Probe và bằng chứng lượt 2 đã được techlead lưu ở commit `5bdbb668428f48aa4bea41a8963d78e8eac9997a`. Nếu nhánh QA chưa có file, đọc trực tiếp bằng `git show 5bdbb66:reports/sprint-12-electron-comparison-round-2.md` và các file `.cjs`, `.json`, `.stdout.txt`, `.stderr.txt` cùng prefix; không cần ghi Git hay gộp nhánh QA cũ để đánh giá.
+
+**QA tiếp tục T52 bằng đọc và đối chiếu bằng chứng, chưa chạy thêm Node/Electron:**
+
+1. Đánh giá tám nhóm xanh: assertion có kiểm đúng hành vi không, phạm vi BE thật so với hai handler được thay để tạo lỗi/chậm, và giới hạn click bằng script so với thử box thật. Nêu rõ nhóm được chấp nhận và thiếu sót nếu có.
+2. Xác minh chẩn đoán của techlead: event được mô tả là chuỗi khác đổi stopId nhưng giữ chainId, có thể ghi đè cache đang kiểm. Đối chiếu probe, renderer và contract để phân biệt fixture sai với lỗi sản phẩm; chưa coi đổi fixture là bằng chứng ca đỏ đã đạt.
+3. Nếu xác nhận cần hai ID độc lập, chốt sửa tối thiểu và điều kiện fixture trước emit, giữ assertion mở lại nút. Nêu chính xác các bước embedded/fallback còn phải thực thi; nếu phát hiện đường xử lý hợp lệ bị bỏ sót thì báo kèm điều kiện tái hiện.
+4. Trả PM kết luận và phạm vi chưa kiểm. Sau đó PM giao techlead sửa probe/chạy phần còn thiếu trong môi trường đã khởi tạo được; không giao hai người sửa/chạy cùng lúc, không yêu cầu QA vượt quyền hiện có.
+
+Giữ nguyên bằng chứng hai lượt. T52 vẫn Đang làm, T53/T55 Chờ duyệt; chưa nghiệm thu toàn bộ Electron hoặc box thật và chưa đóng Sprint 12. Lượt PM này không chạy kiểm sản phẩm.
