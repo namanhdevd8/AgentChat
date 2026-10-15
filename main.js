@@ -22,6 +22,7 @@ const TASK_STATUS_LABELS = { todo: 'Cần làm', doing: 'Đang làm', review: 'C
 const RETRYABLE_MERGE_STATES = ['conflict', 'check-failed', 'blocked-dirty', 'blocked-config', 'needs-deps', 'error', 'paused']
 const jobs = [], orphans = [], loadedRoots = new Set(), rootDirs = new Map()
 const summaryUnavailable = new Set()
+const summaryRetryAt = new Map() // root → ms: a failed or stopped summary waits instead of rerunning after every turn
 const logGenerations = new Map(), appLogWrites = new Map()
 const pendingPermissions = new Map(), permissionReservations = new Map()
 let win, sequence = 0, pumping = false, pumpAgain = false, orphanTimer
@@ -1903,7 +1904,7 @@ async function ask(dir, agent, hops, special = null, chain = null, trigger = nul
   try { await ensureTrustedConfig(root) } catch (e) { setupError = e.message }
   try { if (special?.kind !== 'summary' && !setupError) migrateTaskScope(dir) } catch (e) { if (String(agent.name).toLowerCase() === 'pm') setupError ||= `Không nâng được quyền task cho PM: ${e.message}` }
   agent = core.team(dir).find(a => a.name === agent.name) || agent
-  if (special?.kind === 'summary') agent = { ...agent, resume: false, allowedCommands: [], permissions: { mode: 'edit', allowTools: [], networkAccess: false }, owns: [], readOnly: true }
+  if (special?.kind === 'summary') agent = { ...agent, effort: agent.effort && 'low', resume: false, allowedCommands: [], permissions: { mode: 'edit', allowTools: [], networkAccess: false }, owns: [], readOnly: true }
   const scope = core.normalizeScope(agent, root)
   let workspace = { cwd: root, workspaceId: null, branch: null, worktree: false }
   if (special?.kind !== 'summary' && !setupError) try { workspace = await prepareWorkspace(root, agent) } catch (e) { setupError ||= e.message } // unconfirmed config creates no worktrees
@@ -1962,7 +1963,7 @@ async function ask(dir, agent, hops, special = null, chain = null, trigger = nul
 
 async function scheduleSummary(dir) {
   const root = rootOf(dir)
-  if (jobs.some(job => job.root === root && job.kind === 'summary')) return
+  if (jobs.some(job => job.root === root && job.kind === 'summary') || summaryRetryAt.get(root) > Date.now()) return
   if (!core.configTrust(root).trusted) return // background work never pops the config dialog; the next agent turn will
   let batch
   try { batch = await core.summaryBatch(root) } catch (e) { console.error('Không kiểm tra được tóm tắt:', e); return }
@@ -2287,6 +2288,7 @@ async function executeJob(job) {
       result = { ...result, outcome: 'error', text: e.message, usage: result.usage || zeroUsage() }
       await terminal(job, result)
     } finally {
+      if (result.outcome !== 'success') summaryRetryAt.set(job.root, Date.now() + 30 * 60000)
       if (result.orphanState) keepOrphan(job, result.orphanState); else releaseReservation(job)
       removeJob(job)
     }

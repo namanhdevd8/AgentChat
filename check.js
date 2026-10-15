@@ -1041,6 +1041,10 @@ async function sprint6Checks() {
   // F3: ≥100 old messages → PM batch; the accepted summary is a checkpoint record, the log itself is kept
   const batch = await core.summaryBatch(d); assert.deepStrictEqual([batch.through, batch.end], [0, 100])
   assert.ok(batch.prompt.includes('[42] [user] Sprint 2: làm KHÓA FILE thật'))
+  const long = (await core.acceptSummary(d, batch, '- dòng dài\n'.repeat(4000), 'run-l')).text // 56 KB: cut at a line, not refused
+  assert.ok(Buffer.byteLength(long) <= 32768 && long.endsWith('(cắt bớt cho vừa 32 KiB)'))
+  assert.ok(long.split('\n\n…')[0].split('\n').every(line => line === '- dòng dài'))
+  await assert.rejects(core.acceptSummary(d, batch, '  \n', 'run-e'), /rỗng/)
   const summary = await core.acceptSummary(d, batch, '# Tóm tắt\n- khóa file ở Sprint 2', 'run-s')
   core.materializeSummary(d, summary); await core.appendLogIndexed(d, { from: 'pm', at, kind: 'summary', summary, runId: 'run-s', text: 'tóm tắt' })
   assert.ok(fs.readFileSync(path.join(d, '.chat', 'summary.md'), 'utf8').includes('khóa file ở Sprint 2'))
