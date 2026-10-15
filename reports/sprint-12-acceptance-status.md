@@ -104,3 +104,19 @@ Probe và bằng chứng lượt 2 đã được techlead lưu ở commit `5bdbb
 4. Trả PM kết luận và phạm vi chưa kiểm. Sau đó PM giao techlead sửa probe/chạy phần còn thiếu trong môi trường đã khởi tạo được; không giao hai người sửa/chạy cùng lúc, không yêu cầu QA vượt quyền hiện có.
 
 Giữ nguyên bằng chứng hai lượt. T52 vẫn Đang làm, T53/T55 Chờ duyệt; chưa nghiệm thu toàn bộ Electron hoặc box thật và chưa đóng Sprint 12. Lượt PM này không chạy kiểm sản phẩm.
+
+### QA chấp nhận tám nhóm; giao kiểm riêng embedded/fallback — 2026-10-15, 09:56 ICT
+
+QA đã đối chiếu probe/JSON/stdout tại `5bdbb66` và chấp nhận tám nhóm xanh: recovery, seq/bấm trùng, giữ lỗi, xác minh sai, cập nhật quyền, xác minh đúng, hiển thị thành công và đổi box. Giới hạn vẫn giữ nguyên: Electron/IPC và recovery BE thật; phản hồi Tiếp tục/Kiểm tra lại được mô phỏng, chưa thay thế thử box thật.
+
+QA xác nhận fixture tại dòng 214 đổi stopId nhưng giữ chainId, làm state của chuỗi khác ghi đè cache bằng revision 100 và khiến xác minh lại bị từ chối. Chưa có căn cứ từ ca này để kết luận lỗi sản phẩm. Cần sửa dữ liệu fixture và thực thi hai nhánh còn thiếu trước khi nghiệm thu chúng.
+
+**Techlead tiếp tục hỗ trợ T52, đầu ra `reports/sprint-12-electron-comparison-round-3.*`:**
+
+1. Giữ nguyên script/output hai lượt trước. Tạo probe riêng chỉ kiểm embedded/fallback; tái dùng phần thiết lập cần thiết, không chạy lại tám nhóm đã được QA chấp nhận, bộ Node hoặc bố cục T56.
+2. Event mô phỏng chuỗi khác phải có cả stopId và chainId khác đối tượng đang kiểm; thêm assertion xác nhận cả hai ID khác nhau trước emit. Giữ nguyên các assertion hành vi, đặc biệt khóa sau lỗi và mở lại sau xác minh hợp lệ. Không sửa renderer hay giảm điều kiện đạt để chữa ca probe.
+3. Xác nhận mỗi nhánh thực sự dùng embedded hoặc fallback và không lấy state từ cache chat. Sau lỗi API và render/event chuỗi khác, nút vẫn khóa; xác minh đúng stop/box cho phép mở lại theo assertion cũ. Báo kết quả riêng cho từng nhánh; nhánh chưa chạy phải ghi chưa kiểm.
+4. Chạy một lượt Electron có timeout (parent 60 giây, fixture 45 giây), cùng quyền hiện có và dữ liệu tạm. Ghi SHA, thay đổi fixture, kết quả/assertion từng nhánh, stdout/stderr, exit/signal; nếu vẫn lỗi thì lưu output và dừng, không thử lặp. Bản kiểm này kiểm chứng việc sửa fixture, không mặc định ca sẽ đạt.
+5. Bàn giao PM để QA đánh giá kết quả còn thiếu. QA không cần gộp nhánh cũ hoặc chạy lại bộ đã chấp nhận; xung đột queue của nhánh cũ không phủ định lần đọc bằng chứng vừa rồi.
+
+T52 vẫn Đang làm; T53/T55 giữ Chờ duyệt. Sprint 12 chưa đóng. PM chỉ ghi nhận nghiệm thu từng phần và giao bước tiếp; không chạy lại test hoặc sửa code/probe trong lượt này.
