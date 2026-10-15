@@ -120,3 +120,13 @@ QA xác nhận fixture tại dòng 214 đổi stopId nhưng giữ chainId, làm 
 5. Bàn giao PM để QA đánh giá kết quả còn thiếu. QA không cần gộp nhánh cũ hoặc chạy lại bộ đã chấp nhận; xung đột queue của nhánh cũ không phủ định lần đọc bằng chứng vừa rồi.
 
 T52 vẫn Đang làm; T53/T55 giữ Chờ duyệt. Sprint 12 chưa đóng. PM chỉ ghi nhận nghiệm thu từng phần và giao bước tiếp; không chạy lại test hoặc sửa code/probe trong lượt này.
+
+## PM nghiệm thu T52 — 2026-10-15, 10:08 ICT
+
+QA đã bàn giao review T52 và chấp nhận toàn bộ phạm vi kiểm tự động cùng UI trên fixture Electron: tám nhóm lượt 2 và embedded/fallback lượt 3. Hai ca cuối giữ khóa sau event khác chuỗi, mở sau xác minh đúng và không gửi thêm Tiếp tục; output lượt 3 exit 0, không lỗi hoặc timeout. Bộ Node trên `7b30ac8` đã đạt và qua marker cuối main harness. PM đối chiếu main `b7992dc`: chỉ thêm/sửa `reports/` so với nền đó, code sản phẩm và `check.js` không đổi.
+
+Bằng chứng: [lượt 2](sprint-12-electron-comparison-round-2.md), [lượt 3](sprint-12-electron-comparison-round-3.md), probe/JSON/stdout/stderr đi kèm và các báo cáo QA trước. QA xác nhận chỉ đọc trong lượt chốt; xung đột queue nhánh QA cũ không phải thay đổi cần gộp để ghi nhận nghiệm thu này.
+
+**Quyết định:** duyệt T52 bằng approval manual cho công việc QA đã hoàn tất. Không ghi thành nghiệm thu box thật: Electron/IPC và recovery BE thật; phản hồi thao tác được mô phỏng, chưa chạy agent thật, thao tác vật lý hoặc dùng dữ liệu box thật. Chưa kết luận nguyên nhân SIGABRT trong môi trường QA.
+
+T53/T55 tiếp tục Chờ duyệt, hồ sơ check hiện tại vẫn Đã kiểm theo app; chờ phản hồi End-User theo [danh sách thử trên box thật](sprint-12-user-check.md). Sau phản hồi, PM kiểm lại bằng chứng đúng task trước khi duyệt code. T51/T54/T56/T57 giữ Xong; Sprint 12 chưa đóng. Không cần gọi lại các agent để kiểm cùng bản đã nghiệm thu.
