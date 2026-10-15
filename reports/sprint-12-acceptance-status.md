@@ -53,7 +53,7 @@ Main `1b01c64` chỉ khác nền đã nghiệm thu `7b30ac8` ở hai báo cáo, 
 | --- | --- | --- |
 | T51 | Check `1b6a9f3d-49dc-498f-b4e1-e28e1f86e1fa`, exit 0, treeStable; review `6a15fb96-67d3-461f-8aa5-33f17d67fce5`. Đúng task/definitionRevision, cùng nguồn `e9982ab` và worktree dev-be. | Duyệt riêng phần BE đã được QA nghiệm thu tự động; gửi approval checks cho T51. Không dùng quyết định này để đóng T52 hoặc nghiệm thu UI. |
 | T55 | Check `3f402d3a-0e77-4d8e-ae47-412dfebd98d1`, exit 0, treeStable; review `a9f2c83d-0e5f-4e48-8180-cfc237a8dad4`. Đúng task/definitionRevision, cùng nguồn `e9982ab` và worktree techlead. | Đã đủ hồ sơ kiểm mới; giữ Chờ duyệt vì chưa có phản hồi bố cục trên box thật. |
-| T53 | Chưa nhận bàn giao/bằng chứng mới từ chủ task. | Giữ trạng thái hiện tại, chờ lượt FE đã giao; không gọi thêm lượt kiểm trùng. |
+| T53 | Check `0973e76b-d8ac-46a6-925b-e0f513d33dc8`, exit 0, 99,6 giây, treeStable; review `e70062bc-aafc-4fc3-bce1-84c93700fb91`. Đúng task/definitionRevision, cùng nguồn `e9982ab` và worktree dev-fe. | Đã nhận owner review, app xác nhận Đã kiểm; giữ Chờ duyệt, còn nghiệm thu Electron/box thật. Không chạy lại check chỉ để làm mới hồ sơ. |
 
 ### T52: đối chứng Electron bằng môi trường đã có quyền
 
@@ -69,3 +69,9 @@ PM đọc cấu hình hiện tại: QA dùng codex2 ở chế độ `edit`, tech
 4. Techlead gửi báo cáo cho PM; PM chuyển QA đọc bằng chứng và chốt phần còn thiếu. QA có thể đọc main/báo cáo mà không cần ghi Git. Xung đột nhánh QA cũ chưa được xử lý; việc đó không phải điều kiện để đọc kết quả vì các assertion QA đã có trong main. Không retry queue cũ để tìm lần gộp thành công.
 
 T52 vẫn Đang làm; Sprint 12 chưa đóng. Phép đối chứng này không thay thế nghiệm thu trên box thật. Lượt PM chỉ cập nhật báo cáo và gửi trạng thái duyệt T51, không chạy lại kiểm sản phẩm.
+
+### Tiếp tục sau giới hạn chuỗi — 2026-10-15, 09:35 ICT
+
+Người dùng đã tiếp tục chuỗi với PM. Trước khi giao phần còn dở, PM kiểm lại: main `72b737a` vẫn chỉ khác nền `7b30ac8` ở báo cáo; worktree techlead sạch tại `e9982ab`, chưa có `reports/sprint-12-electron-comparison.md` trong main hoặc worktree đó. Chưa nhận kết quả đối chứng Electron, nên chỉ tiếp tục bước này theo kế hoạch ở trên.
+
+T51 đã được app chuyển Xong. T53 và T55 có hồ sơ kiểm đúng task, giữ Chờ duyệt; T52 giữ Đang làm. PM gọi techlead thực hiện phép đối chứng còn thiếu, rồi nhận báo cáo để chuyển QA đánh giá. Không gọi lại BE/FE, không lặp bộ Node, không thay quyền QA và không gửi lại trạng thái các task đã hoàn tất.
