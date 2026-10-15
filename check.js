@@ -868,10 +868,11 @@ async function sprint11CoreChecks() {
   assert.notStrictEqual(b2.tasks[0].revision, b1.tasks[0].revision)
 
   // 3. validateTaskChanges gate
-  assert.throws(() => core.validateTaskChanges(b2, [{ id: 'T1', status: 'done', expectedRevision: b2.tasks[0].revision }], 'dev'), /approval/)
+  assert.throws(() => core.validateTaskChanges(b2, [{ id: 'T1', status: 'done', expectedRevision: b2.tasks[0].revision }], 'dev'), /Chỉ PM/)
   assert.throws(() => core.validateTaskChanges(b2, [{ id: 'T1', status: 'done', expectedRevision: b2.tasks[0].revision, approval: { kind: 'manual', reason: 'done' } }], 'dev'), /Chỉ PM/)
 
-  assert.throws(() => core.validateTaskChanges(b2, [{ id: 'T1', status: 'done', expectedRevision: b2.tasks[0].revision }], 'pm'), /approval/)
+  const bare = core.validateTaskChanges(b2, [{ id: 'T1', status: 'done', expectedRevision: b2.tasks[0].revision }], 'pm') // no evidence needed
+  assert.deepStrictEqual([bare[0].status, bare[0].approval.kind, bare[0].approval.reviewer], ['done', 'manual', 'pm'])
 
   const approved = core.validateTaskChanges(b2, [{ id: 'T1', status: 'done', expectedRevision: b2.tasks[0].revision, approval: { kind: 'manual', reason: 'đã nghiệm thu' } }], 'pm')
   assert.strictEqual(approved.length, 1)
@@ -887,7 +888,7 @@ async function sprint11CoreChecks() {
   assert.deepStrictEqual(pDoneValid.changes[0].approval.checkIds, ['00000000-0000-4000-8000-000000000001'])
 
   const pDoneNoApproval = core.parseTaskStatusBlock('Xong\n' + blk('[{"id":"T1","status":"done","expectedRevision":"r"}]'))
-  assert.ok(pDoneNoApproval.error)
+  assert.ok(!pDoneNoApproval.error && pDoneNoApproval.changes[0].approval === undefined) // closing needs no evidence
 
   // 5. parseRunCommandBlock with tasks array
   const cmdBlk = j => '```run-command\n' + j + '\n```'
@@ -902,7 +903,7 @@ async function sprint11CoreChecks() {
   // 6. PM prompt contains work distribution rules
   const pmPrompt = await core.promptIndexed(d, { name: 'pm', role: 'PM' }, null)
   assert.ok(pmPrompt.text.includes('Luật chia việc cho PM:'))
-  assert.ok(pmPrompt.text.includes('acceptance: "code" cho code sản phẩm, "manual"'))
+  assert.ok(pmPrompt.text.includes('để các agent gọi thẳng nhau') && !pmPrompt.text.includes('"approval"'))
 
   const devPrompt = await core.promptIndexed(d, { name: 'dev', role: 'Dev' }, null)
   assert.ok(!devPrompt.text.includes('Luật chia việc cho PM:'))
@@ -2773,16 +2774,17 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'agent-chat-git-'))), at = f => path.join(root, f)
   core.init(root)
   fs.writeFileSync(at('.chat/agents.json'), JSON.stringify(['dev-a', 'dev-b', 'dev-c', 'dev-r'].map(name =>
-    ({ name, cli: name === 'dev-r' ? 'claude' : 'codex', role: 'Dev', owns: name === 'dev-r' ? ['*.txt'] : ['*.txt', 'package.json'], resume: name === 'dev-r', allowedCommands: ['npm run check'],
+    ({ name, cli: name === 'dev-r' ? 'claude' : 'codex', role: 'Dev', owns: name === 'dev-r' ? ['*.txt'] : ['*.txt', 'package.json', 'guide.md'], resume: name === 'dev-r', allowedCommands: ['npm run check'],
       ...(name === 'dev-r' ? { sessionTokenLimit: 100 } : {}) }))))
   fs.writeFileSync(at('a.txt'), Array.from({ length: 10 }, (_, i) => `l${i}`).join('\n'))
   fs.writeFileSync(at('package.json'), JSON.stringify({ name: 'fixture', private: true, scripts: { check: 'node chk.js' } }))
   fs.writeFileSync(at('chk.js'), 'if (process.env.CHECK_SLOW_MS) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Number(process.env.CHECK_SLOW_MS))\n'
     + 'if (process.env.QA_FLIP_FILE) { const f = process.env.QA_FLIP_FILE, n = (Number(require("fs").existsSync(f) && require("fs").readFileSync(f, "utf8")) || 0) + 1; require("fs").writeFileSync(f, String(n)); if (n === 1) { console.error("lần đầu đỏ"); process.exit(1) } }\n'
-    + 'if (require("fs").readFileSync("a.txt", "utf8").includes("RED")) { console.error("check đỏ"); process.exit(1) }')
+    + 'if (process.env.CHECK_RED || require("fs").readFileSync("a.txt", "utf8").includes("RED")) { console.error("check đỏ"); process.exit(1) }')
+  fs.writeFileSync(at('guide.md'), '# hướng dẫn')
   fs.writeFileSync(at('.gitignore'), '.chat/\nnode_modules/\n'); fs.mkdirSync(at('node_modules')); fs.writeFileSync(at('node_modules/.keep'), '')
   const git = (...args) => execFileSync('git', ['-C', root, '-c', 'user.name=QA', '-c', 'user.email=qa@local', ...args], { encoding: 'utf8' })
-  git('init', '-q', '-b', 'main'); git('add', 'a.txt', 'package.json', 'chk.js', '.gitignore'); git('commit', '-q', '-m', 'init')
+  git('init', '-q', '-b', 'main'); git('add', 'a.txt', 'package.json', 'chk.js', '.gitignore', 'guide.md'); git('commit', '-q', '-m', 'init')
   fs.writeFileSync(path.join(userData, 'projects.json'), JSON.stringify([root]))
   fs.writeFileSync(path.join(userData, 'window.json'), JSON.stringify({ x: 50, y: 50, width: 800, height: 600, maximized: true }))
 
@@ -3291,6 +3293,12 @@ out({ type: 'result', subtype: 'success', is_error: false, result: text, session
     'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim()
   const onMain = agent => { try { git('merge-base', '--is-ancestor', branchHead(agent), 'main'); return true } catch { return false } }
   await waitFor('nhánh agent rảnh về main sau squash', () => ['dev-a', 'dev-b'].every(onMain))
+  // a turn that only touched docs merges without dependencies or checks (the check is red here)
+  process.env.CHECK_RED = '1'
+  await edit({ 'dev-a': [['guide.md', 1, 'ghi thêm']] }, '@dev-a ghi hướng dẫn')
+  entries = await settle(1, 'merge chỉ tài liệu')
+  delete process.env.CHECK_RED
+  assert.deepStrictEqual(entries.map(e => e.state), ['merged']); assert.ok(fs.readFileSync(at('guide.md'), 'utf8').includes('ghi thêm')); clean()
 
   // a slow merge check runs outside the git lock: another agent's turn still starts (send returns) and both merge
   process.env.CHECK_SLOW_MS = '4000'

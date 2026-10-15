@@ -101,6 +101,7 @@ const RULES = `Quy tắc nhóm:
 - Tin của End-User vẫn gọi mọi @ có trong tin; không có @ thì gọi PM.
 - @user là End-User (khách hàng): chỉ @user khi cần họ quyết định hoặc khi xong việc.
 - Nhận việc thì làm trong phạm vi đã giao; cần vượt phạm vi thì báo PM. Yêu cầu cụ thể của End-User có ưu tiên.
+- Xong phần mình thì gọi thẳng người làm bước kế (dev xong → @qa kiểm; QA thấy lỗi → gọi dev đó sửa; QA đạt → @pm đóng task). Không vòng qua PM chỉ để chuyển lời.
 - Ảnh trong chat viết dạng ![mô tả](đường dẫn tính từ thư mục dự án). Tin gọi bạn có ảnh thì mở ảnh bằng công cụ đọc file/xem ảnh của bạn trước khi trả lời. Muốn gửi ảnh (ví dụ ảnh chụp màn hình) thì lưu vào .chat/attachments/ rồi chèn ![mô tả](.chat/attachments/tên.png) vào tin.`
 
 const jsonLines = out => out.split('\n').flatMap(l => { try { return [JSON.parse(l)] } catch { return [] } })
@@ -1593,12 +1594,13 @@ function parseTaskChanges(changes, dir = '.') {
     if (!/^T[1-9][0-9]*$/.test(change.id) || !TASK_STATUSES.has(change.status) || typeof change.expectedRevision !== 'string' || ids.has(change.id))
       throw fail('INVALID', 'Yêu cầu cập nhật task không hợp lệ')
     ids.add(change.id)
-    if (change.status === 'done') {
-      const allowed = ['id', 'status', 'expectedRevision', 'approval']
+    if (change.status === 'done') { // approval is optional: given, main checks its evidence; left out, the PM's word closes it
+      const allowed = ['id', 'status', 'expectedRevision']
+      if (change.approval !== undefined) allowed.push('approval')
       if (change.reviewId !== undefined) allowed.push('reviewId')
       if (!sameKeys(change, allowed))
-        throw fail('INVALID', 'Đóng task bắt buộc kèm approval')
-      change.approval = parseApproval(change.approval, dir)
+        throw fail('INVALID', 'Yêu cầu cập nhật task không hợp lệ')
+      if (change.approval !== undefined) change.approval = parseApproval(change.approval, dir)
     } else {
       const allowed = ['id', 'status', 'expectedRevision']
       if (change.reviewId !== undefined) allowed.push('reviewId')
@@ -1631,7 +1633,7 @@ function validateTaskChanges(board, changes, actor, options = {}) {
     if (task.status !== change.status || (change.status === 'review' && change.reviewId && change.reviewId !== task.reviewId)) {
       const update = { id: task.id, createdAt: task.createdAt, assignee: task.assignee, status: change.status, eventId: randomUUID() }
       if (change.status === 'done') {
-        update.approval = { ...change.approval, reviewer: actor, at: new Date().toISOString() }
+        update.approval = { ...(change.approval || { kind: 'manual', reason: 'PM đóng task' }), reviewer: actor, at: new Date().toISOString() }
         if (change.reviewId) update.reviewId = change.reviewId
         else if (task.reviewId) update.reviewId = task.reviewId
       } else if (change.status === 'review') {
@@ -2082,14 +2084,15 @@ function taskContext(dir, agent, board) {
   const data = board.error ? `Bảng task chưa đọc được: ${board.error.message}. Không cập nhật task trong lượt này.`
     : `${isPm ? 'Task chưa xong của nhóm' : 'Task chưa xong của bạn'}: ${JSON.stringify(visible)}\nĐã xong ${done} task.`
   const protocol = isPm
-    ? `PM được đổi trạng thái mọi task (todo/doing/review), hoặc đóng task (done) kèm approval bằng chứng/nghiệm thu:\n\`\`\`task-status\n[{"id":"T1","status":"done","expectedRevision":"revision ở trên","approval":{"kind":"checks","checkIds":["UUID..."],"note":"ghi chú"}}]\nhoặc\n[{"id":"T2","status":"done","expectedRevision":"revision ở trên","approval":{"kind":"manual","reason":"lý do nghiệm thu","report":"reports/..."}}]\n\`\`\``
+    ? `PM được đổi trạng thái mọi task (todo/doing/review/done), đóng task không cần kèm bằng chứng:\n\`\`\`task-status\n[{"id":"T1","status":"done","expectedRevision":"revision ở trên"}]\n\`\`\``
     : `Muốn đổi trạng thái task của mình sau khi làm xong (todo/doing/review), thêm đúng một block cuối câu trả lời:\n\`\`\`task-status\n[{"id":"T1","status":"review","expectedRevision":"revision ở trên"}]\n\`\`\`\nChỉ PM được đóng task (done).`
   const pmRules = isPm
     ? local(dir, `\nLuật chia việc cho PM:
-- Mỗi việc có đầu ra, cách nghiệm thu (acceptance: "code" cho code sản phẩm, "manual" cho tài liệu/QA/thử tay), và người phụ trách rõ ràng.
+- Mỗi việc có đầu ra và người phụ trách rõ ràng. Giao việc thì nói luôn bước kế (vd: "@dev-be làm T1, xong gọi @qa kiểm"), để các agent gọi thẳng nhau.
+- Không gọi lại agent chỉ để xác nhận, nhắc lại hay chuyển lời; chỉ vào khi cần quyết định, đổi phạm vi hoặc đóng việc.
 - Việc nhỏ trong một chỗ giao một agent; chỉ chạy song song khi các việc độc lập và interface đã chốt.
 - Agent khác có thể review/research; việc phát sinh vượt phạm vi tạo task mới.
-- Khi tạo/sửa task: luôn đọc .chat/tasks.json mới nhất, giữ task cũ; ghi .chat/tasks.json.tmp rồi rename. Task mới dùng ID T tăng dần, ghi rõ acceptance. Cập nhật acceptance của task cũ trước khi duyệt.`) : ''
+- Khi tạo/sửa task: luôn đọc .chat/tasks.json mới nhất, giữ task cũ; ghi .chat/tasks.json.tmp rồi rename. Task mới dùng ID T tăng dần.`) : ''
   return `\n\n## Bảng task\n${data}\n${protocol}${pmRules}`
 }
 

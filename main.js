@@ -483,9 +483,7 @@ async function verifyTaskApproval(root, task, approval, actor) {
   if (actor.toLowerCase() !== 'pm') {
     return { ok: false, code: 'INVALID', message: 'Chỉ PM được đóng task' }
   }
-  if (!approval || !approval.kind) {
-    return { ok: false, code: 'INVALID', message: 'Đóng task bắt buộc kèm approval' }
-  }
+  if (!approval) return { ok: true } // closing needs no evidence; one the PM attaches is still checked below
   if (approval.kind === 'manual') {
     const registry = readWorktrees(root)
     const hasWorktree = core.projectSettings(root).settings.worktreesEnabled
@@ -1240,7 +1238,7 @@ async function processMerge(root, id) {
   if (!owner) return refuse('CHECK_NOT_ALLOWED', 'Agent sở hữu nhánh không còn trong nhóm')
   for (const command of entry.checks) if (!owner.allowedCommands.includes(command)) return refuse('CHECK_NOT_ALLOWED', `Lệnh "${command}" không còn được phép`)
   const integration = managedPath(root, 'integration', id)
-  let probe, requeued = false, checkRecord = null, commandsRun = []
+  let probe, requeued = false, checkRecord = null, commandsRun = [], docsOnly = false
   try {
     currentPhase = 'merge'
     // 1. under the git lock: merge the branch into a throwaway integration worktree
@@ -1272,9 +1270,12 @@ async function processMerge(root, id) {
         throw e
       }
       // a branch whose changes main already has (squashed earlier, or the agent merged main and kept nothing new)
-      if (!(await git(integration, ['diff', '--cached', '--name-only'])).stdout.trim()) { await removeIntegration(root, entry); return alreadyMerged() }
+      const staged = nul((await git(integration, ['diff', '--cached', '--name-only', '-z'])).stdout)
+      if (!staged.length) { await removeIntegration(root, entry); return alreadyMerged() }
+      // reports and notes can't break the build: no install, no checks (CHANGELOG.md is checked against package.json)
+      docsOnly = staged.every(file => file.startsWith('reports/') || (file.endsWith('.md') && file !== 'CHANGELOG.md'))
       currentPhase = 'dependencies'
-      if (!await bootstrapDependencies(root, integration)) throw gitError('NEEDS_DEPS', 'Integration worktree chưa có dependency phù hợp')
+      if (!docsOnly && !await bootstrapDependencies(root, integration)) throw gitError('NEEDS_DEPS', 'Integration worktree chưa có dependency phù hợp')
       await git(integration, ['-c', 'user.name=Agent Chat', '-c', 'user.email=agent-chat@local', 'commit', '-m', entry.subject || `${entry.agent} · Cập nhật`,
         '-m', `Agent-Chat-Queue: ${entry.id}`])
       const candidateSha = await gitHead(integration)
@@ -1290,7 +1291,7 @@ async function processMerge(root, id) {
     const startedAt = new Date().toISOString()
     let mergeFailed = null
     try {
-      for (const command of entry.checks) {
+      for (const command of docsOnly ? [] : entry.checks) {
         const timer = setTimeout(() => controller.abort('timeout'), core.timeoutMinutes(owner) * 60000)
         let result
         try {
@@ -1353,8 +1354,7 @@ async function processMerge(root, id) {
       treeStable,
       commands: commandsRun
     }
-    appendVerificationRecord(root, checkRecord)
-    notifyProjectChanged(root, { tasks: true })
+    if (!docsOnly) { appendVerificationRecord(root, checkRecord); notifyProjectChanged(root, { tasks: true }) } // no commands ran: not evidence
     if (mergeFailed) throw mergeFailed
     currentPhase = 'publish'
     // 3. under the lock again: publish only if the target branch hasn't moved since step 1
