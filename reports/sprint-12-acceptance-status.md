@@ -75,3 +75,17 @@ T52 vẫn Đang làm; Sprint 12 chưa đóng. Phép đối chứng này không t
 Người dùng đã tiếp tục chuỗi với PM. Trước khi giao phần còn dở, PM kiểm lại: main `72b737a` vẫn chỉ khác nền `7b30ac8` ở báo cáo; worktree techlead sạch tại `e9982ab`, chưa có `reports/sprint-12-electron-comparison.md` trong main hoặc worktree đó. Chưa nhận kết quả đối chứng Electron, nên chỉ tiếp tục bước này theo kế hoạch ở trên.
 
 T51 đã được app chuyển Xong. T53 và T55 có hồ sơ kiểm đúng task, giữ Chờ duyệt; T52 giữ Đang làm. PM gọi techlead thực hiện phép đối chứng còn thiếu, rồi nhận báo cáo để chuyển QA đánh giá. Không gọi lại BE/FE, không lặp bộ Node, không thay quyền QA và không gửi lại trạng thái các task đã hoàn tất.
+
+### Kết quả đối chứng đầu tiên và lượt kiểm kế tiếp — 2026-10-15, 09:44 ICT
+
+PM đã đọc [báo cáo techlead](sprint-12-electron-comparison.md) và JSON/output tại worktree techlead. Nguồn `72b737a`, Electron 44.4.5: vào JavaScript và fixture, exit 1 sau 1.098 giây, signal null, stderr rỗng. `result.results` rỗng; lỗi `An object could not be cloned` xảy ra trong thiết lập probe, chưa chạy assertion UI. Vì vậy chỉ ghi nhận Electron đã khởi tạo được trong bối cảnh này; **chưa có ca UI đạt và chưa kết luận nguyên nhân SIGABRT của QA**.
+
+Techlead tiếp tục hỗ trợ T52, giữ phạm vi probe/bằng chứng trong `reports/`:
+
+1. Giữ nguyên probe và output lần đầu để QA đối chiếu. Tạo bản lượt 2 với tên `reports/sprint-12-electron-comparison-2.cjs` cùng báo cáo/JSON/stdout/stderr mang hậu tố `-2`.
+2. Sửa giá trị trả về của đoạn thiết lập `executeJavaScript` thành giá trị có thể sao chép, theo lỗi đã xác định trong báo cáo. Rà các đoạn thiết lập/thu kết quả còn lại để không trả function hoặc đối tượng DOM qua cầu nối; giữ nguyên assertion và dữ liệu recovery. Không sửa code sản phẩm hoặc nới điều kiện đạt để vượt lỗi thiết lập.
+3. Sau khi sửa, được chạy **một lượt Electron mới**, parent timeout 60 giây và fixture timeout 45 giây, cùng quyền hiện có và dữ liệu tạm. Đây là bước tiếp theo đã được PM giao; không cần xin thêm phép để chạy probe đã sửa. Không chạy lại bộ Node hay bố cục T56 đã đạt.
+4. Báo rõ từng ca thực sự chạy trong các nhóm Tiếp tục/Kiểm tra lại ở kế hoạch phía trên; ghi cả phần chưa kiểm. Phân biệt payload recovery BE thật với handler được thay để tạo lỗi/chậm. Giữ kiểm tra seq, bấm trùng, giữ lỗi qua render, kiểm tra lại đúng stop/box, cache/embedded/fallback và đổi box.
+5. Gặp lỗi/timeout thì lưu output và dừng lượt kiểm; phân loại lỗi probe hay sản phẩm theo bằng chứng. PM nhận kết quả rồi giao QA đánh giá độc lập; không cần QA chạy lại phép đối chứng chỉ để xác nhận đã nhận báo cáo.
+
+T52 vẫn Đang làm; T53/T55 giữ Chờ duyệt. Bằng chứng khởi tạo Electron không thay thế thử UI hoặc box thật. Lượt PM chỉ cập nhật điều phối; không chạy lại kiểm sản phẩm và không thay trạng thái task.
