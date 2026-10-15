@@ -1,0 +1,78 @@
+{
+  "source": "b2fd22174853972e253e42e7e8caf3328797f1f9",
+  "startedAt": "2026-10-15T02:46:40.458Z",
+  "durationMs": 1346,
+  "binary": "/Users/namanh/Library/Application Support/Agent Chat/worktrees/3ced195b5bc66b7d24fda40a16c70bf6b7a031d998ce9c9b359432e9ff40815e/agents/aa434505-5ad9-44f8-8f65-2a9b8aed19c9/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron",
+  "realBinary": "/Users/namanh/Library/Application Support/Agent Chat/worktrees/3ced195b5bc66b7d24fda40a16c70bf6b7a031d998ce9c9b359432e9ff40815e/agents/aa434505-5ad9-44f8-8f65-2a9b8aed19c9/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron",
+  "electronPackage": "44.4.5",
+  "node": "v26.8.1",
+  "platform": "darwin",
+  "arch": "arm64",
+  "shellOverride": "/nonexistent",
+  "timeoutMs": 60000,
+  "permissionContext": "techlead / danger-full-access (existing permissions)",
+  "exitCode": 1,
+  "signal": null,
+  "error": null,
+  "enteredJavaScript": true,
+  "enteredFixture": true,
+  "result": {
+    "electron": "44.4.5",
+    "chrome": "152.0.7977.130",
+    "results": [
+      {
+        "name": "Recovery BE thật -> interrupted/canContinue:true; hai nút bật",
+        "ok": true,
+        "info": {
+          "seq": 3,
+          "phase": "interrupted",
+          "canContinue": true
+        }
+      },
+      {
+        "name": "Bấm trùng chat/Cần bạn chỉ gửi một request đúng seq",
+        "ok": true,
+        "info": {
+          "messageId": 3
+        }
+      },
+      {
+        "name": "Lỗi API giữ qua render/event khác stop; chat và Cần bạn cùng khóa",
+        "ok": true,
+        "info": null
+      },
+      {
+        "name": "Kiểm tra lại sai stop/box hoặc lỗi không mở khóa",
+        "ok": true,
+        "info": null
+      },
+      {
+        "name": "Xác nhận mới false vẫn khóa; true mở cả hai; lỗi từ chat cũng giữ",
+        "ok": true,
+        "info": null
+      },
+      {
+        "name": "Kiểm tra lại đúng stop cùng revision mở cả hai, chưa chạy agent",
+        "ok": true,
+        "info": null
+      },
+      {
+        "name": "Response thành công hiển thị Đã tiếp tục ở cả hai nơi",
+        "ok": true,
+        "info": null
+      },
+      {
+        "name": "Đổi box: response cũ không ghi lỗi vào cùng seq ở box mới",
+        "ok": true,
+        "info": null
+      },
+      {
+        "name": "Cần bạn embedded/fallback giữ lỗi khi không có cache chat",
+        "ok": false,
+        "error": "AssertionError [ERR_ASSERTION]: The expression evaluated to a falsy value:\n\n  assert.ok(await js('!__needButton().disabled'))\n\n    at /private/var/folders/ds/0l2v3ms536b56_rjpb204xb80000gn/T/agent-chat-s12-electron-eMEnlu/app/probe-entry.cjs:157:59\n    at async check (/private/var/folders/ds/0l2v3ms536b56_rjpb204xb80000gn/T/agent-chat-s12-electron-eMEnlu/app/probe-entry.cjs:21:24)\n    at async electronEntry (/private/var/folders/ds/0l2v3ms536b56_rjpb204xb80000gn/T/agent-chat-s12-electron-eMEnlu/app/probe-entry.cjs:146:5)"
+      }
+    ],
+    "errors": [],
+    "error": "AssertionError [ERR_ASSERTION]: The expression evaluated to a falsy value:\n\n  assert.ok(await js('!__needButton().disabled'))\n\n    at /private/var/folders/ds/0l2v3ms536b56_rjpb204xb80000gn/T/agent-chat-s12-electron-eMEnlu/app/probe-entry.cjs:157:59\n    at async check (/private/var/folders/ds/0l2v3ms536b56_rjpb204xb80000gn/T/agent-chat-s12-electron-eMEnlu/app/probe-entry.cjs:21:24)\n    at async electronEntry (/private/var/folders/ds/0l2v3ms536b56_rjpb204xb80000gn/T/agent-chat-s12-electron-eMEnlu/app/probe-entry.cjs:146:5)"
+  }
+}
