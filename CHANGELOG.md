@@ -1,5 +1,23 @@
 # Các thay đổi
 
+## 0.10.0 · 2026-10-15
+
+### Mới
+- Box nào có agent đang chạy thì dấu # trước tên ở sidebar (và trong ⌘K) thành chấm xanh nhấp nháy; rê chuột để xem số agent đang chạy.
+- Chuỗi agent tự dừng sau 3 lượt liên tiếp không đổi code hay trạng thái task (chỉ chat qua lại), ngoài giới hạn số lượt và trần chi phí. Thẻ dừng ghi lý do và ai đang chờ; nút **Tiếp tục** chỉ chạy phần chưa chạy, kể cả khi app bị tắt giữa chừng.
+- Lỗi gộp nhánh có phần chi tiết: giai đoạn, loại lỗi, file, lệnh lỗi và trích log.
+- Nút **Lấy main (sao lưu nhánh)** cho mục gộp bị kẹt khi phần cần giữ đã có trên main: nhánh của agent được lưu sang nhánh sao lưu, có xác nhận trước.
+
+### Thay đổi
+- Quy trình nhóm gọn hơn: PM đóng task không cần kèm bằng chứng; agent gọi thẳng người làm bước kế (dev → qa → pm), PM không chuyển lời.
+- Lượt chỉ đổi `reports/` hoặc file `.md` được gộp ngay, không chạy check.
+- Mỗi nhánh chỉ có một mục trong hàng chờ gộp: lượt không đổi gì không tạo thêm mục trùng. Tin agent bị lặp không gọi người nhận hai lần.
+- Bảng task: tên tối đa hai dòng, người nhận ở dòng dưới.
+- Tự tóm tắt lịch sử chạy nhanh hơn; bản tóm tắt quá dài được cắt bớt thay vì báo lỗi rồi chạy lại sau mỗi lượt (PM "tự chạy mà không trả lời").
+
+### Sửa lỗi
+- Không còn lỗi "Object has been destroyed" khi đổi giao diện sáng/tối sau khi đóng cửa sổ.
+
 ## 0.9.0 · 2026-10-14
 
 ### Mới
